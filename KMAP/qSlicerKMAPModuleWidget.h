@@ -54,6 +54,8 @@ public:
   // void setNodeSelectorEnabled(qMRMLNodeComboBox* selector, bool enabled);
   // static std::map<std::string, vtkIdType> GetStudyAndPatientAncestors(vtkMRMLSubjectHierarchyNode* shNode, vtkIdType volumeNodeId);
 
+  void enter() override;
+  void exit() override;
   void setMRMLScene(vtkMRMLScene* scene) override;
 
 public slots:
@@ -68,6 +70,7 @@ public slots:
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
+  bool IsActive{false};
 
 private:
   Q_DECLARE_PRIVATE(qSlicerKMAPModuleWidget);

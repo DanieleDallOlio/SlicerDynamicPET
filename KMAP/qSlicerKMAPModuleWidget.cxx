@@ -86,7 +86,6 @@ void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
 
   vtkIdType currentSelectedID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   int currentIndex = this->PatSelector->currentIndex();
-  std :: cout << "currentIndex=" << currentIndex << std :: endl;
   if (currentIndex >= 0)
   {
     currentSelectedID = this->PatSelector->itemData(currentIndex).value<vtkIdType>();
@@ -121,7 +120,6 @@ void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
     }
 
     std::vector<vtkIdType> children;
-    std ::cout << "populatePatientComboBox" << std :: endl;
     shNode->GetItemChildren(itemID, children);
     for (vtkIdType childID : children)
     {
@@ -152,8 +150,8 @@ void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
 
   this->PatSelector->blockSignals(false);  // Re-enable signals
 
-  std :: cout << "restoredIndex=" <<restoredIndex<<std::endl;
-  this->populateStudyComboBox(restoredIndex);
+  vtkIdType passonID = restoredIndex>0 ? currentSelectedID : vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  this->populateStudyComboBox(passonID);
 
   return;
 }
@@ -214,7 +212,6 @@ void qSlicerKMAPModuleWidgetPrivate::populateStudyComboBox(vtkIdType patientID)
 
   // Retrieve the children of the given patient
   std::vector<vtkIdType> children;
-  std ::cout << "populateStudyComboBox - ID:" << patientID << std :: endl;
   shNode->GetItemChildren(patientID, children);
 
   // Index to restore, default to the "None" option, which is at index 0
@@ -242,18 +239,19 @@ void qSlicerKMAPModuleWidgetPrivate::populateStudyComboBox(vtkIdType patientID)
   this->StuSelector->setCurrentIndex(restoredIndex);
   this->StuSelector->blockSignals(false);
 
+  vtkIdType passonID = restoredIndex>0 ? currentSelectedStudyID : vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->populateNodeComboBox(this->CTSelector,
-                             restoredIndex,
+                             passonID,
                              "vtkMRMLScalarVolumeNode",
                              "CT"
                             );
   this->populateNodeComboBox(this->PETSelector,
-                             restoredIndex,
+                             passonID,
                              "vtkMRMLScalarVolumeNode",
                              "PT"
                             );
   this->populateNodeComboBox(this->SegSelector,
-                             restoredIndex,
+                             passonID,
                              "vtkMRMLSegmentationNode",
                              ""
                             );
@@ -337,7 +335,6 @@ void qSlicerKMAPModuleWidgetPrivate::populateNodeComboBox(
     }
 
     std::vector<vtkIdType> children;
-    std ::cout << "populateNodeComboBox" << std :: endl;
     shNode->GetItemChildren(itemID, children);
     for (vtkIdType childID : children)
     {
@@ -350,7 +347,8 @@ void qSlicerKMAPModuleWidgetPrivate::populateNodeComboBox(
   comboBox->blockSignals(false);
 
   if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
-    this->populateSegmentCheckboxes(restoredIndex);
+    vtkIdType passonID = restoredIndex>0 ? currentSelectedItemID : vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    this->populateSegmentCheckboxes(passonID);
   }
 }
 
@@ -524,6 +522,31 @@ qSlicerKMAPModuleWidget::~qSlicerKMAPModuleWidget()
 // }
 
 
+void qSlicerKMAPModuleWidget::enter()
+{
+  this->IsActive = true;
+  this->Superclass::enter();
+
+  // Optional: force refresh when the user enters the module
+  this->onSubjectHierarchyChanged();
+}
+
+void qSlicerKMAPModuleWidget::exit()
+{
+  this->IsActive = false;
+  this->Superclass::exit();
+}
+
+
+void qSlicerKMAPModuleWidget::onSubjectHierarchyChanged() {
+  if (!this->IsActive)
+  {
+    return;  // Don't do anything if the module is not active
+  }
+  Q_D(qSlicerKMAPModuleWidget);
+  d->populatePatientComboBox();
+}
+
 void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->Superclass::setMRMLScene(scene);
   Q_D(qSlicerKMAPModuleWidget);
@@ -541,13 +564,9 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
                       this, SLOT(onSubjectHierarchyChanged()));
   }
 
-  d->populatePatientComboBox();
 }
 
-void qSlicerKMAPModuleWidget::onSubjectHierarchyChanged() {
-  Q_D(qSlicerKMAPModuleWidget);
-  d->populatePatientComboBox();
-}
+
 
 void qSlicerKMAPModuleWidget::onPatChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
@@ -563,7 +582,6 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
 
 
   this -> patID = d->PatSelector->itemData(index).value<vtkIdType>();
-  std :: cout << "onPatChanged - ID:" << this -> patID << std :: endl;
   d->populateStudyComboBox(this -> patID);
   if (this -> patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   {
@@ -624,7 +642,6 @@ void qSlicerKMAPModuleWidget::onStuChanged (int index) {
 
 void qSlicerKMAPModuleWidget::onCTChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
-  std::cout << "ehi1" << std ::endl;
   if (!this->mrmlScene() || this->mrmlScene()->IsBatchProcessing())
   {
     return;
@@ -643,14 +660,13 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
   }
 
   std :: string name = this->SubjectHierarchyNode->GetItemName(this -> ctID);
-  std::cout << "CT: " << name
-            << ", ID: " << this -> ctID << std::endl;
+  // std::cout << "CT: " << name
+  //           << ", ID: " << this -> ctID << std::endl;
 }
 
 
 void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
-  std::cout << "ehi2" << std ::endl;
   if (!this->mrmlScene() || this->mrmlScene()->IsBatchProcessing())
   {
     return;
@@ -669,13 +685,12 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   }
 
   std :: string name = this->SubjectHierarchyNode->GetItemName(this -> petID);
-  std::cout << "PET: " << name
-            << ", ID: " << this -> petID << std::endl;
+  // std::cout << "PET: " << name
+  //           << ", ID: " << this -> petID << std::endl;
 }
 
 void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
-  std::cout << "ehi3" << std ::endl;
   if (!this->mrmlScene() || this->mrmlScene()->IsBatchProcessing())
   {
     return;
@@ -695,8 +710,8 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   }
 
   std :: string name = this->SubjectHierarchyNode->GetItemName(this -> segID);
-  std::cout << "Seg: " << name
-            << ", ID: " << this -> segID << std::endl;
+  // std::cout << "Seg: " << name
+  //           << ", ID: " << this -> segID << std::endl;
 }
 
 void qSlicerKMAPModuleWidget::onSegmentsChanged()
@@ -737,13 +752,13 @@ void qSlicerKMAPModuleWidget::onSegmentsChanged()
     return;
   }
   // Print to console
-  std::cout << "Selected segments:" << std::endl;
-
-  for (const QString& id : selectedSegmentIDs)
-  {
-    std::string segmentName = segmentation->GetSegment(id.toStdString())->GetName();
-    std::cout << segmentName << " - " << id.toStdString() << std::endl;
-  }
+  // std::cout << "Selected segments:" << std::endl;
+  //
+  // for (const QString& id : selectedSegmentIDs)
+  // {
+  //   std::string segmentName = segmentation->GetSegment(id.toStdString())->GetName();
+  //   std::cout << segmentName << " - " << id.toStdString() << std::endl;
+  // }
 
   d->TACbutton->setEnabled(true);
 }

@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>qSlicerKMAPModuleWidget</class>
+ <widget class="qSlicerWidget" name="qSlicerKMAPModuleWidget">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>413</width>
+    <height>579</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>KMAP</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+      <widget class="ctkCollapsibleButton" name="inputsCollapsibleButton">
+        <property name="text">
+         <string>Inputs</string>
+        </property>
+        <layout class="QFormLayout" name="formLayout_1">
+          <item row="0" column="0">
+           <widget class="QLabel" name="label1">
+            <property name="text">
+             <string>Patient:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QComboBox" name="PatSelector">
+             <property name="toolTip">
+              <string>Choose Patient.</string>
+             </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="label2">
+            <property name="text">
+             <string>Study:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QComboBox" name="StuSelector">
+             <property name="toolTip">
+              <string>Choose Study.</string>
+             </property>
+           </widget>
+          </item>
+          <item row="2" column="0">
+           <widget class="QLabel" name="label3">
+            <property name="text">
+             <string>CT:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <widget class="QComboBox" name="CTSelector">
+            <property name="toolTip">
+             <string>Choose CT.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="label4">
+            <property name="text">
+             <string>PET:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+           <widget class="QComboBox" name="PETSelector">
+            <property name="toolTip">
+             <string>Choose PET.</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="0">
+           <widget class="QLabel" name="labseg">
+            <property name="text">
+             <string>Segmentation:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="4" column="1">
+           <widget class="QComboBox" name="SegSelector">
+             <property name="toolTip">
+              <string>Choose Segmentation.</string>
+             </property>
+           </widget>
+          </item>
+          <item row="5" column="0">
+           <widget class="QLabel" name="labsegments">
+            <property name="text">
+             <string>Segments:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="5" column="1">
+            <widget class="QScrollArea" name="SegmentCheckScrollArea">
+             <property name="widgetResizable">
+              <bool>true</bool>
+             </property>
+             <property name="maximumHeight">
+               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+             </property>
+             <widget class="QWidget" name="SegmentCheckContents">
+               <property name="styleSheet">
+                 <string notr="true">background-color: white;</string>
+               </property>
+              <layout class="QVBoxLayout" name="segmentCheckLayout"/>
+             </widget>
+            </widget>
+          </item>
+        </layout>
+      </widget>
+    </item>
+    <item>
+     <widget class="QPushButton" name="TACbutton">
+      <property name="enabled">
+       <bool>false</bool>
+      </property>
+      <property name="toolTip">
+       <string>Get Time-Activity-Curve.</string>
+      </property>
+      <property name="text">
+       <string>TAC</string>
+      </property>
+      <property name="default">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+  </layout>
+ </widget>
+ <customwidgets>
+  <customwidget>
+   <class>qSlicerWidget</class>
+   <extends>QWidget</extends>
+   <header>qSlicerWidget.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>ctkCollapsibleButton</class>
+   <extends>QWidget</extends>
+   <header>ctkCollapsibleButton.h</header>
+   <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>qMRMLNodeComboBox</class>
+   <extends>QWidget</extends>
+   <header>qMRMLNodeComboBox.h</header>
+  </customwidget>
+  <!-- <customwidget>
+   <class>qSlicerKMAPFooBarWidget</class>
+   <extends>QWidget</extends>
+   <header>qSlicerKMAPFooBarWidget.h</header>
+   <container>1</container>
+  </customwidget> -->
+ </customwidgets>
+ <resources/>
+ <connections/>
+ <!-- <connections>
+   <connection>
+   <sender>qSlicerKMAPModuleWidget</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>CTSelector</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+   </connection>
+  <connection>
+  <sender>qSlicerKMAPModuleWidget</sender>
+  <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+  <receiver>PETSelector</receiver>
+  <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
+  <connection>
+   <sender>qSlicerKMAPModuleWidget</sender>
+   <signal>mrmlSceneChanged(vtkMRMLScene*)</signal>
+   <receiver>SegSelector</receiver>
+   <slot>setMRMLScene(vtkMRMLScene*)</slot>
+  </connection>
+</connections> -->
+</ui>

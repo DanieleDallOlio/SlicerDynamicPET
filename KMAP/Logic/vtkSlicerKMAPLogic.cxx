@@ -81,3 +81,57 @@ void vtkSlicerKMAPLogic
 ::OnMRMLSceneNodeRemoved(vtkMRMLNode* vtkNotUsed(node))
 {
 }
+
+
+void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID, vtkIdType petID, vtkIdType segID, std::vector<QString> segmentsID)
+{
+  vtkMRMLScene* scene = this->GetMRMLScene();
+  if (scene==nullptr) {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+  if (!shNode) {
+    return;
+  }
+  // Fetch CT
+  vtkMRMLScalarVolumeNode* ctNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(ctID));
+  if (!ctNode) {
+    return;
+  }
+  std :: cout << ctID << std :: endl;
+  std :: string name = shNode->GetItemName(ctID);
+  std::cout << "CT: " << name
+            << ", ID: " << ctID << std::endl;
+  // Fetch PET
+  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(petID));
+  if (!petNode) {
+    return;
+  }
+  name = shNode->GetItemName(petID);
+  std::cout << "PET: " << name
+            << ", ID: " << petID << std::endl;
+  // Fetch Segmentation
+  vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(segID));
+  if (!segNode) {
+    return;
+  }
+  name = shNode->GetItemName(segID);
+  std::cout << "SEG: " << name
+            << ", ID: " << segID << std::endl;
+  // Fetch segments
+  vtkSegmentation* seg = segNode->GetSegmentation();
+  if (!seg) {
+    return;
+  }
+  if (segmentsID.empty()) {
+    return;
+  }
+  std::cout << "Selected segments:" << std::endl;
+  for (const QString& id : segmentsID)
+  {
+    std::string segmentName = seg->GetSegment(id.toStdString())->GetName();
+    std::cout << segmentName << " - " << id.toStdString() << std::endl;
+  }
+  // Temporary print-out
+  std :: cout << "Ready for next step!" << std :: endl;
+}

@@ -33,7 +33,11 @@
 #include <cstdlib>
 
 #include "vtkSlicerKMAPModuleLogicExport.h"
-
+#include "vtkMRMLSubjectHierarchyNode.h"
+#include <vtkMRMLScalarVolumeNode.h>
+#include <vtkMRMLSegmentationNode.h>
+#include <vtkSegmentation.h>
+#include <QPointer>
 
 class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
   public vtkSlicerModuleLogic
@@ -43,7 +47,7 @@ public:
   static vtkSlicerKMAPLogic *New();
   vtkTypeMacro(vtkSlicerKMAPLogic, vtkSlicerModuleLogic);
   void PrintSelf(ostream& os, vtkIndent indent) override;
-
+  void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments);
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

@@ -26,15 +26,15 @@
 #include <vtkCollection.h>
 #include <vtkSmartPointer.h>
 #include <vtkMRMLScene.h>
-#include <vtkMRMLScalarVolumeNode.h>
 #include <vtkStringArray.h>
 #include <vtkMRMLScalarVolumeNode.h>
+#include <vtkMRMLSegmentationNode.h>
 #include <vtkMRMLSubjectHierarchyNode.h>
 #include <vector>
 #include <QPointer>
 #include <QCheckBox.h>
-#include <vtkMRMLSegmentationNode.h>
 #include <vtkSegmentation.h>
+#include <vtkSlicerKMAPLogic.h>
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;
@@ -66,6 +66,7 @@ public slots:
   void onPETChanged(int index);
   void onSegChanged(int index);
   void onSegmentsChanged();
+  void enableTACbutton();
   void onTACbutton();
 
 protected:

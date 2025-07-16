@@ -35,6 +35,11 @@
 #include <QCheckBox.h>
 #include <vtkSegmentation.h>
 #include <vtkSlicerKMAPLogic.h>
+#include <QProgressBar.h>
+
+#include <ctkDICOMDatabase.h>
+#include <qSlicerApplication.h>
+#include <dcmtk/dcmdata/dctk.h>
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;
@@ -57,6 +62,7 @@ public:
   void enter() override;
   void exit() override;
   void setMRMLScene(vtkMRMLScene* scene) override;
+  void getDurations();
 
 public slots:
   void onSubjectHierarchyChanged();
@@ -79,6 +85,11 @@ private:
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
   std::vector<QString> segmentIDs;
+  std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
+  std::map<std::string, std::string> segmentTACsnames;
+  QProgressBar* ProgressBar;
+  std::vector<double> timePoints, durations;
+
 };
 
 #endif

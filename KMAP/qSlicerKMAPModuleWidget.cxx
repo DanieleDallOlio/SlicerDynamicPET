@@ -21,6 +21,7 @@
 // Slicer includes
 #include "qSlicerKMAPModuleWidget.h"
 #include "ui_qSlicerKMAPModuleWidget.h"
+#include <QApplication>
 
 
 
@@ -545,6 +546,10 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  this->ProgressBar = new QProgressBar();
+  this->ProgressBar->setObjectName(QString::fromUtf8("ProgressBar"));
+  this->ProgressBar->setMaximum(100);
+  this->ProgressBar->setValue(0);
   d->init();
 }
 
@@ -603,6 +608,23 @@ qSlicerKMAPModuleWidget::~qSlicerKMAPModuleWidget()
 // }
 
 
+// void qSlicerKMAPModuleWidget::showProgressBar()
+// {
+//   this->ui->progressBar->setVisible(true);
+//   this->ui->progressBar->setValue(0);
+// }
+//
+// void qSlicerKMAPModuleWidget::updateProgress(double progress)
+// {
+//   this->ui->progressBar->setValue(static_cast<int>(progress * 100.0));
+//   qApp->processEvents(); // To force GUI update
+// }
+//
+// void qSlicerKMAPModuleWidget::hideProgressBar()
+// {
+//   this->ui->progressBar->setVisible(false);
+// }
+
 void qSlicerKMAPModuleWidget::enter()
 {
   this->IsActive = true;
@@ -643,6 +665,104 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
                       this, SLOT(onSubjectHierarchyChanged()));
     this->qvtkConnect(this->SubjectHierarchyNode, vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemModifiedEvent,
                       this, SLOT(onSubjectHierarchyChanged()));
+  }
+
+}
+
+void qSlicerKMAPModuleWidget::getDurations()
+{
+  if (!this->durations.empty() || !this->timePoints.empty()) {
+    return;
+  }
+
+  Q_D(qSlicerKMAPModuleWidget);
+  vtkMRMLScene* scene = this->mrmlScene();
+  if (!scene) {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+  if (!shNode)
+  {
+    return;
+  }
+
+  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(this->petID));
+  if (!petNode) {
+    this->durations.clear();
+    this->timePoints.clear();
+    return;
+  }
+
+  ctkDICOMDatabase* db = qSlicerApplication::application()->dicomDatabase();
+  QString instanceUID = petNode->GetAttribute("DICOM.instanceUIDs");
+  QString seriesUID = db->seriesForFile(db->fileForInstance(instanceUID));
+  QStringList fileList = db->filesForSeries(seriesUID);
+
+  std::map<double, double> timeSorteddurations;
+  for (const QString& file : fileList)
+  {
+    DcmFileFormat fileformat;
+    OFCondition status = fileformat.loadFile(file.toStdString().c_str(), EXS_Unknown, EGL_noChange, DCM_MaxReadLength, ERM_autoDetect);
+
+    if (!status.good())
+    {
+      std::cerr << "Cannot read file: " << file.toStdString() << std::endl;
+      continue;
+    }
+
+    DcmDataset* dataset = fileformat.getDataset();
+
+    // 1. Get acquisition datetime
+    OFString acqTimeStr;
+    if (dataset->findAndGetOFString(DCM_AcquisitionDateTime, acqTimeStr).bad())
+    {
+      std::cerr << "Missing AcquisitionDateTime" << std::endl;
+      continue;
+    }
+
+    // Convert to sortable float seconds since start
+    struct tm tmTime = {};
+    const char* dateTimeCStr = acqTimeStr.c_str();
+    if (!strptime(dateTimeCStr, "%Y%m%d%H%M%S", &tmTime))
+    {
+      std::cerr << "Failed to parse time: " << dateTimeCStr << std::endl;
+      continue;
+    }
+    time_t epochTime = mktime(&tmTime);
+    double timeInSeconds = static_cast<double>(epochTime);
+
+    // 2. Get frame duration
+    double durationSec = -1.0;
+
+    Float64 durVal;
+    if (dataset->findAndGetFloat64(DcmTagKey(0x0018, 0x1242), durVal).good())
+    {
+      durationSec = durVal / 1000.0;
+    }
+    else if (dataset->findAndGetFloat64(DcmTagKey(0x0067, 0x1004), durVal).good())
+    {
+      durationSec = durVal;  // already in seconds
+    }
+    else
+    {
+      std::cerr << "No known duration tag in: " << file.toStdString() << std::endl;
+      continue;
+    }
+
+    timeSorteddurations[timeInSeconds] = durationSec;
+  }
+
+  this->durations.clear();
+  this->timePoints.clear();
+  this->durations.reserve(timeSorteddurations.size());
+  this->timePoints.reserve(timeSorteddurations.size());
+
+  double timealong = 0.0;
+  for (const auto& pair : timeSorteddurations)
+  {
+    timealong += pair.second;
+    this->durations.push_back(pair.second);
+    this->timePoints.push_back(timealong);
   }
 
 }
@@ -717,6 +837,7 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
 void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
   this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
+  this->getDurations();
   this->enableTACbutton();
   // if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   // {
@@ -797,6 +918,32 @@ void qSlicerKMAPModuleWidget::onTACbutton()
   if (!logic) {
     return;
   }
-  logic->computeTAC(this->ctID, this->petID, this->segID, this->segmentIDs);
+
+  if (this->durations.empty() || this->timePoints.empty()) {
+    std::cerr << "Missing frame time information!" << std::endl;
+    return;
+  }
+
+  std::vector<QString> segmentsToCompute;
+
+  for (const QString& segmentID_qt : this->segmentIDs)
+  {
+    std::string segmentID = segmentID_qt.toStdString();
+    if (this->segmentTACsnames.find(segmentID) == this->segmentTACsnames.end())
+    {
+      segmentsToCompute.push_back(segmentID_qt);
+    }
+    // else if (this->segmentHasChanged(segmentID))  // Implement this!
+    // {
+    //   // Segment changed — needs recomputing
+    //   segmentsToCompute.push_back(segmentID_qt);
+    // }
+  }
+
+  this->ProgressBar->setVisible(true);
+  qApp->processEvents();
+  logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
+  this->ProgressBar->setVisible(false);
+  qApp->processEvents();
   return;
 }

@@ -16,6 +16,10 @@ set(${KIT}_TARGET_LIBRARIES
   ${ITK_LIBRARIES}
   )
 
+list(APPEND ${KIT}_TARGET_LIBRARIES
+  vtkSlicerSegmentationsModuleLogic
+)
+
 #-----------------------------------------------------------------------------
 SlicerMacroBuildModuleLogic(
   NAME ${KIT}

@@ -26,6 +26,7 @@
 
 // Slicer includes
 #include "vtkSlicerModuleLogic.h"
+#include <QApplication>
 
 // MRML includes
 
@@ -36,8 +37,35 @@
 #include "vtkMRMLSubjectHierarchyNode.h"
 #include <vtkMRMLScalarVolumeNode.h>
 #include <vtkMRMLSegmentationNode.h>
+#include <vtkMRMLSequenceNode.h>
+#include <vtkMRMLSequenceBrowserNode.h>
+#include "vtkOrientedImageDataResample.h"
 #include <vtkSegmentation.h>
 #include <QPointer>
+
+#include <vtkImageData.h>
+#include <vtkPointData.h>
+#include <vtkMRMLTableNode.h>
+#include <vtkTable.h>
+#include <vtkDoubleArray.h>
+#include <vtkOrientedImageData.h>
+#include "vtkSlicerSegmentationsModuleLogic.h"
+#include <QProgressBar.h>
+
+struct VoxelStatistics
+{
+  int count = 0;
+  double mean = 0.0;
+  double median = 0.0;
+  double min = std::numeric_limits<double>::max();
+  double max = std::numeric_limits<double>::lowest();
+  double stddev = 0.0;
+  double q1 = 0.0;
+  double q3 = 0.0;
+  double iqr = 0.0;
+  double volume_mm3 = 0.0;
+  double volume_cm3 = 0.0;
+};
 
 class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
   public vtkSlicerModuleLogic
@@ -47,7 +75,10 @@ public:
   static vtkSlicerKMAPLogic *New();
   vtkTypeMacro(vtkSlicerKMAPLogic, vtkSlicerModuleLogic);
   void PrintSelf(ostream& os, vtkIndent indent) override;
-  void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments);
+  void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
+  void setupSeg(vtkMRMLSegmentationNode* segNode);
+  VoxelStatistics ComputeVoxelStatistics(vtkImageData* petImage, vtkImageData* labelmap, int labelValue = 1);
+  void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

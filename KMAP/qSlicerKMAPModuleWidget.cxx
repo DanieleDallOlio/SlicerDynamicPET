@@ -40,6 +40,7 @@ public:
   void populateStudyComboBox(vtkIdType patientID);
   void populateNodeComboBox(QComboBox* comboBox, vtkIdType parentItemID, const char * requiredNodeType, const std :: string requiredModality);
   void populateSegmentCheckboxes(vtkIdType SegItemID);
+  void populatePlotSegmentCheckboxes();
 };
 
 //-----------------------------------------------------------------------------
@@ -64,6 +65,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->PETSelector->setEnabled(false);
   this->SegSelector->setEnabled(false);
   this->SegSelector->setEnabled(false);
+  this->segmentSelectAll->setEnabled(false);
+  this->saveExcelButton->setEnabled(false);
 
   // Make connections
   QObject::connect( this->PatSelector, SIGNAL(currentIndexChanged(int)),
@@ -78,7 +81,51 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onSegChanged(int)));
   QObject::connect( this->TACbutton, SIGNAL(clicked(bool)),
     q, SLOT(onTACbutton()));
+  QObject::connect( this->segmentSelectAll, SIGNAL(clicked(bool)),
+    q, SLOT(onSelectAllbutton()));
+  QObject::connect( this->direxcel, SIGNAL(currentPathChanged(const QString&)),
+    q, SLOT(onExcelPathChanged(const QString&)));
+  QObject::connect( this->fileexcel, SIGNAL(textChanged(const QString&)),
+    q, SLOT(onExcelPathChanged(const QString&)));
+  QObject::connect( this->saveExcelButton, SIGNAL(clicked(bool)),
+    q, SLOT(onSaveExcelbutton()));
+  QObject::connect( this->plotButton, SIGNAL(clicked(bool)),
+    q, SLOT(onPlotbutton()));
+  // QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
+  //   q, SLOT(onPlotbutton()));
 
+  this->TACCollapsibleButton->setCollapsed(true);
+  for (const QString& name : q->checkboxNames)
+  {
+    QCheckBox* cb = new QCheckBox(name, this->PlotStatsCheckContents);
+    this->PlotStatsCheckLayout->addWidget(cb);
+  }
+
+  PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+  mainContext.evalScript(R"PYTHON(
+try:
+    import pandas as pd
+except ImportError:
+    import slicer
+    slicer.util.pip_install("pandas")
+    import pandas as pd
+
+try:
+    import xlsxwriter
+except ImportError:
+    import slicer
+    slicer.util.pip_install("xlsxwriter")
+
+def DPE_save_multisheet_excel(filepath, sheet_data_dict):
+    """
+    filepath: str - full path to xlsx
+    sheet_data_dict: dict[str, list[list[str]]] - sheet name to 2D table
+    """
+    with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
+        for sheet, data in sheet_data_dict.items():
+            df = pd.DataFrame(data)[["Time(s)", "Duration", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
+            df.to_excel(writer, sheet_name=sheet, index=False)
+)PYTHON");
 
 }
 
@@ -464,6 +511,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->SegmentCheckContents->blockSignals(false);
     q->segmentIDs.clear();
     q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
     return;
   }
 
@@ -473,6 +521,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->SegmentCheckContents->blockSignals(false);
     q->segmentIDs.clear();
     q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
     return;
   }
 
@@ -482,6 +531,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->SegmentCheckContents->blockSignals(false);
     q->segmentIDs.clear();
     q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
     return;
   }
 
@@ -491,6 +541,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->SegmentCheckContents->blockSignals(false);
     q->segmentIDs.clear();
     q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
     return;
   }
 
@@ -499,10 +550,10 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->SegmentCheckContents->blockSignals(false);
     q->segmentIDs.clear();
     q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
     return;
   }
 
-  // this->segmentCheckLayout->setEnabled(true);
   q->segmentIDs.clear();
   std :: vector<std :: string> segmentIDs = segmentation->GetSegmentIDs();
   for (vtkIdType i = 0; i < segmentIDs.size(); ++i)
@@ -524,10 +575,62 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
   q->enableTACbutton();
 
   this->segmentCheckLayout->addStretch();
+  this->segmentSelectAll->setEnabled(true);
   this->SegmentCheckContents->blockSignals(false);
 }
 
 
+void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  // Step 1: Save currently selected segment IDs
+  QSet<QString> previouslyPlotSelectedIDs;
+  for (int i = 0; i < this->PlotsegmentCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = this->PlotsegmentCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslyPlotSelectedIDs.insert(checkbox->property("SegmentID").toString());
+    }
+  }
+
+  // Step 2: Clear existing checkboxes
+  this->PlotSegmentCheckContents->blockSignals(true);
+  QLayoutItem* item;
+  while ((item = this->PlotsegmentCheckLayout->takeAt(0)) != nullptr)
+  {
+    delete item->widget();
+    delete item;
+  }
+
+  if (q->segmentTACsnames.empty() || q->segmentTACs.empty()) {
+    this->TACCollapsibleButton->setEnabled(false);
+    this->SegmentCheckContents->blockSignals(false);
+    return;
+  } else {
+    this->TACCollapsibleButton->setEnabled(true);
+  }
+
+  for (auto it = q->segmentTACsnames.begin(); it!=q->segmentTACsnames.end(); ++it)
+  {
+    std::string segmentID = it->first;
+    std::string segmentName = it->second;
+
+    QCheckBox* checkbox = new QCheckBox(QString::fromStdString(segmentName));
+    checkbox->setProperty("SegmentID", QString::fromStdString(segmentID));
+
+    bool wasSelected = previouslyPlotSelectedIDs.contains(QString::fromStdString(segmentID));
+    checkbox->setChecked(wasSelected);
+    this->PlotsegmentCheckLayout->addWidget(checkbox);
+    // QObject::connect(checkbox, SIGNAL(stateChanged(int)),
+    //              q, SLOT(onPlotSegmentsChanged()));
+  }
+
+  this->PlotsegmentCheckLayout->addStretch();
+  this->SegmentCheckContents->blockSignals(false);
+}
 
 
 
@@ -550,6 +653,9 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->ProgressBar->setObjectName(QString::fromUtf8("ProgressBar"));
   this->ProgressBar->setMaximum(100);
   this->ProgressBar->setValue(0);
+  this->checkboxNames = QStringList{
+    "Mean", "Median", "Min", "Max", "VoxelCount", "Volume(cc)"
+  };
   d->init();
 }
 
@@ -773,13 +879,16 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
   this->patID = d->PatSelector->itemData(index).value<vtkIdType>();
   d->populateStudyComboBox(this->patID);
-  // if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  // {
-  //   // "None" selected — ignore or reset state
-  //   return;
-  // }
+  if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    // "None" selected — ignore or reset state
+    d->fileexcel->setText(QString::fromStdString(".xlsx"));
+    return;
+  }
   // std::cout << "Selected Patient ID: " << id << std::endl;
-  // std :: string name = this->SubjectHierarchyNode->GetItemName(id);
+  std :: string name = this->SubjectHierarchyNode->GetItemName(this->patID);
+  std :: string excelfile = name + ".xlsx";
+  d->fileexcel->setText(QString::fromStdString(excelfile));
   //
   // std::cout << "Name: " << name
   //           << ", ID: " << id << std::endl;
@@ -884,26 +993,110 @@ void qSlicerKMAPModuleWidget::onSegmentsChanged()
   this->enableTACbutton();
 }
 
+void qSlicerKMAPModuleWidget::clearTACdata() {
+  Q_D(qSlicerKMAPModuleWidget);
+  this->segmentTACs.clear();
+  this->segmentTACsnames.clear();
+  d->populatePlotSegmentCheckboxes();
+  d->TACCollapsibleButton->setCollapsed(true);
+  for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
+  {
+    QWidget* widget = d->PlotStatsCheckLayout->itemAt(i)->widget();
+    QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+    if (cb)
+    {
+      cb->setChecked(false);
+    }
+  }
+  d->direxcel->setCurrentPath(QString::fromStdString(""));
+  d->saveExcelButton->setEnabled(false);
+  this->RemoveExistingPlotChartAndTable();
+  return;
+}
 
 void qSlicerKMAPModuleWidget::enableTACbutton() {
   Q_D(qSlicerKMAPModuleWidget);
   if (this->ctID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
+    this->clearTACdata();
     return;
   }
   if (this->petID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
+    this->clearTACdata();
     return;
   }
   if (this->segID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
+    this->clearTACdata();
     return;
   }
   if (this->segmentIDs.empty()) {
     d->TACbutton->setEnabled(false);
+    this->clearTACdata();
     return;
   }
   d->TACbutton->setEnabled(true);
+}
+
+
+vtkMRMLTableNode* qSlicerKMAPModuleWidget::GetOrCreatePlotTable()
+{
+  vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
+    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
+  if (!tableNode)
+  {
+    tableNode = vtkMRMLTableNode::New();
+    tableNode->SetName("KMAP.PlotTable");
+    this->mrmlScene()->AddNode(tableNode);
+    tableNode->Delete();
+  }
+  else
+  {
+    tableNode->RemoveAllColumns();
+  }
+  return tableNode;
+}
+
+vtkMRMLPlotChartNode* qSlicerKMAPModuleWidget::GetOrCreatePlotChart()
+{
+  vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
+    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotChart"));
+  if (!chartNode)
+  {
+    chartNode = vtkMRMLPlotChartNode::New();
+    chartNode->SetName("KMAP.PlotChart");
+    this->mrmlScene()->AddNode(chartNode);
+    chartNode->Delete();
+  }
+  else
+  {
+    chartNode->RemoveAllPlotSeriesNodeIDs();
+  }
+  return chartNode;
+}
+
+void qSlicerKMAPModuleWidget::RemoveExistingPlotChartAndTable()
+{
+  vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
+    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
+  if (tableNode)
+    this->mrmlScene()->RemoveNode(tableNode);
+
+  vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
+    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotChart"));
+  if (chartNode)
+  {
+    std::vector<std::string> seriesIDs;
+    chartNode->GetPlotSeriesNodeIDs(seriesIDs);
+    for (const std::string& id : seriesIDs)
+    {
+      vtkMRMLNode* node = this->mrmlScene()->GetNodeByID(id);
+      if (node)
+        this->mrmlScene()->RemoveNode(node);
+    }
+    this->mrmlScene()->RemoveNode(chartNode);
+  }
 }
 
 void qSlicerKMAPModuleWidget::onTACbutton()
@@ -945,5 +1138,225 @@ void qSlicerKMAPModuleWidget::onTACbutton()
   logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
   this->ProgressBar->setVisible(false);
   qApp->processEvents();
+  d->populatePlotSegmentCheckboxes();
   return;
+}
+
+void qSlicerKMAPModuleWidget::onSelectAllbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  if (this->segmentIDs.size()==(d->segmentCheckLayout->count()-1)) {
+    for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->segmentCheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(false);
+      }
+    }
+  } else {
+    for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->segmentCheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(true);
+      }
+    }
+  }
+  d->populateSegmentCheckboxes(this->segID);
+}
+
+void qSlicerKMAPModuleWidget::onExcelPathChanged(const QString& path)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->saveExcelButton->setEnabled(!path.trimmed().isEmpty());
+}
+
+QVariantMap qSlicerKMAPModuleWidget::TACtoPythonDict()
+{
+  QVariantMap out;
+
+  for (const auto& [segmentName, statsVec] : this->segmentTACs)
+  {
+    QVariantList voxelStatsList;
+    const size_t N = statsVec.size();
+    if (N != this->durations.size() || N != this->timePoints.size())
+    {
+      std::cerr << "Mismatch in vector sizes: statsVec (" << N
+                << "), durations (" << durations.size()
+                << "), timePoints (" << timePoints.size() << ")" << std::endl;
+    }
+    else
+    {
+      for (size_t i = 0; i < N; ++i)
+      {
+        const auto& vs = statsVec[i];
+        QVariantMap vsMap;
+        // Add time and duration
+        vsMap["Time(s)"] = timePoints[i];
+        vsMap["Duration"] = durations[i];
+        // Add stats
+        vsMap["VoxelCount"] = vs.count;
+        vsMap["Mean"] = vs.mean;
+        vsMap["Median"] = vs.median;
+        vsMap["Min"] = vs.min;
+        vsMap["Max"] = vs.max;
+        vsMap["StDev"] = vs.stddev;
+        vsMap["Q1"] = vs.q1;
+        vsMap["Q3"] = vs.q3;
+        vsMap["IQR"] = vs.iqr;
+        vsMap["Volume(mm3)"] = vs.volume_mm3;
+        vsMap["Volume(cm3)"] = vs.volume_cm3;
+
+        voxelStatsList.append(vsMap);
+      }
+    }
+
+    std :: string sheetName = this->segmentTACsnames[segmentName];
+    if (sheetName.length() > 30)
+    {
+      sheetName = sheetName.substr(0, 30);
+    }
+    out[QString::fromStdString(sheetName)] = voxelStatsList;
+  }
+
+  return out;
+}
+
+void qSlicerKMAPModuleWidget::onSaveExcelbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  QString path = d->direxcel->currentPath();
+  QString filename = d->fileexcel->text();
+  QString fullPath = QDir(path).filePath(filename);
+
+  QVariantMap segmentDict = this->TACtoPythonDict();
+  PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+  PythonQtObjectPtr result = mainContext.call("DPE_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
+}
+
+void qSlicerKMAPModuleWidget::onPlotbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  vtkMRMLScene* scene = this->mrmlScene();
+
+  // Get selected segments
+  std::vector<std::string> PlotSelectedIDs;
+  for (int i = 0; i < d->PlotsegmentCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->PlotsegmentCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      std::string segmentid = checkbox->property("SegmentID").toString().toStdString();
+      PlotSelectedIDs.push_back(segmentid);
+    }
+  }
+
+  // Get selected stats
+  std::vector<std::string> PlotSelectedStats;
+  for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->PlotStatsCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      PlotSelectedStats.push_back(checkbox->text().toStdString());
+    }
+  }
+
+  if (PlotSelectedIDs.empty() || PlotSelectedStats.empty())
+    return;
+
+  // Clear previous plot/chart/table
+  this->RemoveExistingPlotChartAndTable();
+
+  // Create or get table
+  vtkSmartPointer<vtkMRMLTableNode> tableNode = this->GetOrCreatePlotTable();
+
+  // Add time column
+  vtkNew<vtkDoubleArray> timeArray;
+  timeArray->SetName("Time (min)");
+  for (double t : this->timePoints)
+    timeArray->InsertNextValue(t/60.);
+  tableNode->AddColumn(timeArray);
+
+  // Create plot chart
+  vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
+
+  for (const std::string& segmentID : PlotSelectedIDs)
+  {
+    std :: string segmentName = this->segmentTACsnames[segmentID];
+    for (const std::string& statName : PlotSelectedStats)
+    {
+      std::string colName = segmentName + " - " + statName;
+      vtkNew<vtkDoubleArray> statArray;
+      statArray->SetName(colName.c_str());
+
+      vtkNew<vtkDoubleArray> statErrArray;
+      std::string colErrName = colName + " Error";
+      statErrArray->SetName(colErrName.c_str());
+
+      for (const VoxelStatistics& vs : this->segmentTACs[segmentID])
+      {
+        if (statName == "Mean")
+        {
+          statArray->InsertNextValue(vs.mean);
+          if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+            statErrArray->InsertNextValue(vs.stddev);
+        }
+        else if (statName == "Median")
+        {
+          statArray->InsertNextValue(vs.median);
+          if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+            statErrArray->InsertNextValue(vs.iqr);
+        }
+        else if (statName == "VoxelCount") statArray->InsertNextValue(vs.count);
+        else if (statName == "Min")        statArray->InsertNextValue(vs.min);
+        else if (statName == "Max")        statArray->InsertNextValue(vs.max);
+        else if (statName == "Volume(cc)") statArray->InsertNextValue(vs.volume_cm3);
+        else std::cerr << "Unknown stat name: " << statName << std::endl;
+      }
+
+      tableNode->AddColumn(statArray);
+      // if (statErrArray->GetNumberOfTuples() > 0)
+      //   tableNode->AddColumn(statErrArray);
+
+      vtkSmartPointer<vtkMRMLPlotSeriesNode> series = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+      scene->AddNode(series);
+      series->SetName(colName.c_str());
+      series->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+      series->SetAndObserveTableNodeID(tableNode->GetID());
+      series->SetXColumnName("Time (min)");
+      series->SetYColumnName(colName.c_str());
+      series->SetUniqueColor();
+
+
+      // series->SetName(colName.c_str());
+      // series->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+      // if (statErrArray->GetNumberOfTuples() > 0)
+      //   series->SetAttribute("yErrorColumnName", colErrName.c_str());
+
+      // chartNode->SetXAxisLabel("Time (s)");
+      // chartNode->SetYAxisLabel("SUVbw (g/mL)");
+      chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
+    }
+  }
+
+  // Show plot view
+  auto* layoutNode = vtkMRMLLayoutNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
+  if (layoutNode)
+    layoutNode->SetViewArrangement(vtkMRMLLayoutNode::SlicerLayoutConventionalPlotView);
+
+  vtkMRMLPlotViewNode* plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(
+    scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
+  if (plotViewNode)
+  {
+    plotViewNode->SetPlotChartNodeID(chartNode->GetID());
+  }
+
 }

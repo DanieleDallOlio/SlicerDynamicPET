@@ -40,6 +40,12 @@
 #include <ctkDICOMDatabase.h>
 #include <qSlicerApplication.h>
 #include <dcmtk/dcmdata/dctk.h>
+#include <PythonQt.h>
+#include <qSlicerPythonManager.h>
+#include <vtkMRMLPlotChartNode.h>
+#include <vtkMRMLPlotSeriesNode.h>
+#include <vtkMRMLLayoutNode.h>
+#include <vtkMRMLPlotViewNode.h>
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;
@@ -63,6 +69,12 @@ public:
   void exit() override;
   void setMRMLScene(vtkMRMLScene* scene) override;
   void getDurations();
+  void clearTACdata();
+  void enableTACbutton();
+  QVariantMap TACtoPythonDict();
+  void RemoveExistingPlotChartAndTable();
+  vtkMRMLPlotChartNode* GetOrCreatePlotChart();
+  vtkMRMLTableNode* GetOrCreatePlotTable();
 
 public slots:
   void onSubjectHierarchyChanged();
@@ -72,8 +84,11 @@ public slots:
   void onPETChanged(int index);
   void onSegChanged(int index);
   void onSegmentsChanged();
-  void enableTACbutton();
   void onTACbutton();
+  void onSelectAllbutton();
+  void onExcelPathChanged(const QString& path);
+  void onSaveExcelbutton();
+  void onPlotbutton();
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -89,7 +104,7 @@ private:
   std::map<std::string, std::string> segmentTACsnames;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;
-
+  QStringList checkboxNames;
 };
 
 #endif

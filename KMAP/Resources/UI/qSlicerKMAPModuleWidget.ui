@@ -97,7 +97,14 @@
             </property>
            </widget>
           </item>
-          <item row="5" column="1">
+          <item row="5" column="1">  <!-- Put it just above the scroll area -->
+            <widget class="QPushButton" name="segmentSelectAll">
+              <property name="text">
+                <string>Select/Deselect All</string>
+              </property>
+            </widget>
+          </item>
+          <item row="6" column="1">
             <widget class="QScrollArea" name="SegmentCheckScrollArea">
              <property name="widgetResizable">
               <bool>true</bool>
@@ -132,6 +139,146 @@
       </property>
      </widget>
     </item>
+    <item>
+      <widget class="ctkCollapsibleButton" name="TACCollapsibleButton">
+        <property name="text">
+         <string>TAC</string>
+        </property>
+        <layout class="QFormLayout" name="formLayout_2">
+          <item row="0" column="0">
+           <widget class="QLabel" name="Plotlabsegments">
+            <property name="text">
+             <string>Plot:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+            <widget class="QScrollArea" name="PlotSegmentCheckScrollArea">
+             <property name="widgetResizable">
+              <bool>true</bool>
+             </property>
+             <property name="maximumHeight">
+               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+             </property>
+             <widget class="QWidget" name="PlotSegmentCheckContents">
+               <property name="styleSheet">
+                 <string notr="true">background-color: white;</string>
+               </property>
+              <layout class="QVBoxLayout" name="PlotsegmentCheckLayout"/>
+             </widget>
+            </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="Plotlabstats">
+            <property name="text">
+             <string>Stats:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+            <widget class="QScrollArea" name="PlotStats">
+             <property name="widgetResizable">
+              <bool>true</bool>
+             </property>
+             <property name="maximumHeight">
+               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+             </property>
+             <widget class="QWidget" name="PlotStatsCheckContents">
+               <property name="styleSheet">
+                 <string notr="true">background-color: white;</string>
+               </property>
+              <layout class="QVBoxLayout" name="PlotStatsCheckLayout"/>
+             </widget>
+            </widget>
+          </item>
+          <item row="2" column="0">
+            <layout class="QHBoxLayout" name="excelSaveLayout3">
+              <item>
+                <widget class="QCheckBox" name="PlotErrorCheckbox">
+                 <property name="toolTip">
+                  <string>Show errors in plot.</string>
+                 </property>
+                 <property name="text">
+                  <string>Plot errors</string>
+                 </property>
+                 <property name="checked">
+                  <bool>true</bool>
+                 </property>
+                </widget>
+              </item>
+              <item>
+                <widget class="QPushButton" name="plotButton">
+                  <property name="icon">
+                    <iconset resource="../qSlicerKMAPModule.qrc">
+                      <normaloff>:/Icons/PLOT.jpg</normaloff> <!-- Provide your icon -->
+                    </iconset>
+                  </property>
+                  <property name="toolTip">
+                    <string>Plot TAC statistics</string>
+                  </property>
+                </widget>
+              </item>
+            </layout>
+          </item>
+          <item row="3" column="0">
+           <widget class="QLabel" name="Plottacsave">
+            <property name="text">
+             <string>Save TAC:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="3" column="1">
+            <layout class="QHBoxLayout" name="excelSaveLayout">
+              <item>
+                <widget class="ctkPathLineEdit" name="direxcel">
+                  <property name="toolTip">
+                    <string>Choose directory to save EXCEL.</string>
+                  </property>
+                  <property name="enabled">
+                    <bool>true</bool>
+                  </property>
+                  <property name="filters">
+                    <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                  </property>
+                </widget>
+              </item>
+            </layout>
+          </item>
+          <item row="4" column="1">
+            <layout class="QHBoxLayout" name="excelSaveLayout2">
+              <item>
+                <widget class="QLineEdit" name="fileexcel">
+                 <property name="toolTip">
+                  <string>Choose filename to save EXCEL.</string>
+                 </property>
+                 <property name="text">
+                  <string>tac.xlsx</string>
+                 </property>
+                </widget>
+              </item>
+              <item>
+                <widget class="QPushButton" name="saveExcelButton">
+                  <property name="toolTip">
+                    <string>Save TAC data to Excel file</string>
+                  </property>
+                  <property name="enabled">
+                    <bool>true</bool>
+                  </property>
+                  <property name="icon">
+                    <iconset resource="../qSlicerKMAPModule.qrc">
+                      <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                    </iconset>
+                  </property>
+                  <property name="text">
+                    <string/>
+                  </property>
+                </widget>
+              </item>
+            </layout>
+          </item>
+        </layout>
+      </widget>
+    </item>
   </layout>
  </widget>
  <customwidgets>
@@ -151,6 +298,11 @@
    <class>qMRMLNodeComboBox</class>
    <extends>QWidget</extends>
    <header>qMRMLNodeComboBox.h</header>
+  </customwidget>
+  <customwidget>
+   <class>ctkPathLineEdit</class>
+   <extends>QWidget</extends>
+   <header>ctkPathLineEdit.h</header>
   </customwidget>
   <!-- <customwidget>
    <class>qSlicerKMAPFooBarWidget</class>

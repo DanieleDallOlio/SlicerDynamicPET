@@ -11,275 +11,648 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>KMAP</string>
+   <string>K-MAP</string>
   </property>
-  <layout class="QVBoxLayout" name="verticalLayout">
+  <layout class="QVBoxLayout" name="verticalLayoutOuter">
     <item>
-      <widget class="ctkCollapsibleButton" name="inputsCollapsibleButton">
-        <property name="text">
-         <string>Inputs</string>
-        </property>
-        <layout class="QFormLayout" name="formLayout_1">
-          <item row="0" column="0">
-           <widget class="QLabel" name="label1">
-            <property name="text">
-             <string>Patient:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="1">
-           <widget class="QComboBox" name="PatSelector">
-             <property name="toolTip">
-              <string>Choose Patient.</string>
-             </property>
-           </widget>
-          </item>
-          <item row="1" column="0">
-           <widget class="QLabel" name="label2">
-            <property name="text">
-             <string>Study:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="1" column="1">
-           <widget class="QComboBox" name="StuSelector">
-             <property name="toolTip">
-              <string>Choose Study.</string>
-             </property>
-           </widget>
-          </item>
-          <item row="2" column="0">
-           <widget class="QLabel" name="label3">
-            <property name="text">
-             <string>CT:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="2" column="1">
-           <widget class="QComboBox" name="CTSelector">
-            <property name="toolTip">
-             <string>Choose CT.</string>
-            </property>
-           </widget>
-          </item>
-          <item row="3" column="0">
-           <widget class="QLabel" name="label4">
-            <property name="text">
-             <string>PET:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="3" column="1">
-           <widget class="QComboBox" name="PETSelector">
-            <property name="toolTip">
-             <string>Choose PET.</string>
-            </property>
-           </widget>
-          </item>
-          <item row="4" column="0">
-           <widget class="QLabel" name="labseg">
-            <property name="text">
-             <string>Segmentation:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="4" column="1">
-           <widget class="QComboBox" name="SegSelector">
-             <property name="toolTip">
-              <string>Choose Segmentation.</string>
-             </property>
-           </widget>
-          </item>
-          <item row="5" column="0">
-           <widget class="QLabel" name="labsegments">
-            <property name="text">
-             <string>Segments:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="5" column="1">  <!-- Put it just above the scroll area -->
-            <widget class="QPushButton" name="segmentSelectAll">
-              <property name="text">
-                <string>Select/Deselect All</string>
-              </property>
-            </widget>
-          </item>
-          <item row="6" column="1">
-            <widget class="QScrollArea" name="SegmentCheckScrollArea">
-             <property name="widgetResizable">
-              <bool>true</bool>
-             </property>
-             <property name="maximumHeight">
-               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
-             </property>
-             <widget class="QWidget" name="SegmentCheckContents">
-               <property name="styleSheet">
-                 <string notr="true">background-color: white;</string>
-               </property>
-              <layout class="QVBoxLayout" name="segmentCheckLayout"/>
-             </widget>
-            </widget>
-          </item>
-        </layout>
-      </widget>
-    </item>
-    <item>
-     <widget class="QPushButton" name="TACbutton">
-      <property name="enabled">
-       <bool>false</bool>
-      </property>
-      <property name="toolTip">
-       <string>Get Time-Activity-Curve.</string>
-      </property>
-      <property name="text">
-       <string>TAC</string>
-      </property>
-      <property name="default">
-       <bool>true</bool>
-      </property>
-     </widget>
-    </item>
-    <item>
-      <widget class="ctkCollapsibleButton" name="TACCollapsibleButton">
-        <property name="text">
-         <string>TAC</string>
-        </property>
-        <layout class="QFormLayout" name="formLayout_2">
-          <item row="0" column="0">
-           <widget class="QLabel" name="Plotlabsegments">
-            <property name="text">
-             <string>Plot:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="0" column="1">
-            <widget class="QScrollArea" name="PlotSegmentCheckScrollArea">
-             <property name="widgetResizable">
-              <bool>true</bool>
-             </property>
-             <property name="maximumHeight">
-               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
-             </property>
-             <widget class="QWidget" name="PlotSegmentCheckContents">
-               <property name="styleSheet">
-                 <string notr="true">background-color: white;</string>
-               </property>
-              <layout class="QVBoxLayout" name="PlotsegmentCheckLayout"/>
-             </widget>
-            </widget>
-          </item>
-          <item row="1" column="0">
-           <widget class="QLabel" name="Plotlabstats">
-            <property name="text">
-             <string>Stats:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="1" column="1">
-            <widget class="QScrollArea" name="PlotStats">
-             <property name="widgetResizable">
-              <bool>true</bool>
-             </property>
-             <property name="maximumHeight">
-               <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
-             </property>
-             <widget class="QWidget" name="PlotStatsCheckContents">
-               <property name="styleSheet">
-                 <string notr="true">background-color: white;</string>
-               </property>
-              <layout class="QVBoxLayout" name="PlotStatsCheckLayout"/>
-             </widget>
-            </widget>
-          </item>
-          <item row="2" column="0">
-            <layout class="QHBoxLayout" name="excelSaveLayout3">
-              <item>
-                <widget class="QCheckBox" name="PlotErrorCheckbox">
-                 <property name="toolTip">
-                  <string>Show errors in plot.</string>
-                 </property>
-                 <property name="text">
-                  <string>Plot errors</string>
-                 </property>
-                 <property name="checked">
-                  <bool>true</bool>
-                 </property>
-                </widget>
-              </item>
-              <item>
-                <widget class="QPushButton" name="plotButton">
-                  <property name="icon">
-                    <iconset resource="../qSlicerKMAPModule.qrc">
-                      <normaloff>:/Icons/PLOT.jpg</normaloff> <!-- Provide your icon -->
-                    </iconset>
-                  </property>
-                  <property name="toolTip">
-                    <string>Plot TAC statistics</string>
-                  </property>
-                </widget>
-              </item>
-            </layout>
-          </item>
-          <item row="3" column="0">
-           <widget class="QLabel" name="Plottacsave">
-            <property name="text">
-             <string>Save TAC:</string>
-            </property>
-           </widget>
-          </item>
-          <item row="3" column="1">
-            <layout class="QHBoxLayout" name="excelSaveLayout">
-              <item>
-                <widget class="ctkPathLineEdit" name="direxcel">
-                  <property name="toolTip">
-                    <string>Choose directory to save EXCEL.</string>
-                  </property>
-                  <property name="enabled">
-                    <bool>true</bool>
-                  </property>
-                  <property name="filters">
-                    <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
-                  </property>
-                </widget>
-              </item>
-            </layout>
-          </item>
-          <item row="4" column="1">
-            <layout class="QHBoxLayout" name="excelSaveLayout2">
-              <item>
-                <widget class="QLineEdit" name="fileexcel">
-                 <property name="toolTip">
-                  <string>Choose filename to save EXCEL.</string>
-                 </property>
-                 <property name="text">
-                  <string>tac.xlsx</string>
-                 </property>
-                </widget>
-              </item>
-              <item>
-                <widget class="QPushButton" name="saveExcelButton">
-                  <property name="toolTip">
-                    <string>Save TAC data to Excel file</string>
-                  </property>
-                  <property name="enabled">
-                    <bool>true</bool>
-                  </property>
-                  <property name="icon">
-                    <iconset resource="../qSlicerKMAPModule.qrc">
-                      <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
-                    </iconset>
-                  </property>
+      <widget class="QTabWidget" name="PlotsTabWidget">
+        <widget class="QWidget" name="TACwidget">
+          <attribute name="title">
+           <string>TAC</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayout">
+            <item>
+              <layout class="QFormLayout" name="formLayout_1">
+                <item row="0" column="0">
+                 <widget class="QLabel" name="label1">
                   <property name="text">
-                    <string/>
+                   <string>Patient:</string>
                   </property>
-                </widget>
-              </item>
-            </layout>
-          </item>
-        </layout>
+                 </widget>
+                </item>
+                <item row="0" column="1">
+                 <widget class="QComboBox" name="PatSelector">
+                   <property name="toolTip">
+                    <string>Choose Patient.</string>
+                   </property>
+                 </widget>
+                </item>
+                <item row="1" column="0">
+                 <widget class="QLabel" name="label2">
+                  <property name="text">
+                   <string>Study:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="1" column="1">
+                 <widget class="QComboBox" name="StuSelector">
+                   <property name="toolTip">
+                    <string>Choose Study.</string>
+                   </property>
+                 </widget>
+                </item>
+                <item row="2" column="0">
+                 <widget class="QLabel" name="label3">
+                  <property name="text">
+                   <string>CT:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="2" column="1">
+                 <widget class="QComboBox" name="CTSelector">
+                  <property name="toolTip">
+                   <string>Choose CT.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="3" column="0">
+                 <widget class="QLabel" name="label4">
+                  <property name="text">
+                   <string>PET:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="3" column="1">
+                 <widget class="QComboBox" name="PETSelector">
+                  <property name="toolTip">
+                   <string>Choose PET.</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="4" column="0">
+                 <widget class="QLabel" name="labseg">
+                  <property name="text">
+                   <string>Segmentation:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="4" column="1">
+                 <widget class="QComboBox" name="SegSelector">
+                   <property name="toolTip">
+                    <string>Choose Segmentation.</string>
+                   </property>
+                 </widget>
+                </item>
+                <item row="5" column="0">
+                 <widget class="QLabel" name="labsegments">
+                  <property name="text">
+                   <string>Segments:</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="5" column="1">  <!-- Put it just above the scroll area -->
+                  <widget class="QPushButton" name="segmentSelectAll">
+                    <property name="text">
+                      <string>Select/Deselect All</string>
+                    </property>
+                  </widget>
+                </item>
+                <item row="6" column="1">
+                  <widget class="QScrollArea" name="SegmentCheckScrollArea">
+                   <property name="widgetResizable">
+                    <bool>true</bool>
+                   </property>
+                   <property name="maximumHeight">
+                     <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                   </property>
+                   <widget class="QWidget" name="SegmentCheckContents">
+                     <property name="styleSheet">
+                       <string notr="true">background-color: white;</string>
+                     </property>
+                    <layout class="QVBoxLayout" name="segmentCheckLayout"/>
+                   </widget>
+                  </widget>
+                </item>
+              </layout>
+            </item>
+            <item>
+             <widget class="QPushButton" name="TACbutton">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="toolTip">
+               <string>Get Time-Activity-Curve.</string>
+              </property>
+              <property name="text">
+               <string>TAC</string>
+              </property>
+              <property name="default">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="TACCollapsibleButton">
+                <property name="text">
+                 <string>Plot</string>
+                </property>
+                <layout class="QFormLayout" name="formLayout_2">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="Plotlabsegments">
+                    <property name="text">
+                     <string>Plot:</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                    <widget class="QScrollArea" name="PlotSegmentCheckScrollArea">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="PlotSegmentCheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="PlotsegmentCheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QLabel" name="Plotlabstats">
+                    <property name="text">
+                     <string>Stats:</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                    <widget class="QScrollArea" name="PlotStats">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="PlotStatsCheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="PlotStatsCheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+                  <item row="2" column="0">
+                    <layout class="QHBoxLayout" name="excelSaveLayout3">
+                      <item>
+                        <widget class="QPushButton" name="plotButton">
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/PLOT.jpg</normaloff> <!-- Provide your icon -->
+                            </iconset>
+                          </property>
+                          <property name="toolTip">
+                            <string>Plot TAC statistics</string>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QCheckBox" name="PlotErrorCheckbox">
+                         <property name="toolTip">
+                          <string>Show errors in plot.</string>
+                         </property>
+                         <property name="text">
+                          <string>Plot errors</string>
+                         </property>
+                         <property name="checked">
+                          <bool>true</bool>
+                         </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="3" column="0">
+                   <widget class="QLabel" name="Plottacsave">
+                    <property name="text">
+                     <string>Save TAC:</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="3" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayout">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="direxcel">
+                          <property name="toolTip">
+                            <string>Choose directory to save EXCEL.</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="4" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayout2">
+                      <item>
+                        <widget class="QLineEdit" name="fileexcel">
+                         <property name="toolTip">
+                          <string>Choose filename to save EXCEL.</string>
+                         </property>
+                         <property name="text">
+                          <string>tac.xlsx</string>
+                         </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="saveExcelButton">
+                          <property name="toolTip">
+                            <string>Save TAC data to Excel file</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                            </iconset>
+                          </property>
+                          <property name="text">
+                            <string/>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                </layout>
+              </widget>
+            </item>
+          </layout>
+        </widget>
+        <widget class="QWidget" name="KineticsWidget">
+          <attribute name="title">
+           <string>Kinetics</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayout2">
+            <item>
+              <layout class="QFormLayout" name="formLayout_3">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="inputstat">
+                    <property name="text">
+                     <string>Input stat</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                   <widget class="QComboBox" name="StatSelector">
+                     <property name="toolTip">
+                      <string>Choose Input statistics.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QLabel" name="IF">
+                    <property name="text">
+                     <string>Input Function</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                   <widget class="QComboBox" name="IFSelector">
+                     <property name="toolTip">
+                      <string>Choose Input Function.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="0">
+                   <widget class="QLabel" name="VOI">
+                    <property name="text">
+                     <string>VOI</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="1">  <!-- Put it just above the scroll area -->
+                    <widget class="QPushButton" name="VOIsegmentSelectAll">
+                      <property name="text">
+                        <string>All/No VOIs</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="1">
+                    <widget class="QScrollArea" name="VOICheckScrollArea">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="VOICheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="VOICheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+                  <item row="4" column="0">
+                   <widget class="QLabel" name="Models">
+                    <property name="text">
+                     <string>Models</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="4" column="1">  <!-- Put it just above the scroll area -->
+                    <widget class="QPushButton" name="ModelsSelectAll">
+                      <property name="text">
+                        <string>All/No Models</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="1">
+                    <widget class="QScrollArea" name="ModelsScrollArea">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="ModelsCheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="ModelsCheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+              </layout>
+            </item>
+            <item>
+             <widget class="QPushButton" name="FITbutton">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="toolTip">
+               <string>Fit model.</string>
+              </property>
+              <property name="text">
+               <string>FIT</string>
+              </property>
+              <property name="default">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="TCMCollapsibleButton">
+                <property name="text">
+                 <string>TCM Parameters</string>
+                </property>
+                <layout class="QGridLayout" name="TCMFormLayout">
+                  <item row="0" column="1">
+                    <widget class="QLabel" name="initLabel">
+                      <property name="text">
+                        <string>Initial</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="0" column="2">
+                    <widget class="QLabel" name="lowerLabel">
+                      <property name="text">
+                        <string>Lower Bound</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="0" column="3">
+                    <widget class="QLabel" name="upperLabel">
+                      <property name="text">
+                        <string>Upper Bound</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="1" column="0">
+                    <widget class="QLabel" name="k1Label">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>K&lt;sub&gt;1&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="1" column="1">
+                    <widget class="QLineEdit" name="k1Initial">
+                      <property name="text">
+                        <string>0.1</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="1" column="2">
+                    <widget class="QLineEdit" name="k1Lower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="1" column="3">
+                    <widget class="QLineEdit" name="k1Upper">
+                      <property name="text">
+                        <string>2.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="0">
+                    <widget class="QLabel" name="k2Label">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>K&lt;sub&gt;2&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="1">
+                    <widget class="QLineEdit" name="k2Initial">
+                      <property name="text">
+                        <string>0.1</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="2">
+                    <widget class="QLineEdit" name="k2Lower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="3">
+                    <widget class="QLineEdit" name="k2Upper">
+                      <property name="text">
+                        <string>2.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="0">
+                    <widget class="QLabel" name="k3Label">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>K&lt;sub&gt;3&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="1">
+                    <widget class="QLineEdit" name="k3Initial">
+                      <property name="text">
+                        <string>0.1</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="2">
+                    <widget class="QLineEdit" name="k3Lower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="3">
+                    <widget class="QLineEdit" name="k3Upper">
+                      <property name="text">
+                        <string>2.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="4" column="0">
+                    <widget class="QLabel" name="k4Label">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>K&lt;sub&gt;4&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="4" column="1">
+                    <widget class="QLineEdit" name="k4Initial">
+                      <property name="text">
+                        <string>0.01</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="4" column="2">
+                    <widget class="QLineEdit" name="k4Lower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="4" column="3">
+                    <widget class="QLineEdit" name="k4Upper">
+                      <property name="text">
+                        <string>0.5</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="0">
+                    <widget class="QLabel" name="vbLabel">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>v&lt;sub&gt;b&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="1">
+                    <widget class="QLineEdit" name="vbInitial">
+                      <property name="text">
+                        <string>0.1</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="2">
+                    <widget class="QLineEdit" name="vbLower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="3">
+                    <widget class="QLineEdit" name="vbUpper">
+                      <property name="text">
+                        <string>1.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="6" column="0">
+                    <widget class="QLabel" name="tdLabel">
+                      <property name="textFormat">
+                        <enum>Qt::RichText</enum>
+                      </property>
+                      <property name="text">
+                        <string>t&lt;sub&gt;d&lt;/sub&gt;</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="6" column="1">
+                    <widget class="QLineEdit" name="tdInitial">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="6" column="2">
+                    <widget class="QLineEdit" name="tdLower">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="6" column="3">
+                    <widget class="QLineEdit" name="tdUpper">
+                      <property name="text">
+                        <string>20.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                </layout>
+              </widget>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="TCMResultsButton">
+                <property name="text">
+                 <string>Results</string>
+                </property>
+                <layout class="QGridLayout" name="TCMResultsFormLayout">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="voires">
+                    <property name="text">
+                     <string>VOI</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                   <widget class="QComboBox" name="VOISelector">
+                     <property name="toolTip">
+                      <string>Choose VOI results.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0" colspan="2">
+                    <widget class="QTableWidget" name="TCMResultsTable">
+                      <property name="rowCount">
+                        <number>0</number>
+                      </property>
+                      <property name="columnCount">
+                        <number>0</number>
+                      </property>
+                      <property name="editTriggers">
+                        <set>QAbstractItemView::NoEditTriggers</set> <!-- Makes table read-only -->
+                      </property>
+                    </widget>
+                  </item>
+              </layout>
+             </widget>
+            </item>
+          </layout>
+        </widget>
       </widget>
     </item>
-  </layout>
+ </layout>
  </widget>
  <customwidgets>
   <customwidget>

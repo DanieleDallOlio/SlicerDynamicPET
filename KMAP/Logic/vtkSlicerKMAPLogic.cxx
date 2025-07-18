@@ -373,3 +373,165 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
   }
 
 }
+
+
+void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
+                                 std :: vector< std :: vector<double> > Cp,
+                                 std :: vector< std :: vector<double> > framing,
+                                 long int Nframe,
+                                 long int Nvox,
+                                 double* kinit,
+                                 double* lb,
+                                 double* ub,
+                                 const bool* sens,
+                                 const double dk,
+                                 const double timestep,
+                                 const double pbrp[],
+                                 const int maxiter,
+                                 const int n_tc,
+                                 TCMParameters& params
+                                 )
+{
+  const int nth = 1;
+
+  // Basic validation
+  if (containsNaN(tac)) return error_nan("TAC");
+  if (containsNaN(Cp)) return error_nan("Cp");
+  if (containsNaN(framing)) return error_nan("framing");
+
+  if (tac.size() != framing.size()) return error_size("TAC", "framing", tac.size(), framing.size());
+  if (tac.size() != Cp.size()) return error_size("TAC", "Cp", tac.size(), Cp.size());
+
+  // Allocate weights
+  double* wt = new double[Nframe];
+  std::fill(wt, wt + Nframe, 1.0);
+
+  // Cumulative sum
+  double* cumsum = new double[Nframe];
+  double cum = 0.0;
+  for (long int i = 0; i < Nframe; ++i)
+  {
+    cum += framing[i][0];
+    cumsum[i] = cum;
+  }
+
+  double **scant = new double * [Nframe];
+  double t, pbr;
+  std :: vector< std :: vector<double> > cwb; // whole blood concentration
+  scant[0L] = new double[2];
+  scant[0L][0L] = 0.;
+  scant[0L][1L] = cumsum[0L];
+  t = (scant[0L][0L] + scant[0L][1L]) * 0.5;
+  pbr = pbrp[0L] * exp(-pbrp[1L] * t / 60L) + pbrp[2L];
+  std :: vector<double> cwb_r;
+  cwb_r.push_back(Cp[0L][0L] / pbr);
+  cwb.push_back(cwb_r);
+  for (long int i = 1L; i < Nframe; ++i){
+    cwb_r.clear();
+    scant[i] = new double[2];
+    scant[i][0L] = cumsum[i-1];
+    scant[i][1L] = cumsum[i];
+    t = (scant[i][0L] + scant[i][1L]) * 0.5;
+    pbr = pbrp[0L] * exp(-pbrp[1L] * t / 60L) + pbrp[2L];
+    cwb_r.push_back(Cp[i][0L] / pbr);
+    cwb.push_back(cwb_r);
+  }
+
+  long int N_cp;
+  double *Cp_new = finesample(scant, Cp, Nframe, N_cp, timestep, "linear");
+  double *cwb_new = finesample(scant, cwb, Nframe, N_cp, timestep, "linear");
+
+  double * tac_flatten = new double[Nframe*Nvox];
+  for (int i=0; i<Nframe; ++i) {
+    for (int j=0; j<Nvox; ++j) {
+      tac_flatten[i + j * Nframe] = tac[i][j];
+    }
+  }
+  double * scant_flatten = new double[Nframe*2];
+  for (int i=0; i<Nframe; ++i) {
+    for (int j=0; j<2; ++j) {
+      scant_flatten[i + j * Nframe] = scant[i][j];
+    }
+  }
+
+  double *fitted_curve   = new double[Nframe*Nvox];
+  if (n_tc == 1) {
+    double *fitted_params = new double[4*Nvox];
+    kfit_1tcm_mex_omp(tac_flatten,
+                      Nframe,
+                      Nvox,
+                      Nvox,
+                      wt,
+                      scant_flatten,
+                      Cp_new,
+                      cwb_new,
+                      dk,
+                      kinit,
+                      4,
+                      1,
+                      lb,
+                      ub,
+                      sens,
+                      maxiter,
+                      timestep,
+                      nth,
+                      fitted_params,
+                      fitted_curve
+                      );
+    params.vb = fitted_params[0];
+    params.K1 = fitted_params[1];
+    params.k2 = fitted_params[2];
+    params.td = fitted_params[3];
+    // std :: cout << "fitted_params" << std ::endl;
+    // print_vec(fitted_params, 4*Nvox);
+    // std :: cout << "fitted_curve" << std ::endl;
+    // print_vec(fitted_curve, Nframe*Nvox);
+  } else if (n_tc == 2) {
+    double *fitted_params = new double[6*Nvox];
+    kfit_2tcm_mex_omp(tac_flatten,
+                      Nframe,
+                      Nvox,
+                      Nvox,
+                      wt,
+                      scant_flatten,
+                      Cp_new,
+                      cwb_new,
+                      dk,
+                      kinit,
+                      6,
+                      1,
+                      lb,
+                      ub,
+                      sens,
+                      maxiter,
+                      timestep,
+                      nth,
+                      fitted_params,
+                      fitted_curve
+                      );
+    params.vb = fitted_params[0];
+    params.K1 = fitted_params[1];
+    params.k2 = fitted_params[2];
+    params.k3 = fitted_params[3];
+    params.k4 = fitted_params[4];
+    params.td = fitted_params[5];
+    // std :: cout << "fitted_params" << std ::endl;
+    // print_vec(fitted_params, 6*Nvox);
+    // std :: cout << "fitted_curve" << std ::endl;
+    // print_vec(fitted_curve, Nframe*Nvox);
+
+  } else {
+    std :: cerr << "Forbidden number of tissue compartment: " << n_tc << std :: endl;
+  }
+
+  // --- Cleanup ---
+  // delete[] wt;
+  // delete[] cumsum;
+  // delete[] Cp_interp;
+  // delete[] cwb_interp;
+  // delete[] tac_flatten;
+  // delete[] scant_flatten;
+  // delete[] fitted_curve;
+  // delete[] fitted_params;
+  return;
+}

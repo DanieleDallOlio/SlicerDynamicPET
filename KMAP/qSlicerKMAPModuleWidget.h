@@ -70,7 +70,9 @@ public:
   void setMRMLScene(vtkMRMLScene* scene) override;
   void getDurations();
   void clearTACdata();
+  void clearFITdata();
   void enableTACbutton();
+  void enableFITbutton();
   QVariantMap TACtoPythonDict();
   void RemoveExistingPlotChartAndTable();
   vtkMRMLPlotChartNode* GetOrCreatePlotChart();
@@ -89,6 +91,13 @@ public slots:
   void onExcelPathChanged(const QString& path);
   void onSaveExcelbutton();
   void onPlotbutton();
+  void onIFSelectionChanged(int index);
+  void onVOISelectAllbutton();
+  void onFITbutton();
+  void onVOISegmentsChanged();
+  void onModelsChanged();
+  void onModelsAllbutton();
+  void onVOISelectionChanged(int index);
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -102,9 +111,13 @@ private:
   std::vector<QString> segmentIDs;
   std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
   std::map<std::string, std::string> segmentTACsnames;
+  std::map<std::string, std::map<std::string, TCMParameters>> segmentMTGA;
+  std::map<std::string, std::map<std::string, TCMParameters>> segmentTCM;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;
-  QStringList checkboxNames;
+  QStringList checkboxNames, ModelsNames, StatsNames;
+  std :: string IFID;
+  std :: vector < std :: string > VOIsegmentIDs, modelsID;
 };
 
 #endif

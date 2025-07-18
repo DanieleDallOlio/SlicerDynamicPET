@@ -17,6 +17,10 @@ find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})
 
 #-----------------------------------------------------------------------------
+# External library
+add_subdirectory(KMAP-PY)
+
+#-----------------------------------------------------------------------------
 # Extension modules
 add_subdirectory(KMAP)
 ## NEXT_MODULE

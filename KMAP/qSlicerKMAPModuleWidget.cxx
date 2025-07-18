@@ -41,6 +41,10 @@ public:
   void populateNodeComboBox(QComboBox* comboBox, vtkIdType parentItemID, const char * requiredNodeType, const std :: string requiredModality);
   void populateSegmentCheckboxes(vtkIdType SegItemID);
   void populatePlotSegmentCheckboxes();
+  void populateIF();
+  void populateVOI(std :: string ifID);
+  void populateResultsVOI();
+  void populateResultsTable(std :: string segmentID);
 };
 
 //-----------------------------------------------------------------------------
@@ -67,6 +71,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->SegSelector->setEnabled(false);
   this->segmentSelectAll->setEnabled(false);
   this->saveExcelButton->setEnabled(false);
+  this->KineticsWidget->setEnabled(false);
+  this->VOIsegmentSelectAll->setEnabled(false);
 
   // Make connections
   QObject::connect( this->PatSelector, SIGNAL(currentIndexChanged(int)),
@@ -93,8 +99,19 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onPlotbutton()));
   // QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
   //   q, SLOT(onPlotbutton()));
+  QObject::connect( this->IFSelector, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onIFSelectionChanged(int)));
+  QObject::connect( this->VOIsegmentSelectAll, SIGNAL(clicked(bool)),
+    q, SLOT(onVOISelectAllbutton()));
+  QObject::connect( this->ModelsSelectAll, SIGNAL(clicked(bool)),
+      q, SLOT(onModelsAllbutton()));
+  QObject::connect( this->FITbutton, SIGNAL(clicked(bool)),
+    q, SLOT(onFITbutton()));
+  QObject::connect( this->VOISelector, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onVOISelectionChanged(int)));
 
   this->TACCollapsibleButton->setCollapsed(true);
+  this->TCMCollapsibleButton->setCollapsed(true);
   for (const QString& name : q->checkboxNames)
   {
     QCheckBox* cb = new QCheckBox(name, this->PlotStatsCheckContents);
@@ -126,6 +143,21 @@ def DPE_save_multisheet_excel(filepath, sheet_data_dict):
             df = pd.DataFrame(data)[["Time(s)", "Duration", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 )PYTHON");
+
+  for (const QString& name : q->ModelsNames)
+  {
+    QCheckBox* cb = new QCheckBox(name, this->ModelsCheckContents);
+    this->ModelsCheckLayout->addWidget(cb);
+    QObject::connect(cb, SIGNAL(stateChanged(int)),
+                q, SLOT(onModelsChanged()));
+  }
+
+  for (int i = 0; i < q->StatsNames.size(); ++i)
+  {
+    this->StatSelector->addItem(q->StatsNames[i], q->StatsNames[i]);
+  }
+
+  this->StatSelector->setCurrentIndex(0);
 
 }
 
@@ -633,6 +665,210 @@ void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
 }
 
 
+void qSlicerKMAPModuleWidgetPrivate::populateIF()
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  std :: string currentSelectedID = "";
+  int currentIndex = this->IFSelector->currentIndex();
+  if (currentIndex >= 0)
+  {
+    currentSelectedID = this->IFSelector->itemData(currentIndex).toString().toStdString();
+  }
+
+  this->IFSelector->blockSignals(true);  // Optional: prevent signal emission
+  this->IFSelector->clear();
+  this->IFSelector->addItem(QString::fromStdString("None"), QString::fromStdString(""));
+
+  if (q->segmentTACsnames.empty() || q->segmentTACs.empty())
+  {
+    this->KineticsWidget->setEnabled(false);
+    this->IFSelector->blockSignals(false);
+    return;
+  }
+  this->KineticsWidget->setEnabled(true);
+
+  int restoredIndex = 0;
+  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  {
+    this->IFSelector->addItem(QString::fromStdString(displayName), QString::fromStdString(segmentID));
+    if (segmentID==currentSelectedID) {
+      restoredIndex = this->IFSelector->count() - 1;
+    }
+  }
+
+  // Restore previous selection if possible
+  if (restoredIndex >= 0)
+  {
+    this->IFSelector->setCurrentIndex(restoredIndex);
+  }
+
+  this->IFSelector->blockSignals(false);
+
+  std :: string passonID = restoredIndex>0 ? currentSelectedID : "";
+  q-> IFID = passonID;
+  this->populateVOI(q-> IFID);
+  return;
+}
+
+
+void qSlicerKMAPModuleWidgetPrivate::populateVOI(std :: string ifID)
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  // Step 1: Save currently selected segment IDs
+  QSet<QString> previouslySelectedIDs;
+  for (int i = 0; i < this->VOICheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = this->VOICheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslySelectedIDs.insert(checkbox->property("SegmentID").toString());
+    }
+  }
+
+  // Clear previous VOI checkboxes
+  this->VOICheckContents->blockSignals(true);
+  QLayoutItem* child;
+  while ((child = this->VOICheckLayout->takeAt(0)) != nullptr)
+  {
+    if (child->widget())
+    {
+      delete child->widget();
+    }
+    delete child;
+  }
+
+  if (ifID=="")
+  {
+    this->VOICheckContents->blockSignals(false);
+    q->VOIsegmentIDs.clear();
+    q->enableFITbutton();
+    this->VOIsegmentSelectAll->setEnabled(false);
+    return;
+  }
+
+  // Get the selected IF segment ID
+  q->VOIsegmentIDs.clear();
+
+  // Add checkboxes for all other segments
+  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  {
+    if (segmentID == ifID)
+      continue;
+
+    QCheckBox* cb = new QCheckBox(QString::fromStdString(displayName));
+    cb->setProperty("SegmentID", QString::fromStdString(segmentID));
+    bool wasSelected = previouslySelectedIDs.contains(QString::fromStdString(segmentID));
+    cb->setChecked(wasSelected);
+    this->VOICheckLayout->addWidget(cb);
+    QObject::connect(cb, SIGNAL(stateChanged(int)),
+                     q, SLOT(onVOISegmentsChanged()));
+    if (wasSelected)
+      q->VOIsegmentIDs.push_back(segmentID);
+  }
+  q->enableFITbutton();
+
+  this->VOICheckLayout->addStretch();
+  this->VOIsegmentSelectAll->setEnabled(true);
+  this->VOICheckContents->blockSignals(false);
+
+}
+
+
+void qSlicerKMAPModuleWidgetPrivate::populateResultsVOI()
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  std :: string currentSelectedID = "";
+  int currentIndex = this->VOISelector->currentIndex();
+  if (currentIndex >= 0)
+  {
+    currentSelectedID = this->VOISelector->itemData(currentIndex).toString().toStdString();
+  }
+
+  this->VOISelector->blockSignals(true);  // Optional: prevent signal emission
+  this->VOISelector->clear();
+  this->VOISelector->addItem(QString::fromStdString("None"), QString::fromStdString(""));
+
+  if (q->segmentTCM.empty() || q->segmentTACsnames.empty() || q->segmentTACs.empty()) {
+    this->TCMResultsButton->setEnabled(false);
+    this->VOISelector->blockSignals(false);
+    this->populateResultsTable("");
+    return;
+  }
+  this->TCMResultsButton->setEnabled(true);
+
+  int restoredIndex = 0;
+  for (const auto& [segmentID, _] : q->segmentTCM)
+  {
+    this->VOISelector->addItem(QString::fromStdString(q->segmentTACsnames[segmentID]), QString::fromStdString(segmentID));
+    if (segmentID==currentSelectedID) {
+      restoredIndex = this->VOISelector->count() - 1;
+    }
+  }
+
+  // Restore previous selection if possible
+  if (restoredIndex >= 0)
+  {
+    this->VOISelector->setCurrentIndex(restoredIndex);
+  }
+
+  this->VOISelector->blockSignals(false);
+
+  std :: string passonID = restoredIndex>0 ? currentSelectedID : "";
+  this->populateResultsTable(passonID);
+  return;
+}
+
+void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentID)
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  this->TCMResultsTable->clear();
+  this->TCMResultsTable->setRowCount(0);
+  this->TCMResultsTable->setColumnCount(0);
+
+  if (segmentID.empty())
+  {
+    return;
+  }
+
+  // Define column headers
+  QStringList headers = { "", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE" };
+  this->TCMResultsTable->setColumnCount(headers.size());
+  this->TCMResultsTable->setHorizontalHeaderLabels(headers);
+
+  // Get the parameter map for the selected segment
+  const auto& labelMap = q->segmentTCM[segmentID];
+  int row = 0;
+  this->TCMResultsTable->setRowCount(labelMap.size());
+
+  for (const auto& [label, params] : labelMap)
+  {
+    this->TCMResultsTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(label)));
+    this->TCMResultsTable->setItem(row, 1, new QTableWidgetItem(QString::number(params.K1)));
+    this->TCMResultsTable->setItem(row, 2, new QTableWidgetItem(QString::number(params.k2)));
+    this->TCMResultsTable->setItem(row, 3, new QTableWidgetItem(QString::number(params.k3)));
+    this->TCMResultsTable->setItem(row, 4, new QTableWidgetItem(QString::number(params.k4)));
+    this->TCMResultsTable->setItem(row, 5, new QTableWidgetItem(QString::number(params.vb)));
+    this->TCMResultsTable->setItem(row, 6, new QTableWidgetItem(QString::number(params.td)));
+    this->TCMResultsTable->setItem(row, 7, new QTableWidgetItem(QString::number(params.Ki)));
+    this->TCMResultsTable->setItem(row, 8, new QTableWidgetItem(QString::number(params.DV)));
+    this->TCMResultsTable->setItem(row, 9, new QTableWidgetItem(QString::number(params.AIC)));
+    this->TCMResultsTable->setItem(row, 10, new QTableWidgetItem(QString::number(params.MASE)));
+
+    ++row;
+  }
+
+  // Make table read-only
+  this->TCMResultsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  this->TCMResultsTable->resizeColumnsToContents();
+
+}
+
+
 
 //-----------------------------------------------------------------------------
 // qSlicerKMAPModuleWidget methods
@@ -655,6 +891,12 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->ProgressBar->setValue(0);
   this->checkboxNames = QStringList{
     "Mean", "Median", "Min", "Max", "VoxelCount", "Volume(cc)"
+  };
+  this->ModelsNames = QStringList{
+    "Patlak", "Logan", "RE", "1TCM", "1TdCM", "1TiCM", "1TidCM", "2TCM", "2dTCM", "2TiCM", "2TidCM"
+  };
+  this->StatsNames = QStringList{
+    "Mean", "Median"
   };
   d->init();
 }
@@ -887,7 +1129,7 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
   }
   // std::cout << "Selected Patient ID: " << id << std::endl;
   std :: string name = this->SubjectHierarchyNode->GetItemName(this->patID);
-  std :: string excelfile = name + ".xlsx";
+  std :: string excelfile = name + "_TAC.xlsx";
   d->fileexcel->setText(QString::fromStdString(excelfile));
   //
   // std::cout << "Name: " << name
@@ -998,6 +1240,7 @@ void qSlicerKMAPModuleWidget::clearTACdata() {
   this->segmentTACs.clear();
   this->segmentTACsnames.clear();
   d->populatePlotSegmentCheckboxes();
+  d->populateIF();
   d->TACCollapsibleButton->setCollapsed(true);
   for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
   {
@@ -1136,9 +1379,11 @@ void qSlicerKMAPModuleWidget::onTACbutton()
   this->ProgressBar->setVisible(true);
   qApp->processEvents();
   logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
+  this->ProgressBar->setValue(0);
   this->ProgressBar->setVisible(false);
   qApp->processEvents();
   d->populatePlotSegmentCheckboxes();
+  d->populateIF();
   return;
 }
 
@@ -1359,4 +1604,386 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
     plotViewNode->SetPlotChartNodeID(chartNode->GetID());
   }
 
+}
+
+void qSlicerKMAPModuleWidget::onIFSelectionChanged(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  this->IFID = d->IFSelector->itemData(index).toString().toStdString();
+  d->populateVOI(this->IFID);
+  if (this->IFID == "")
+  {
+    return;
+  }
+
+}
+
+void qSlicerKMAPModuleWidget::onVOISelectionChanged(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  std :: string segmentID = d->VOISelector->itemData(index).toString().toStdString();
+  d->populateResultsTable(segmentID);
+  if (segmentID == "")
+  {
+    // "None" selected — ignore or reset state
+    // d->VOIfileexcel->setText(QString::fromStdString(".xlsx"));
+    return;
+  }
+  // std::cout << "Selected Patient ID: " << id << std::endl;
+  // std :: string name = this->SubjectHierarchyNode->GetItemName(this->patID);
+  // std :: string excelfile = name + "_Kinetics.xlsx";
+  // d->VOIfileexcel->setText(QString::fromStdString(excelfile));
+
+}
+
+void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  if (this->VOIsegmentIDs.size()==(d->VOICheckLayout->count()-1)) {
+    for (int i = 0; i < d->VOICheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->VOICheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(false);
+      }
+    }
+  } else {
+    for (int i = 0; i < d->VOICheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->VOICheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(true);
+      }
+    }
+  }
+  d->populateVOI(this->IFID);
+}
+
+
+void qSlicerKMAPModuleWidget::clearFITdata() {
+  Q_D(qSlicerKMAPModuleWidget);
+  this->segmentMTGA.clear();
+  this->segmentTCM.clear();
+  d->populateResultsVOI();
+  d->TCMResultsButton->setCollapsed(true);
+  // d->resultsdirexcel->setCurrentPath(QString::fromStdString(""));
+  // d->saveResultsExcelButton->setEnabled(false);
+  // this->RemoveExistingPlotChartAndTable();
+  return;
+
+}
+
+
+
+void qSlicerKMAPModuleWidget::enableFITbutton() {
+  Q_D(qSlicerKMAPModuleWidget);
+  if (this->IFID=="") {
+    d->FITbutton->setEnabled(false);
+    this->clearFITdata();
+    return;
+  }
+  if (this->VOIsegmentIDs.empty()) {
+    d->FITbutton->setEnabled(false);
+    this->clearFITdata();
+    return;
+  }
+  if (this->modelsID.empty()) {
+    d->FITbutton->setEnabled(false);
+    this->clearFITdata();
+    return;
+  }
+  d->FITbutton->setEnabled(true);
+}
+
+
+void qSlicerKMAPModuleWidget::onVOISegmentsChanged()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  std::vector<std::string> VOIselectedSegmentIDs;
+
+  for (int i = 0; i < d->VOICheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->VOICheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      std :: string segmentID = checkbox->property("SegmentID").toString().toStdString();
+      VOIselectedSegmentIDs.push_back(segmentID);
+    }
+  }
+  this->VOIsegmentIDs = VOIselectedSegmentIDs;
+
+  this->enableFITbutton();
+}
+
+void qSlicerKMAPModuleWidget::onFITbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  if (segmentTACsnames.empty() || segmentTACs.empty()) {
+    std::cerr << "Missing TACs!" << std::endl;
+    return;
+  }
+
+  if (durations.empty() || timePoints.empty()) {
+    std::cerr << "Missing frame time information!" << std::endl;
+    return;
+  }
+
+  int statIDQString = d->StatSelector->currentIndex();
+  if (statIDQString<0) {
+    std::cerr << "Missing stat choice!" << std::endl;
+    return;
+  }
+  std::string currentSelectedStatID = d->StatSelector->itemData(statIDQString).toString().toStdString();
+
+
+  if (IFID.empty()) {
+    std::cerr << "Missing input function!" << std::endl;
+    return;
+  }
+
+  if (VOIsegmentIDs.empty()) {
+    std::cerr << "Missing VOIs to fit!" << std::endl;
+    return;
+  }
+
+  if (modelsID.empty()) {
+    std::cerr << "Missing Models to fit!" << std::endl;
+    return;
+  }
+
+  // Run TAC computation
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    std::cerr << "Missing Logic!" << std::endl;
+    return;
+  }
+
+  // Collect parameters using a lambda for brevity
+  auto getParamTriplet = [&](QLineEdit* init, QLineEdit* lb, QLineEdit* ub) {
+    return std::tuple<double, double, double>{
+      init->text().toDouble(), lb->text().toDouble(), ub->text().toDouble()
+    };
+  };
+
+  auto [k1Init, k1Lower, k1Upper] = getParamTriplet(d->k1Initial, d->k1Lower, d->k1Upper);
+  auto [k2Init, k2Lower, k2Upper] = getParamTriplet(d->k2Initial, d->k2Lower, d->k2Upper);
+  auto [k3Init, k3Lower, k3Upper] = getParamTriplet(d->k3Initial, d->k3Lower, d->k3Upper);
+  auto [k4Init, k4Lower, k4Upper] = getParamTriplet(d->k4Initial, d->k4Lower, d->k4Upper);
+  auto [vbInit, vbLower, vbUpper] = getParamTriplet(d->vbInitial, d->vbLower, d->vbUpper);
+  auto [tdInit, tdLower, tdUpper] = getParamTriplet(d->tdInitial, d->tdLower, d->tdUpper);
+
+  const long Nframe = timePoints.size();
+  const long Nvox = 1;
+
+  std::vector<std::vector<double>> framing;
+  framing.reserve(Nframe);
+  for (double d : durations)
+  {
+    framing.emplace_back(1, d);  // Adds a vector with 1 element (column vector)
+  }
+
+  std::map<std::string, std::vector<std::vector<double>>> tac;
+  for (const auto& [segmentName, statsVec] : segmentTACs)
+  {
+    if (statsVec.size() != static_cast<size_t>(Nframe))
+    {
+      std::cerr << "Mismatch in TAC frame size for segment " << segmentName << std::endl;
+      return;
+    }
+
+    tac[segmentName].reserve(Nframe);
+    for (const auto& vs : statsVec)
+    {
+      double value;
+      if (currentSelectedStatID == "Mean")
+        value = vs.mean;
+      else if (currentSelectedStatID == "Median")
+        value = vs.median;
+      else
+      {
+        std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
+        return;
+      }
+      tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
+    }
+  }
+
+  const double dk = 0.;
+  const double timestep = 1.;
+  const double pbrp[] = {1.0, 0.0, 0.0};
+  const int maxiter = 100;
+
+  std::vector<std::vector<double>> Cp = tac[IFID];
+
+  for (const std::string& segmentID : VOIsegmentIDs)
+  {
+    const auto& tacVOI = tac[segmentID];
+
+    for (const std::string& modelID : modelsID)
+    {
+      if (modelID == "Patlak") {
+        std::cout << "Running Patlak" << std::endl;
+        // logic->Patlak(...);
+      }
+      else if (modelID == "Logan") {
+        std::cout << "Running Logan" << std::endl;
+        // logic->Logan(...);
+      }
+      else if (modelID == "RE") {
+        std::cout << "Running RE" << std::endl;
+        // logic->RE(...);
+      }
+      else if (modelID == "1TCM") {
+        bool sens[] = {true, true, true, false};
+        double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, 0.};
+        double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, 0.};
+        double init_1tcm[] = {vbInit,  k1Init,  k2Init,  0.};
+        // std::cout << "Running 1TCM" << std::endl;
+
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_1tcm, lb_1tcm, ub_1tcm, sens,
+                       dk, timestep, pbrp, maxiter, 1,
+                       this->segmentTCM[segmentID]["1TCM"]);
+      }
+      else if (modelID == "1TdCM") {
+        bool sens[] = {true, true, true, true};
+        double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, tdLower};
+        double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, tdUpper};
+        double init_1tcm[] = {vbInit,  k1Init,  k2Init,  tdInit};
+        // std::cout << "Running 1TdCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_1tcm, lb_1tcm, ub_1tcm, sens,
+                       dk, timestep, pbrp, maxiter, 1,
+                       this->segmentTCM[segmentID]["1TdCM"]);
+      }
+      else if (modelID == "1TiCM") {
+        bool sens[] = {true, true, false, false};
+        double lb_1tcm[]   = {vbLower, k1Lower, 0., 0.};
+        double ub_1tcm[]   = {vbUpper, k1Upper, 0., 0.};
+        double init_1tcm[] = {vbInit,  k1Init,  0.,  0.};
+        // std::cout << "Running 1TiCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_1tcm, lb_1tcm, ub_1tcm, sens,
+                       dk, timestep, pbrp, maxiter, 1,
+                       this->segmentTCM[segmentID]["1TiCM"]);
+      }
+      else if (modelID == "1TidCM") {
+        bool sens[] = {true, true, false, true};
+        double lb_1tcm[]   = {vbLower, k1Lower, 0., tdLower};
+        double ub_1tcm[]   = {vbUpper, k1Upper, 0., tdUpper};
+        double init_1tcm[] = {vbInit,  k1Init,  0.,  tdInit};
+        // std::cout << "Running 1TidCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_1tcm, lb_1tcm, ub_1tcm, sens,
+                       dk, timestep, pbrp, maxiter, 1,
+                       this->segmentTCM[segmentID]["1TidCM"]);
+      }
+      else if (modelID == "2TCM") {
+        bool sens[] = {true, true, true, true, true, false};
+        double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, 0.};
+        double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, 0.};
+        double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  0.};
+        // std::cout << "Running 2TCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_2tcm, lb_2tcm, ub_2tcm, sens,
+                       dk, timestep, pbrp, maxiter, 2,
+                       this->segmentTCM[segmentID]["2TCM"]);
+      }
+      else if (modelID == "2dTCM") {
+        bool sens[] = {true, true, true, true, true, true};
+        double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
+        double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
+        double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  tdInit};
+        // std::cout << "Running 2dTCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_2tcm, lb_2tcm, ub_2tcm, sens,
+                       dk, timestep, pbrp, maxiter, 2,
+                       this->segmentTCM[segmentID]["2dTCM"]);
+      }
+      else if (modelID == "2TiCM") {
+        bool sens[] = {true, true, true, true, false, false};
+        double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., 0.};
+        double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., 0.};
+        double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0., 0.};
+        // std::cout << "Running 2TiCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_2tcm, lb_2tcm, ub_2tcm, sens,
+                       dk, timestep, pbrp, maxiter, 2,
+                       this->segmentTCM[segmentID]["2TiCM"]);
+      }
+      else if (modelID == "2TidCM") {
+        bool sens[] = {true, true, true, true, false, true};
+        double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., tdLower};
+        double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., tdUpper};
+        double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0.,  tdInit};
+        // std::cout << "Running 2TidCM" << std::endl;
+        logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
+                       init_2tcm, lb_2tcm, ub_2tcm, sens,
+                       dk, timestep, pbrp, maxiter, 2,
+                       this->segmentTCM[segmentID]["2TidCM"]);
+      }
+      else {
+        std::cerr << "Unknown model ID: " << modelID << std::endl;
+        return;
+      }
+    }
+  }
+  d->populateResultsVOI();
+}
+
+
+void qSlicerKMAPModuleWidget::onModelsAllbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  if (this->modelsID.size()==(d->ModelsCheckLayout->count())) {
+    this->modelsID.clear();
+    for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->setChecked(false);
+      }
+    }
+  } else {
+    this->modelsID.clear();
+    for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->setChecked(true);
+        this->modelsID.push_back(checkbox->text().toStdString());
+      }
+    }
+  }
+  this->enableFITbutton();
+
+}
+
+void qSlicerKMAPModuleWidget::onModelsChanged()
+{
+  Q_D(const qSlicerKMAPModuleWidget);
+
+  this->modelsID.clear();
+  for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      this->modelsID.push_back(checkbox->text().toStdString());
+    }
+  }
+  this->enableFITbutton();
+  return ;
 }

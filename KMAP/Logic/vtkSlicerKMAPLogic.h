@@ -51,6 +51,8 @@
 #include <vtkOrientedImageData.h>
 #include "vtkSlicerSegmentationsModuleLogic.h"
 #include <QProgressBar.h>
+#include <kmodels.h>
+#include <utils.hpp>
 
 struct VoxelStatistics
 {
@@ -67,6 +69,29 @@ struct VoxelStatistics
   double volume_cm3 = 0.0;
 };
 
+struct MTGAParameters
+{
+  double Ki = 0.;
+  double Intercept = 0.;
+  double DV = 0;
+  double AIC = 0;
+  double MASE = 0;
+};
+
+struct TCMParameters
+{
+  double K1 = 0.;
+  double k2 = 0.;
+  double k3 = 0.;
+  double k4 = 0.;
+  double vb = 0.;
+  double td = 0.;
+  double Ki = 0.;
+  double DV = 0.;
+  double AIC = 0.;
+  double MASE = 0.;
+};
+
 class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
   public vtkSlicerModuleLogic
 {
@@ -79,6 +104,22 @@ public:
   void setupSeg(vtkMRMLSegmentationNode* segNode);
   VoxelStatistics ComputeVoxelStatistics(vtkImageData* petImage, vtkImageData* labelmap, int labelValue = 1);
   void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
+  void callTCM(std :: vector< std :: vector<double> > tac,
+               std :: vector< std :: vector<double> > Cp,
+               std :: vector< std :: vector<double> > framing,
+               long int Nframe,
+               long int Nvox,
+               double* kinit,
+               double* lb,
+               double* ub,
+               const bool* sens,
+               const double dk,
+               const double timestep,
+               const double pbrp[],
+               const int maxiter,
+               const int n_tc,
+               TCMParameters& params
+               );
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

@@ -45,6 +45,7 @@ public:
   void populateVOI(std :: string ifID);
   void populateResultsVOI();
   void populateResultsTable(std :: string segmentID);
+  void populateModelsTCM(std :: string segmentID);
 };
 
 //-----------------------------------------------------------------------------
@@ -97,6 +98,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onSaveExcelbutton()));
   QObject::connect( this->plotButton, SIGNAL(clicked(bool)),
     q, SLOT(onPlotbutton()));
+  QObject::connect( this->plotTCMButton, SIGNAL(clicked(bool)),
+    q, SLOT(onPlotTCMbutton()));
   // QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
   //   q, SLOT(onPlotbutton()));
   QObject::connect( this->IFSelector, SIGNAL(currentIndexChanged(int)),
@@ -105,6 +108,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onVOISelectAllbutton()));
   QObject::connect( this->ModelsSelectAll, SIGNAL(clicked(bool)),
       q, SLOT(onModelsAllbutton()));
+  QObject::connect( this->ModelsTCMSelectAll, SIGNAL(clicked(bool)),
+      q, SLOT(onModelsTCMSelectAllbutton()));
   QObject::connect( this->FITbutton, SIGNAL(clicked(bool)),
     q, SLOT(onFITbutton()));
   QObject::connect( this->VOISelector, SIGNAL(currentIndexChanged(int)),
@@ -818,6 +823,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsVOI()
   this->VOISelector->blockSignals(false);
 
   std :: string passonID = restoredIndex>0 ? currentSelectedID : "";
+  q->plotTCMVOI = passonID;
   this->populateResultsTable(passonID);
   return;
 }
@@ -832,6 +838,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
 
   if (segmentID.empty())
   {
+    this->populateModelsTCM(segmentID);
     return;
   }
 
@@ -845,6 +852,8 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   int row = 0;
   this->TCMResultsTable->setRowCount(labelMap.size());
 
+  int totalRowHeight = 0;
+  this->TCMResultsTable->resizeRowsToContents();
   for (const auto& [label, params] : labelMap)
   {
     this->TCMResultsTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(label)));
@@ -859,12 +868,70 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
     this->TCMResultsTable->setItem(row, 9, new QTableWidgetItem(QString::number(params.AIC)));
     this->TCMResultsTable->setItem(row, 10, new QTableWidgetItem(QString::number(params.MASE)));
 
+    totalRowHeight += this->TCMResultsTable->rowHeight(row);
     ++row;
   }
-
+  totalRowHeight += this->TCMResultsTable->horizontalHeader()->height();
+  totalRowHeight += 2 * this->TCMResultsTable->frameWidth();
+  this->TCMResultsTable->setMinimumHeight(totalRowHeight);
+  this->TCMResultsTable->setMaximumHeight(totalRowHeight);
   // Make table read-only
   this->TCMResultsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
   this->TCMResultsTable->resizeColumnsToContents();
+  this->populateModelsTCM(segmentID);
+
+}
+
+
+void qSlicerKMAPModuleWidgetPrivate::populateModelsTCM(std :: string segmentID)
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+  // Step 1: Save currently selected segment IDs
+  QSet<QString> previouslySelectedIDs;
+  for (int i = 0; i < this->ModelsTCMCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = this->ModelsTCMCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslySelectedIDs.insert(checkbox->text());
+    }
+  }
+
+  // Clear previous VOI checkboxes
+  this->ModelsTCMCheckContents->blockSignals(true);
+  QLayoutItem* child;
+  while ((child = this->ModelsTCMCheckLayout->takeAt(0)) != nullptr)
+  {
+    if (child->widget())
+    {
+      delete child->widget();
+    }
+    delete child;
+  }
+
+
+  if (segmentID.empty())
+  {
+    this->ModelsTCMCheckContents->blockSignals(false);
+    this->plotTCMButton->setEnabled(false);
+    this->ModelsTCMSelectAll->setEnabled(false);
+    return;
+  }
+
+  // Get the parameter map for the selected segment
+  const auto& labelMap = q->segmentTCM[segmentID];
+  for (const auto& [label, params] : labelMap) {
+    QCheckBox* cb = new QCheckBox(QString::fromStdString(label));
+    bool wasSelected = previouslySelectedIDs.contains(QString::fromStdString(label));
+    cb->setChecked(wasSelected);
+    this->ModelsTCMCheckLayout->addWidget(cb);
+  }
+  this->plotTCMButton->setEnabled(true);
+
+  this->ModelsTCMCheckLayout->addStretch();
+  this->ModelsTCMSelectAll->setEnabled(true);
+  this->ModelsTCMCheckContents->blockSignals(false);
 
 }
 
@@ -1622,6 +1689,7 @@ void qSlicerKMAPModuleWidget::onVOISelectionChanged(int index)
 {
   Q_D(qSlicerKMAPModuleWidget);
   std :: string segmentID = d->VOISelector->itemData(index).toString().toStdString();
+  this->plotTCMVOI=segmentID;
   d->populateResultsTable(segmentID);
   if (segmentID == "")
   {
@@ -1813,6 +1881,7 @@ void qSlicerKMAPModuleWidget::onFITbutton()
       tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
     }
   }
+  this->segmentTAC4TCMfits = tac;
 
   const double dk = 0.;
   const double timestep = 1.;
@@ -1850,6 +1919,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
                        this->segmentTCM[segmentID]["1TCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TCM"],
+                            Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
+                            ub_1tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["1TCM"]);
       }
       else if (modelID == "1TdCM") {
         bool sens[] = {true, true, true, true};
@@ -1861,6 +1934,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
                        this->segmentTCM[segmentID]["1TdCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TdCM"],
+                            Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
+                            ub_1tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["1TdCM"]);
       }
       else if (modelID == "1TiCM") {
         bool sens[] = {true, true, false, false};
@@ -1872,6 +1949,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
                        this->segmentTCM[segmentID]["1TiCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TiCM"],
+                            Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
+                            ub_1tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["1TiCM"]);
       }
       else if (modelID == "1TidCM") {
         bool sens[] = {true, true, false, true};
@@ -1883,6 +1964,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
                        this->segmentTCM[segmentID]["1TidCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TidCM"],
+                            Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
+                            ub_1tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["1TidCM"]);
       }
       else if (modelID == "2TCM") {
         bool sens[] = {true, true, true, true, true, false};
@@ -1894,6 +1979,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
                        this->segmentTCM[segmentID]["2TCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TCM"],
+                            Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
+                            ub_2tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["2TCM"]);
       }
       else if (modelID == "2dTCM") {
         bool sens[] = {true, true, true, true, true, true};
@@ -1905,6 +1994,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
                        this->segmentTCM[segmentID]["2dTCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["2dTCM"],
+                            Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
+                            ub_2tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["2dTCM"]);
       }
       else if (modelID == "2TiCM") {
         bool sens[] = {true, true, true, true, false, false};
@@ -1916,6 +2009,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
                        this->segmentTCM[segmentID]["2TiCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TiCM"],
+                            Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
+                            ub_2tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["2TiCM"]);
       }
       else if (modelID == "2TidCM") {
         bool sens[] = {true, true, true, true, false, true};
@@ -1927,6 +2024,10 @@ void qSlicerKMAPModuleWidget::onFITbutton()
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
                        this->segmentTCM[segmentID]["2TidCM"]);
+        logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TidCM"],
+                            Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
+                            ub_2tcm, sens, dk, timestep, pbrp, maxiter,
+                            1, this->segmentTCM[segmentID]["2TidCM"]);
       }
       else {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
@@ -1936,7 +2037,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   }
   d->populateResultsVOI();
 }
-
 
 void qSlicerKMAPModuleWidget::onModelsAllbutton()
 {
@@ -1986,4 +2086,158 @@ void qSlicerKMAPModuleWidget::onModelsChanged()
   }
   this->enableFITbutton();
   return ;
+}
+
+void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  QSet<QString> previouslySelectedIDs;
+  for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsTCMCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslySelectedIDs.insert(checkbox->text());
+    }
+  }
+
+  if (previouslySelectedIDs.size()==(d->ModelsTCMCheckLayout->count()-1)) {
+    for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->ModelsTCMCheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(false);
+      }
+    }
+  } else {
+    for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
+    {
+      QWidget* widget = d->ModelsTCMCheckLayout->itemAt(i)->widget();
+      QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+      if (cb)
+      {
+        cb->setChecked(true);
+      }
+    }
+  }
+  d->populateModelsTCM(this->plotTCMVOI);
+}
+
+
+void qSlicerKMAPModuleWidget::onPlotTCMbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  vtkMRMLScene* scene = this->mrmlScene();
+
+  // Get selected VOI to plot TCM fit
+  std :: string selectedVOI = this->plotTCMVOI;
+
+  // Get TAC to plot
+  std::vector<std::vector<double>> tacvoi = this->segmentTAC4TCMfits[selectedVOI];
+
+  // Get TCM models to plot
+  std::vector<std::string> PlotSelectedTCMs;
+  for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsTCMCheckLayout->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      PlotSelectedTCMs.push_back(checkbox->text().toStdString());
+    }
+  }
+
+  std::map<std::string, double*> TCMfits = this->segmentTCMfits[selectedVOI];
+
+  if (selectedVOI.empty() || segmentTAC4TCMfits.empty() || PlotSelectedTCMs.empty() || TCMfits.empty())
+    return;
+
+  // Clear previous plot/chart/table
+  this->RemoveExistingPlotChartAndTable();
+
+  // Create or get table
+  vtkSmartPointer<vtkMRMLTableNode> tableNode = this->GetOrCreatePlotTable();
+
+  // Add time column (convert to minutes)
+  vtkNew<vtkDoubleArray> timeArray;
+  timeArray->SetName("Time (min)");
+  for (double t : this->timePoints)
+    timeArray->InsertNextValue(t / 60.0);
+  tableNode->AddColumn(timeArray);
+
+  // Create plot chart
+  vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
+
+  // TAC as scatterpoints
+  vtkNew<vtkDoubleArray> tacArray;
+  tacArray->SetName("TAC");
+  for (size_t i = 0; i < tacvoi.size(); ++i)
+  {
+      // Assuming tacvoi[0] holds measured values for VOI (adapt if structured differently)
+      tacArray->InsertNextValue(tacvoi[i][0]);
+  }
+  tableNode->AddColumn(tacArray);
+
+  vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+  scene->AddNode(scatterSeries);
+  scatterSeries->SetName("TAC");
+  scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);  // scatter points
+  scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
+  scatterSeries->SetXColumnName("Time (min)");
+  scatterSeries->SetYColumnName("TAC");
+  scatterSeries->SetUniqueColor();
+  scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
+  chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
+  chartNode->SetTitle(this->segmentTACsnames[selectedVOI].c_str());
+  chartNode->SetXAxisTitle("Time (min)");
+  chartNode->SetYAxisTitle("SUVbw (g/mL)");
+
+  // TCM fits as line plots
+  for (const std::string& modelName : PlotSelectedTCMs)
+  {
+      auto it = TCMfits.find(modelName);
+      if (it == TCMfits.end() || !it->second)
+        continue;
+
+
+      double* fitArrayPtr = it->second;
+
+      vtkNew<vtkDoubleArray> fitArray;
+      fitArray->SetName(modelName.c_str());
+
+      for (size_t i = 0; i < this->timePoints.size(); ++i)
+      {
+          fitArray->InsertNextValue(fitArrayPtr[i]);
+      }
+
+      tableNode->AddColumn(fitArray);
+
+      vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+      scene->AddNode(lineSeries);
+      lineSeries->SetName(modelName.c_str());
+      lineSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);  // line plot
+      lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
+      lineSeries->SetXColumnName("Time (min)");
+      lineSeries->SetYColumnName(modelName.c_str());
+      lineSeries->SetUniqueColor();
+      lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+      chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
+  }
+
+  // Show plot view
+  auto* layoutNode = vtkMRMLLayoutNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
+  if (layoutNode)
+    layoutNode->SetViewArrangement(vtkMRMLLayoutNode::SlicerLayoutConventionalPlotView);
+
+  vtkMRMLPlotViewNode* plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(
+      scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
+  if (plotViewNode)
+  {
+      plotViewNode->SetPlotChartNodeID(chartNode->GetID());
+  }
+
 }

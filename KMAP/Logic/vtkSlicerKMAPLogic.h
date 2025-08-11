@@ -120,6 +120,22 @@ public:
                const int n_tc,
                TCMParameters& params
                );
+  void getFittedTCM(double *& fitted_curve,
+                    std :: vector< std :: vector<double> > Cp,
+                    std :: vector< std :: vector<double> > framing,
+                    long int Nframe,
+                    long int Nvox,
+                    double* kinit,
+                    double* lb,
+                    double* ub,
+                    const bool* sens,
+                    const double dk,
+                    const double timestep,
+                    const double pbrp[],
+                    const int maxiter,
+                    const int n_tc,
+                    TCMParameters& params
+                    );
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

@@ -98,6 +98,8 @@ public slots:
   void onModelsChanged();
   void onModelsAllbutton();
   void onVOISelectionChanged(int index);
+  void onModelsTCMSelectAllbutton();
+  void onPlotTCMbutton();
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -113,10 +115,12 @@ private:
   std::map<std::string, std::string> segmentTACsnames;
   std::map<std::string, std::map<std::string, TCMParameters>> segmentMTGA;
   std::map<std::string, std::map<std::string, TCMParameters>> segmentTCM;
+  std::map<std::string, std::vector<std::vector<double>>> segmentTAC4TCMfits;
+  std::map<std::string, std::map<std::string, double*>> segmentTCMfits;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;
   QStringList checkboxNames, ModelsNames, StatsNames;
-  std :: string IFID;
+  std :: string IFID, plotTCMVOI;
   std :: vector < std :: string > VOIsegmentIDs, modelsID;
 };
 

@@ -76,6 +76,7 @@ struct MTGAParameters
   double DV = 0;
   double AIC = 0;
   double MASE = 0;
+  std::vector<double> x, y, fitted;
 };
 
 struct TCMParameters
@@ -118,24 +119,73 @@ public:
                const double pbrp[],
                const int maxiter,
                const int n_tc,
-               TCMParameters& params
+               TCMParameters& params,
+               double*& fitted_curve,
+               const std::vector<double>* wgt
                );
-  void getFittedTCM(double *& fitted_curve,
-                    std :: vector< std :: vector<double> > Cp,
-                    std :: vector< std :: vector<double> > framing,
-                    long int Nframe,
-                    long int Nvox,
-                    double* kinit,
-                    double* lb,
-                    double* ub,
-                    const bool* sens,
-                    const double dk,
-                    const double timestep,
-                    const double pbrp[],
-                    const int maxiter,
-                    const int n_tc,
-                    TCMParameters& params
-                    );
+  // void getFittedTCM(double *& fitted_curve,
+  //                   std :: vector< std :: vector<double> > Cp,
+  //                   std :: vector< std :: vector<double> > framing,
+  //                   long int Nframe,
+  //                   long int Nvox,
+  //                   double* kinit,
+  //                   double* lb,
+  //                   double* ub,
+  //                   const bool* sens,
+  //                   const double dk,
+  //                   const double timestep,
+  //                   const double pbrp[],
+  //                   const int maxiter,
+  //                   const int n_tc,
+  //                   TCMParameters& params
+  //                   );
+  double computeAIC(const std::vector<double>& obs,
+                    const std::vector<double>& est,
+                    int numpar,
+                    const std::vector<double>* wgt = nullptr,
+                    bool aicc = true);
+  double MASE(const std::vector<double>& Actual,
+              const std::vector<double>& Predicted,
+              const std::vector<double>* wgt = nullptr);
+  void Patlak(const std::vector<double>& tac,
+              const std::vector<double>& Cp,
+              const std::vector<double>& framing,
+              MTGAParameters & params,
+              const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+              const double timeOffset = 0.,
+              const double framingNorm = 60.,
+              bool robust = false,
+              bool std = true,
+              double huber_tune = 1.345,
+              double tol = 1e-6,
+              int max_iter = 50
+            );
+  void Logan(const std::vector<double>& tac,
+             const std::vector<double>& Cp,
+             const std::vector<double>& framing,
+             MTGAParameters & params,
+             const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+             const double timeOffset = 0.,
+             const double framingNorm = 60.,
+             bool robust = false,
+             bool std = true,
+             double huber_tune = 1.345,
+             double tol = 1e-6,
+             int max_iter = 50
+           );
+ void RE(const std::vector<double>& tac,
+         const std::vector<double>& Cp,
+         const std::vector<double>& framing,
+         MTGAParameters & params,
+         const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+         const double timeOffset = 0.,
+         const double framingNorm = 60.,
+         bool robust = false,
+         bool std = true,
+         double huber_tune = 1.345,
+         double tol = 1e-6,
+         int max_iter = 50
+       );
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

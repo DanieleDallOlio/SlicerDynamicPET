@@ -71,9 +71,15 @@ public:
   void getDurations();
   void clearTACdata();
   void clearFITdata();
+  void clearFITMTGAdata();
   void enableTACbutton();
   void enableFITbutton();
+  void enableFITMTGAbutton();
   QVariantMap TACtoPythonDict();
+  QVariantMap fittedTCMtoPythonDict();
+  QVariantMap fittedMTGAtoPythonDict();
+  QVariantMap TCMParamsToPythonDict();
+  QVariantMap MTGAParamsToPythonDict();
   void RemoveExistingPlotChartAndTable();
   vtkMRMLPlotChartNode* GetOrCreatePlotChart();
   vtkMRMLTableNode* GetOrCreatePlotTable();
@@ -89,17 +95,39 @@ public slots:
   void onTACbutton();
   void onSelectAllbutton();
   void onExcelPathChanged(const QString& path);
+  void onExcelTCMfittedPathChanged(const QString& path);
+  void onExcelMTGAfittedPathChanged(const QString& path);
+  void onExcelTCMPathChanged(const QString& path);
+  void onExcelMTGAPathChanged(const QString& path);
   void onSaveExcelbutton();
+  void onSaveTCMExcelbutton();
+  void onSaveMTGAExcelbutton();
+  void onSaveTCMfittedExcelbutton();
+  void onSaveMTGAfittedExcelbutton();
   void onPlotbutton();
   void onIFSelectionChanged(int index);
+  void onIFMTGASelectionChanged(int index);
   void onVOISelectAllbutton();
+  void onVOIMTGASelectAllbutton();
   void onFITbutton();
+  void onFITMTGAbutton();
   void onVOISegmentsChanged();
+  void onVOIMTGASegmentsChanged();
   void onModelsChanged();
+  void onModelsMTGAChanged();
   void onModelsAllbutton();
+  void onModelsMTGAAllbutton();
   void onVOISelectionChanged(int index);
+  void onVOIMTGASelectionChanged(int index);
   void onModelsTCMSelectAllbutton();
   void onPlotTCMbutton();
+  void onPlotMTGAbutton();
+  void onOLSclicked();
+  void onWLSclicked();
+  void onRLSclicked();
+  void onSliderChanged(int index);
+  void onStdFitclicked();
+  void onWFitclicked();
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -108,20 +136,22 @@ protected:
 private:
   Q_DECLARE_PRIVATE(qSlicerKMAPModuleWidget);
   Q_DISABLE_COPY(qSlicerKMAPModuleWidget);
+  std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
   std::vector<QString> segmentIDs;
   std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
   std::map<std::string, std::string> segmentTACsnames;
-  std::map<std::string, std::map<std::string, TCMParameters>> segmentMTGA;
+  std::map<std::string, std::map<std::string, MTGAParameters>> segmentMTGA;
   std::map<std::string, std::map<std::string, TCMParameters>> segmentTCM;
   std::map<std::string, std::vector<std::vector<double>>> segmentTAC4TCMfits;
+  std::map< std::string, std::vector<double>> segmentWeights4TCMfits;
   std::map<std::string, std::map<std::string, double*>> segmentTCMfits;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;
-  QStringList checkboxNames, ModelsNames, StatsNames;
-  std :: string IFID, plotTCMVOI;
-  std :: vector < std :: string > VOIsegmentIDs, modelsID;
+  QStringList checkboxNames, ModelsNamesTCM, ModelsNamesMTGA, StatsNames;
+  std :: string IFID, plotTCMVOI, plotMTGAVOI, plotMTGAModel;
+  std :: vector < std :: string > VOIsegmentIDs, VOIMTGAsegmentIDs, modelsID, modelsMTGAID;
 };
 
 #endif

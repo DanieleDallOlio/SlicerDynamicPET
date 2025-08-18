@@ -207,7 +207,7 @@
                           </property>
                         </widget>
                       </item>
-                      <item>
+                      <!-- <item>
                         <widget class="QCheckBox" name="PlotErrorCheckbox">
                          <property name="toolTip">
                           <string>Show errors in plot.</string>
@@ -219,7 +219,7 @@
                           <bool>true</bool>
                          </property>
                         </widget>
-                      </item>
+                      </item> -->
                     </layout>
                   </item>
                   <item row="3" column="0">
@@ -283,9 +283,562 @@
             </item>
           </layout>
         </widget>
-        <widget class="QWidget" name="KineticsWidget">
+        <widget class="QWidget" name="MTGAWidget">
           <attribute name="title">
-           <string>Kinetics</string>
+           <string>MTGA</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayoutMTGA">
+            <item>
+              <layout class="QFormLayout" name="formLayout_MTGA">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="inputstatMTGA">
+                    <property name="text">
+                     <string>Input stat</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                   <widget class="QComboBox" name="StatSelectorMTGA">
+                     <property name="toolTip">
+                      <string>Choose Input statistics.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QLabel" name="IFMTGA">
+                    <property name="text">
+                     <string>Input Function</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                   <widget class="QComboBox" name="IFSelectorMTGA">
+                     <property name="toolTip">
+                      <string>Choose Input Function.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="0">
+                   <widget class="QLabel" name="VOIMTGA">
+                    <property name="text">
+                     <string>VOI</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="1">  <!-- Put it just above the scroll area -->
+                    <widget class="QPushButton" name="VOIMTGAsegmentSelectAll">
+                      <property name="text">
+                        <string>All/No VOIs</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="1">
+                    <widget class="QScrollArea" name="VOIMTGACheckScrollArea">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="VOIMTGACheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="VOIMTGACheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+                  <item row="4" column="0">
+                   <widget class="QLabel" name="ModelsMTGA">
+                    <property name="text">
+                     <string>Models</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="4" column="1">  <!-- Put it just above the scroll area -->
+                    <widget class="QPushButton" name="ModelsMTGASelectAll">
+                      <property name="text">
+                        <string>All/No Models</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="1">
+                    <widget class="QScrollArea" name="ModelsMTGAScrollArea">
+                     <property name="widgetResizable">
+                      <bool>true</bool>
+                     </property>
+                     <property name="maximumHeight">
+                       <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
+                     </property>
+                     <widget class="QWidget" name="ModelsMTGACheckContents">
+                       <property name="styleSheet">
+                         <string notr="true">background-color: white;</string>
+                       </property>
+                      <layout class="QVBoxLayout" name="ModelsMTGACheckLayout"/>
+                     </widget>
+                    </widget>
+                  </item>
+              </layout>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="MTGACollapsibleButton">
+                <property name="text">
+                 <string>MTGA Parameters</string>
+                </property>
+                <layout class="QGridLayout" name="MTGAFormLayout">
+                  <item row="0" column="0">
+                    <widget class="QLabel" name="timeOffsetLabel">
+                      <property name="text">
+                        <string>Time Offset</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="0" column="1">
+                    <widget class="QSlider" name="timeOffsetSlider">
+                      <property name="orientation">
+                        <enum>Qt::Horizontal</enum>
+                      </property>
+                      <property name="minimum">
+                        <number>0</number>
+                      </property>
+                      <property name="maximum">
+                        <number>100</number>
+                      </property>
+                      <property name="value">
+                        <number>10</number>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="1" column="1">
+                    <widget class="QWidget" name="sliderInfoWidget">
+                      <layout class="QHBoxLayout" name="horizontalLayout">
+
+                        <!-- Frame -->
+                        <item>
+                          <layout class="QVBoxLayout" name="frameLayout">
+                            <item>
+                              <widget class="QLabel" name="frameLabel">
+                                <property name="text">
+                                  <string>#Frame</string>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                              </widget>
+                            </item>
+                            <item>
+                              <widget class="QLineEdit" name="frameEdit">
+                                <property name="readOnly">
+                                  <bool>true</bool>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                                <property name="sizePolicy">
+                                  <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                    <horStretch>0</horStretch>
+                                    <verStretch>0</verStretch>
+                                  </sizepolicy>
+                                </property>
+                              </widget>
+                            </item>
+                          </layout>
+                        </item>
+
+                        <!-- Time (s) -->
+                        <item>
+                          <layout class="QVBoxLayout" name="timeSecLayout">
+                            <item>
+                              <widget class="QLabel" name="timeSecLabel">
+                                <property name="text">
+                                  <string>Time (s)</string>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                              </widget>
+                            </item>
+                            <item>
+                              <widget class="QLineEdit" name="timeSecEdit">
+                                <property name="readOnly">
+                                  <bool>true</bool>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                                <property name="sizePolicy">
+                                  <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                    <horStretch>0</horStretch>
+                                    <verStretch>0</verStretch>
+                                  </sizepolicy>
+                                </property>
+                              </widget>
+                            </item>
+                          </layout>
+                        </item>
+
+                        <!-- Time (min) -->
+                        <item>
+                          <layout class="QVBoxLayout" name="timeMinLayout">
+                            <item>
+                              <widget class="QLabel" name="timeMinLabel">
+                                <property name="text">
+                                  <string>Time (min)</string>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                              </widget>
+                            </item>
+                            <item>
+                              <widget class="QLineEdit" name="timeMinEdit">
+                                <property name="readOnly">
+                                  <bool>true</bool>
+                                </property>
+                                <property name="alignment">
+                                  <set>Qt::AlignCenter</set>
+                                </property>
+                                <property name="sizePolicy">
+                                  <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                    <horStretch>0</horStretch>
+                                    <verStretch>0</verStretch>
+                                  </sizepolicy>
+                                </property>
+                              </widget>
+                            </item>
+                          </layout>
+                        </item>
+
+                      </layout>
+                    </widget>
+                  </item>
+                  <item row="2" column="0">
+                    <widget class="QLabel" name="framingNormLabel">
+                      <property name="text">
+                        <string>Framing Norm (s)</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="1">
+                    <widget class="QLineEdit" name="framingNormEdit">
+                      <property name="text">
+                        <string>60.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="0" colspan="2">
+                    <widget class="QCheckBox" name="standardizationCheckBox">
+                      <property name="text">
+                        <string>Standardize Data</string>
+                      </property>
+                      <property name="checked">
+                        <bool>true</bool>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="4" column="0">
+                    <widget class="QLabel" name="regressionmodel">
+                      <property name="text">
+                        <string>Regression Model:</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="5" column="0" colspan="4">
+                    <layout class="QHBoxLayout" name="fitOptionsLayout">
+                      <item>
+                        <widget class="QCheckBox" name="olsFitCheckBox">
+                          <property name="text">
+                            <string>OLS</string>
+                          </property>
+                          <property name="checked">
+                            <bool>true</bool>
+                          </property>
+                          <property name="toolTip">
+                           <string>Ordinary Least Squares.</string>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QCheckBox" name="weightedFitCheckBox">
+                          <property name="text">
+                            <string>WLS</string>
+                          </property>
+                          <property name="checked">
+                            <bool>false</bool>
+                          </property>
+                          <property name="toolTip">
+                           <string>Weighted Least Squares (using standard deviation or inter-quantile range as weights).</string>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QCheckBox" name="robustFitCheckBox">
+                          <property name="text">
+                            <string>RLS</string>
+                          </property>
+                          <property name="checked">
+                            <bool>false</bool>
+                          </property>
+                          <property name="toolTip">
+                           <string>Robust Least Square (Iteratively Reweighted Least Squares - Huber).</string>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="6" column="0" colspan="4">
+                    <widget class="QWidget" name="robustParamsWidget">
+                      <property name="visible">
+                        <bool>false</bool>
+                      </property>
+                      <layout class="QGridLayout" name="robustParamsLayout">
+                        <item row="0" column="0">
+                          <widget class="QLabel" name="huberTuneLabel">
+                            <property name="text">
+                              <string>Huber Tune</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="0" column="1">
+                          <widget class="QLineEdit" name="huberTuneEdit">
+                            <property name="text">
+                              <string>1.345</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="1" column="0">
+                          <widget class="QLabel" name="tolLabel">
+                            <property name="text">
+                              <string>Tolerance</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="1" column="1">
+                          <widget class="QLineEdit" name="tolEdit">
+                            <property name="text">
+                              <string>1e-6</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="2" column="0">
+                          <widget class="QLabel" name="maxIterLabel">
+                            <property name="text">
+                              <string>Max Iterations</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="2" column="1">
+                          <widget class="QLineEdit" name="maxIterEdit">
+                            <property name="text">
+                              <string>50</string>
+                            </property>
+                          </widget>
+                        </item>
+                      </layout>
+                    </widget>
+                  </item>
+                </layout>
+              </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="FITMTGAbutton">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="toolTip">
+               <string>Fit MTGA model.</string>
+              </property>
+              <property name="text">
+               <string>FIT</string>
+              </property>
+              <property name="default">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="MTGAResultsButton">
+                <property name="text">
+                 <string>Results</string>
+                </property>
+                <layout class="QGridLayout" name="MTGAResultsFormLayout">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="voires">
+                    <property name="text">
+                     <string>VOI</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="0" column="1">
+                   <widget class="QComboBox" name="VOISelectorMTGA">
+                     <property name="toolTip">
+                      <string>Choose VOI results.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0" colspan="2">
+                    <widget class="QTableWidget" name="MTGAResultsTable">
+                      <property name="rowCount">
+                        <number>0</number>
+                      </property>
+                      <property name="columnCount">
+                        <number>0</number>
+                      </property>
+                      <property name="editTriggers">
+                        <set>QAbstractItemView::NoEditTriggers</set> <!-- Makes table read-only -->
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="0">
+                   <widget class="QLabel" name="ModelsMTGA2">
+                    <property name="text">
+                     <string>Model</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="1">
+                   <widget class="QComboBox" name="MTGASelector">
+                     <property name="toolTip">
+                      <string>Choose MTGA model.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="3" column="0">
+                    <layout class="QHBoxLayout" name="MTGAbuttonLayout">
+                      <item>
+                        <widget class="QPushButton" name="plotMTGAButton">
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/PLOT.jpg</normaloff> <!-- Provide your icon -->
+                            </iconset>
+                          </property>
+                          <property name="toolTip">
+                            <string>Plot MTGA fit</string>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="4" column="0">
+                   <widget class="QLabel" name="infoExcelMTGA">
+                    <property name="text">
+                     <string>Save parameters</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="4" column="1">
+                    <layout class="QHBoxLayout" name="excelMTGASaveLayout1">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="direxcelmtga">
+                          <property name="toolTip">
+                            <string>Choose directory to save EXCEL.</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="5" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayoutMTGA2">
+                      <item>
+                        <widget class="QLineEdit" name="fileexcelmtga">
+                         <property name="toolTip">
+                          <string>Choose filename to save EXCEL.</string>
+                         </property>
+                         <property name="text">
+                          <string>parameters_mtga.xlsx</string>
+                         </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="saveMTGAExcelButton">
+                          <property name="toolTip">
+                            <string>Save MTGA parameters to Excel file</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                            </iconset>
+                          </property>
+                          <property name="text">
+                            <string/>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="6" column="0">
+                   <widget class="QLabel" name="infoExcelMTGA2">
+                    <property name="text">
+                     <string>Save MTGA fitted values</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="6" column="1">
+                    <layout class="QHBoxLayout" name="excelMTGASaveLayout2">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="direxcelmtgafitted">
+                          <property name="toolTip">
+                            <string>Choose directory to save EXCEL.</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="7" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayoutMTGA">
+                      <item>
+                        <widget class="QLineEdit" name="fileexcelmtgafitted">
+                         <property name="toolTip">
+                          <string>Choose filename to save EXCEL.</string>
+                         </property>
+                         <property name="text">
+                          <string>fitted_mtga.xlsx</string>
+                         </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="saveMTGAfittedExcelButton">
+                          <property name="toolTip">
+                            <string>Save MTGA fitted data to Excel file</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                            </iconset>
+                          </property>
+                          <property name="text">
+                            <string/>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+              </layout>
+             </widget>
+            </item>
+          </layout>
+        </widget>
+        <widget class="QWidget" name="TCMWidget">
+          <attribute name="title">
+           <string>TCM</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayout2">
             <item>
@@ -379,22 +932,6 @@
                     </widget>
                   </item>
               </layout>
-            </item>
-            <item>
-             <widget class="QPushButton" name="FITbutton">
-              <property name="enabled">
-               <bool>false</bool>
-              </property>
-              <property name="toolTip">
-               <string>Fit model.</string>
-              </property>
-              <property name="text">
-               <string>FIT</string>
-              </property>
-              <property name="default">
-               <bool>true</bool>
-              </property>
-             </widget>
             </item>
             <item>
               <widget class="ctkCollapsibleButton" name="TCMCollapsibleButton">
@@ -609,8 +1146,125 @@
                       </property>
                     </widget>
                   </item>
+                  <item row="7" column="0" colspan="4">
+                    <widget class="QLabel" name="fitTypeLabel">
+                      <property name="text">
+                        <string>Fit Type</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="8" column="0" colspan="4">
+                    <layout class="QHBoxLayout" name="fitTypeLayout">
+                      <item>
+                        <widget class="QCheckBox" name="standardFitCheckBox">
+                          <property name="text">
+                            <string>Standard Fit</string>
+                          </property>
+                          <property name="checked">
+                            <bool>true</bool>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QCheckBox" name="weightFitCheckBox">
+                          <property name="text">
+                            <string>Weighted Fit</string>
+                          </property>
+                          <property name="checked">
+                            <bool>false</bool>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="9" column="0">
+                    <widget class="QLabel" name="decayConstLabel">
+                      <property name="text">
+                        <string>Decay Constant</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="9" column="1">
+                    <widget class="QLineEdit" name="decayConstEdit">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="10" column="0">
+                    <widget class="QLabel" name="timeStepLabel">
+                      <property name="text">
+                        <string>Time Step (s)</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="10" column="1">
+                    <widget class="QLineEdit" name="timeStepEdit">
+                      <property name="text">
+                        <string>1.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="11" column="0">
+                    <widget class="QLabel" name="pbrpLabel">
+                      <property name="text">
+                        <string>Peripheral Blood Params</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="11" column="1">
+                    <widget class="QLineEdit" name="pbrp1Edit">
+                      <property name="text">
+                        <string>1.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="11" column="2">
+                    <widget class="QLineEdit" name="pbrp2Edit">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="11" column="3">
+                    <widget class="QLineEdit" name="pbrp3Edit">
+                      <property name="text">
+                        <string>0.0</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="12" column="0">
+                    <widget class="QLabel" name="maxIterTCMLabel">
+                      <property name="text">
+                        <string>Max Iterations</string>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="12" column="1">
+                    <widget class="QLineEdit" name="maxIterTCMEdit">
+                      <property name="text">
+                        <string>100</string>
+                      </property>
+                    </widget>
+                  </item>
                 </layout>
               </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="FITbutton">
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+              <property name="toolTip">
+               <string>Fit TCM model.</string>
+              </property>
+              <property name="text">
+               <string>FIT</string>
+              </property>
+              <property name="default">
+               <bool>true</bool>
+              </property>
+             </widget>
             </item>
             <item>
               <widget class="ctkCollapsibleButton" name="TCMResultsButton">
@@ -619,7 +1273,7 @@
                 </property>
                 <layout class="QGridLayout" name="TCMResultsFormLayout">
                   <item row="0" column="0">
-                   <widget class="QLabel" name="voires">
+                   <widget class="QLabel" name="voires2">
                     <property name="text">
                      <string>VOI</string>
                     </property>
@@ -676,7 +1330,7 @@
                     </widget>
                   </item>
                   <item row="4" column="0">
-                    <layout class="QHBoxLayout" name="excelSaveLayout4">
+                    <layout class="QHBoxLayout" name="TCMbuttonLayout">
                       <item>
                         <widget class="QPushButton" name="plotTCMButton">
                           <property name="icon">
@@ -686,6 +1340,118 @@
                           </property>
                           <property name="toolTip">
                             <string>Plot TCM fit</string>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="5" column="0">
+                   <widget class="QLabel" name="infoExcelTCM">
+                    <property name="text">
+                     <string>Save parameters</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="5" column="1">
+                    <layout class="QHBoxLayout" name="excelTCMSaveLayout1">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="direxceltcm">
+                          <property name="toolTip">
+                            <string>Choose directory to save EXCEL.</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="6" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayoutTCM2">
+                      <item>
+                        <widget class="QLineEdit" name="fileexceltcm">
+                         <property name="toolTip">
+                          <string>Choose filename to save EXCEL.</string>
+                         </property>
+                         <property name="text">
+                          <string>parameters_tcm.xlsx</string>
+                         </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="saveTCMExcelButton">
+                          <property name="toolTip">
+                            <string>Save TCM parameters to Excel file</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                            </iconset>
+                          </property>
+                          <property name="text">
+                            <string/>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="7" column="0">
+                   <widget class="QLabel" name="infoExcelTCM2">
+                    <property name="text">
+                     <string>Save fitted values</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="7" column="1">
+                    <layout class="QHBoxLayout" name="excelTCMSaveLayout2">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="direxceltcmfitted">
+                          <property name="toolTip">
+                            <string>Choose directory to save EXCEL.</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="8" column="1">
+                    <layout class="QHBoxLayout" name="excelSaveLayoutTCM">
+                      <item>
+                        <widget class="QLineEdit" name="fileexceltcmfitted">
+                         <property name="toolTip">
+                          <string>Choose filename to save EXCEL.</string>
+                         </property>
+                         <property name="text">
+                          <string>fitted_tcm.xlsx</string>
+                         </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="saveTCMfittedExcelButton">
+                          <property name="toolTip">
+                            <string>Save TCM fitted data to Excel file</string>
+                          </property>
+                          <property name="enabled">
+                            <bool>true</bool>
+                          </property>
+                          <property name="icon">
+                            <iconset resource="../qSlicerKMAPModule.qrc">
+                              <normaloff>:/Icons/EXCEL.png</normaloff> <!-- Replace with your actual icon path -->
+                            </iconset>
+                          </property>
+                          <property name="text">
+                            <string/>
                           </property>
                         </widget>
                       </item>

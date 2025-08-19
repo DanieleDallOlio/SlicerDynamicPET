@@ -300,7 +300,7 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE"]]
+            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
@@ -310,7 +310,7 @@ def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "Ki", "DV", "Intercept", "AIC", "MASE"]]
+            df = pd.DataFrame(data)[["Model", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_generic_save_multisheet_excel(filepath, sheet_data_dict):
@@ -1283,7 +1283,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   }
 
   // Define column headers
-  QStringList headers = { "", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE" };
+  QStringList headers = { "", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE" };
   this->TCMResultsTable->setColumnCount(headers.size());
   this->TCMResultsTable->setHorizontalHeaderLabels(headers);
 
@@ -1306,7 +1306,8 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
     this->TCMResultsTable->setItem(row, 7, new QTableWidgetItem(QString::number(params.Ki)));
     this->TCMResultsTable->setItem(row, 8, new QTableWidgetItem(QString::number(params.DV)));
     this->TCMResultsTable->setItem(row, 9, new QTableWidgetItem(QString::number(params.AIC)));
-    this->TCMResultsTable->setItem(row, 10, new QTableWidgetItem(QString::number(params.MASE)));
+    this->TCMResultsTable->setItem(row, 10, new QTableWidgetItem(QString::number(params.BIC)));
+    this->TCMResultsTable->setItem(row, 11, new QTableWidgetItem(QString::number(params.MASE)));
 
     totalRowHeight += this->TCMResultsTable->rowHeight(row);
     ++row;
@@ -1337,7 +1338,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
   }
 
   // Define column headers
-  QStringList headers = { "", "Ki", "DV", "Intercept", "AIC", "MASE" };
+  QStringList headers = { "", "Ki", "DV", "Intercept", "R2", "AIC", "MASE" };
   this->MTGAResultsTable->setColumnCount(headers.size());
   this->MTGAResultsTable->setHorizontalHeaderLabels(headers);
 
@@ -1354,8 +1355,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
     this->MTGAResultsTable->setItem(row, 1, new QTableWidgetItem(QString::number(params.Ki)));
     this->MTGAResultsTable->setItem(row, 2, new QTableWidgetItem(QString::number(params.DV)));
     this->MTGAResultsTable->setItem(row, 3, new QTableWidgetItem(QString::number(params.Intercept)));
-    this->MTGAResultsTable->setItem(row, 4, new QTableWidgetItem(QString::number(params.AIC)));
-    this->MTGAResultsTable->setItem(row, 5, new QTableWidgetItem(QString::number(params.MASE)));
+    this->MTGAResultsTable->setItem(row, 4, new QTableWidgetItem(QString::number(params.R2)));
+    this->MTGAResultsTable->setItem(row, 5, new QTableWidgetItem(QString::number(params.AIC)));
+    this->MTGAResultsTable->setItem(row, 6, new QTableWidgetItem(QString::number(params.MASE)));
 
     totalRowHeight += this->MTGAResultsTable->rowHeight(row);
     ++row;
@@ -2134,6 +2136,7 @@ QVariantMap qSlicerKMAPModuleWidget::TCMParamsToPythonDict()
       row["Ki"]    = params.Ki;
       row["DV"]    = params.DV;
       row["AIC"]   = params.AIC;
+      row["BIC"]   = params.BIC;
       row["MASE"]  = params.MASE;
 
       rows.append(row);
@@ -2167,6 +2170,7 @@ QVariantMap qSlicerKMAPModuleWidget::MTGAParamsToPythonDict()
       row["Ki"]    = params.Ki;
       row["DV"]    = params.DV;
       row["Intercept"] = params.Intercept;
+      row["R2"]   = params.R2;
       row["AIC"]   = params.AIC;
       row["MASE"]  = params.MASE;
 
@@ -2925,9 +2929,15 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["1TCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TCM"],
                                             this->segmentTCMfits[segmentID]["1TCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["1TCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
+                                                                    wgt
+                                                                    );
+        this->segmentTCM[segmentID]["1TCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                    fittedTCMvalues,
+                                                                    dof,
                                                                     wgt
                                                                     );
         this->segmentTCM[segmentID]["1TCM"].MASE = logic->MASE(tac_flatten,
@@ -2954,11 +2964,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["1TdCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TdCM"],
                                             this->segmentTCMfits[segmentID]["1TdCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["1TdCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["1TdCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["1TdCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -2983,11 +2999,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["1TiCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TiCM"],
                                             this->segmentTCMfits[segmentID]["1TiCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["1TiCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["1TiCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["1TiCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -3012,11 +3034,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["1TidCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TidCM"],
                                             this->segmentTCMfits[segmentID]["1TidCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["1TidCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["1TidCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["1TidCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -3041,11 +3069,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["2TCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TCM"],
                                             this->segmentTCMfits[segmentID]["2TCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["2TCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["2TCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["2TCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -3070,11 +3104,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["2dTCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2dTCM"],
                                             this->segmentTCMfits[segmentID]["2dTCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["2dTCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["2dTCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["2dTCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -3099,11 +3139,17 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["2TiCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TiCM"],
                                             this->segmentTCMfits[segmentID]["2TiCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["2TiCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["2TiCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["2TiCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
@@ -3128,17 +3174,22 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["2TidCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TidCM"],
                                             this->segmentTCMfits[segmentID]["2TidCM"] + Nframe);
+        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
         this->segmentTCM[segmentID]["2TidCM"].AIC = logic->computeAIC(tac_flatten,
                                                                     fittedTCMvalues,
-                                                                    std::accumulate(std::begin(sens), std::end(sens), 0),
+                                                                    dof,
                                                                     wgt
-                                                                    );
+                                                                  );
+        this->segmentTCM[segmentID]["2TidCM"].BIC = logic->computeBIC(tac_flatten,
+                                                                  fittedTCMvalues,
+                                                                  dof,
+                                                                  wgt
+                                                                  );
         this->segmentTCM[segmentID]["2TidCM"].MASE = logic->MASE(tac_flatten,
                                                                fittedTCMvalues,
                                                                wgt
                                                               );
-      }
-      else {
+      } else {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;
       }

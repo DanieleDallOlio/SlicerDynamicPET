@@ -762,6 +762,76 @@ double vtkSlicerKMAPLogic::MASE(const std::vector<double>& Actual,
     return num / den;
 }
 
+double vtkSlicerKMAPLogic::computeBIC(const std::vector<double>& obs,
+                                      const std::vector<double>& est,
+                                      int numpar,
+                                      const std::vector<double>* wgt)
+{
+    size_t n = obs.size();
+    if (est.size() != n)
+        throw std::invalid_argument("obs and est must have same length");
+
+    // Default weights = 1
+    std::vector<double> weights;
+    if (wgt == nullptr)
+        weights.assign(n, 1.0);
+    else {
+        if (wgt->size() != n)
+            throw std::invalid_argument("weights size must match obs");
+        weights = *wgt;
+    }
+
+    // Weighted SSE
+    double ss = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double diff = obs[i] - est[i];
+        ss += weights[i] * diff * diff;
+    }
+
+    int p = numpar + 1; // intercept term
+    double BIC = n * std::log(ss / static_cast<double>(n))
+                 + p * std::log(static_cast<double>(n));
+
+    return BIC;
+}
+
+double vtkSlicerKMAPLogic::computeR2(const std::vector<double>& obs,
+                                     const std::vector<double>& est,
+                                     const std::vector<double>* wgt)
+{
+    size_t n = obs.size();
+    if (est.size() != n)
+        throw std::invalid_argument("obs and est must have same length");
+
+    std::vector<double> weights;
+    if (wgt == nullptr)
+        weights.assign(n, 1.0);
+    else {
+        if (wgt->size() != n)
+            throw std::invalid_argument("weights size must match obs");
+        weights = *wgt;
+    }
+
+    // Weighted mean of obs
+    double wsum = 0.0, mean = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        wsum += weights[i];
+        mean += weights[i] * obs[i];
+    }
+    mean /= wsum;
+
+    // SST and SSE
+    double sst = 0.0, sse = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        sst += weights[i] * (obs[i] - mean) * (obs[i] - mean);
+        double diff = obs[i] - est[i];
+        sse += weights[i] * diff * diff;
+    }
+
+    if (sst == 0.0)
+        return 1.0; // all obs identical, perfect fit by definition
+    return 1.0 - (sse / sst);
+}
 
 void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
                                 const std::vector<double>& Cp,
@@ -915,6 +985,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   // AIC and MASE
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 }
 
 void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
@@ -1080,6 +1151,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   // AIC and MASE
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 }
 
 void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
@@ -1244,4 +1316,5 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   // AIC and MASE
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 }

@@ -76,6 +76,7 @@ struct MTGAParameters
   double DV = 0;
   double AIC = 0;
   double MASE = 0;
+  double R2 = 0;
   std::vector<double> x, y, fitted;
   std::vector<int> frame;
 };
@@ -92,6 +93,7 @@ struct TCMParameters
   double DV = 0.;
   double AIC = 0.;
   double MASE = 0.;
+  double BIC = 0.;
 };
 
 class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
@@ -145,6 +147,13 @@ public:
                     int numpar,
                     const std::vector<double>* wgt = nullptr,
                     bool aicc = true);
+  double computeBIC(const std::vector<double>& obs,
+                    const std::vector<double>& est,
+                    int numpar,
+                    const std::vector<double>* wgt);
+  double computeR2(const std::vector<double>& obs,
+                   const std::vector<double>& est,
+                   const std::vector<double>* wgt);
   double MASE(const std::vector<double>& Actual,
               const std::vector<double>& Predicted,
               const std::vector<double>* wgt = nullptr);

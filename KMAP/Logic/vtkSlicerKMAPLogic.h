@@ -77,6 +77,7 @@ struct MTGAParameters
   double AIC = 0;
   double MASE = 0;
   std::vector<double> x, y, fitted;
+  std::vector<int> frame;
 };
 
 struct TCMParameters

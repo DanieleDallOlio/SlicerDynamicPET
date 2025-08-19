@@ -779,6 +779,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
+  std::vector<int> outframe;
 
   // normalize framing to minutes
   std::vector<double> frameScaled(N);
@@ -808,6 +809,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
           double y = tac[i]   / (Cp[i] + 1e-16);
           outX.push_back(x);
           outY.push_back(y);
+          outframe.push_back(i+1);
           if (wgt) wgt_adj.push_back((*wgt)[i]);
       }
   }
@@ -861,6 +863,8 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
           weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);  // avoid div by 0
       }
     }
+    wgt_adj.assign(weights.data(), weights.data() + weights.size());
+    wgt = &wgt_adj;
   } else {
     if (!wgt)
     {
@@ -905,6 +909,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   // x, y and fitted values
   params.x = outX;
   params.y = outY;
+  params.frame = outframe;
   params.fitted = fittedValues;
 
   // AIC and MASE
@@ -928,6 +933,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
+  std::vector<int> outframe;
 
   // normalize framing to minutes
   std::vector<double> frameScaled(N);
@@ -967,6 +973,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
           double y = intCt[i] / (tac[i] + 1e-16);
           outX.push_back(x);
           outY.push_back(y);
+          outframe.push_back(i+1);
           if (wgt) wgt_adj.push_back((*wgt)[i]);
       }
   }
@@ -1019,6 +1026,8 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
               weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
           }
       }
+      wgt_adj.assign(weights.data(), weights.data() + weights.size());
+      wgt = &wgt_adj;
   }
   else
   {
@@ -1065,6 +1074,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   // x, y and fitted values
   params.x = outX;
   params.y = outY;
+  params.frame = outframe;
   params.fitted = fittedValues;
 
   // AIC and MASE
@@ -1088,6 +1098,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
+  std::vector<int> outframe;
 
   // normalize framing to minutes
   std::vector<double> frameScaled(N);
@@ -1126,6 +1137,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
           double y = intCt[i] / (Cp[i] + 1e-16);
           outX.push_back(x);
           outY.push_back(y);
+          outframe.push_back(i+1);
           if (wgt) wgt_adj.push_back((*wgt)[i]);
       }
   }
@@ -1178,6 +1190,8 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
               weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
           }
       }
+      wgt_adj.assign(weights.data(), weights.data() + weights.size());
+      wgt = &wgt_adj;
   }
   else
   {
@@ -1224,6 +1238,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   // x, y and fitted values
   params.x = outX;
   params.y = outY;
+  params.frame = outframe;
   params.fitted = fittedValues;
 
   // AIC and MASE

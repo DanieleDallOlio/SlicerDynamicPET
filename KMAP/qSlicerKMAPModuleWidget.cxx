@@ -32,6 +32,8 @@ class qSlicerKMAPModuleWidgetPrivate: public Ui_qSlicerKMAPModuleWidget
 
 protected:
   qSlicerKMAPModuleWidget* const q_ptr;
+  void setDoubleField(QLineEdit* le, double lo, double hi, int decimals);
+  void setIntField(QLineEdit* le, int lo, int hi);
 public:
   qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModuleWidget& object);
   ~qSlicerKMAPModuleWidgetPrivate();
@@ -63,6 +65,42 @@ qSlicerKMAPModuleWidgetPrivate::qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModule
   Q_Q(qSlicerKMAPModuleWidget);
 }
 
+
+void qSlicerKMAPModuleWidgetPrivate::setDoubleField(QLineEdit* le, double lo, double hi, int decimals)
+{
+
+  QObject::connect(le, &QLineEdit::editingFinished, le, [le, lo, hi, decimals]() {
+    const QLocale loc = le->locale(); // respect UI locale (comma/dot)
+    bool ok = false;
+    double x = loc.toDouble(le->text(), &ok);
+    if (!ok) {
+      le->setText(loc.toString(lo, 'f', decimals));
+      return;
+    }
+    if (x < lo) x = lo;
+    if (x > hi) x = hi;
+    le->setText(loc.toString(x, 'f', decimals));
+  });
+
+  return ;
+}
+
+void qSlicerKMAPModuleWidgetPrivate::setIntField(QLineEdit* le, int lo, int hi)
+{
+  QObject::connect(le, &QLineEdit::editingFinished, le, [le, lo, hi]() {
+    bool ok = false;
+    int val = le->text().toInt(&ok);
+    if (!ok) {
+      le->setText(QString::number(lo));
+      return;
+    }
+    if (val < lo) val = lo;
+    if (val > hi) val = hi;
+    le->setText(QString::number(val));
+  });
+
+  return ;
+}
 
 //-----------------------------------------------------------------------------
 void qSlicerKMAPModuleWidgetPrivate::init()
@@ -175,6 +213,45 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   QObject::connect(this->weightFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onWFitclicked()));
 
+  // MTGA controls
+  this->setDoubleField(this->framingNormEdit, 0.0, 3600.0, 2);
+  this->setDoubleField(this->huberTuneEdit,  1e-3, 10.0,   6);
+  this->setDoubleField(this->tolEdit,        1e-12, 1e-1, 12);
+  this->setIntField   (this->maxIterEdit,    1,     100000);
+
+  // TCM params (examples; keep the ranges you want)
+  this->setDoubleField(this->k1Initial, 0.0, 5.0, 6);
+  this->setDoubleField(this->k1Lower,   0.0, 5.0, 6);
+  this->setDoubleField(this->k1Upper,   0.0, 5.0, 6);
+
+  this->setDoubleField(this->k2Initial, 0.0, 2.0, 6);
+  this->setDoubleField(this->k2Lower,   0.0, 2.0, 6);
+  this->setDoubleField(this->k2Upper,   0.0, 2.0, 6);
+
+  this->setDoubleField(this->k3Initial, 0.0, 2.0, 6);
+  this->setDoubleField(this->k3Lower,   0.0, 2.0, 6);
+  this->setDoubleField(this->k3Upper,   0.0, 2.0, 6);
+
+  this->setDoubleField(this->k4Initial, 0.0, 1.0, 6);
+  this->setDoubleField(this->k4Lower,   0.0, 1.0, 6);
+  this->setDoubleField(this->k4Upper,   0.0, 1.0, 6);
+
+  this->setDoubleField(this->vbInitial, 0.0, 1.0, 6);
+  this->setDoubleField(this->vbLower,   0.0, 1.0, 6);
+  this->setDoubleField(this->vbUpper,   0.0, 1.0, 6);
+
+  this->setDoubleField(this->tdInitial, -10.0, 120.0, 3);
+  this->setDoubleField(this->tdLower,   -10.0, 120.0, 3);
+  this->setDoubleField(this->tdUpper,   -10.0, 120.0, 3);
+
+  this->setDoubleField(this->decayConstEdit, 1e-6, 10.0, 10);
+  this->setDoubleField(this->timeStepEdit,   0.001, 60.0, 6);
+
+  this->setDoubleField(this->pbrp1Edit, 0.0, 1.0, 6);
+  this->setDoubleField(this->pbrp2Edit, 0.0, 1.0, 6);
+  this->setDoubleField(this->pbrp3Edit, 0.0, 1.0, 6);
+
+  this->setIntField(this->maxIterTCMEdit, 1, 100000);
 
   this->TACCollapsibleButton->setCollapsed(true);
   this->TCMCollapsibleButton->setCollapsed(true);
@@ -223,7 +300,7 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "K1", "k2", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE"]]
+            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
@@ -2314,9 +2391,19 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
   // Add time column
   vtkNew<vtkDoubleArray> timeArray;
   timeArray->SetName("Time (min)");
-  for (double t : this->timePoints)
+  vtkNew<vtkStringArray> labelArray;
+  labelArray->SetName("ToolTipLabelTAC");
+  for (int i=0; i < this->timePoints.size(); ++i) {
+    double t = this->timePoints[i];
     timeArray->InsertNextValue(t/60.);
+    std::ostringstream oss;
+    oss << "Frame: " << i+1
+        << ", Time(s): " << this->timePoints[i]
+        << ", Time(min): " << this->timePoints[i]/60.0;
+    labelArray->InsertNextValue(oss.str());
+  }
   tableNode->AddColumn(timeArray);
+  tableNode->AddColumn(labelArray);
 
   // Create plot chart
   vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
@@ -2369,6 +2456,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       series->SetAndObserveTableNodeID(tableNode->GetID());
       series->SetXColumnName("Time (min)");
       series->SetYColumnName(colName.c_str());
+      series->SetLabelColumnName("ToolTipLabelTAC");
       series->SetUniqueColor();
 
 
@@ -3438,12 +3526,20 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
   // TAC as scatterpoints
   vtkNew<vtkDoubleArray> tacArray;
   tacArray->SetName("TAC");
+  vtkNew<vtkStringArray> labelArray;
+  labelArray->SetName("ToolTipLabelTAC");
   for (size_t i = 0; i < tacvoi.size(); ++i)
   {
       // Assuming tacvoi[0] holds measured values for VOI (adapt if structured differently)
       tacArray->InsertNextValue(tacvoi[i][0]);
+      std::ostringstream oss;
+      oss << "Frame: " << i+1
+          << ", Time(s): " << this->timePoints[i]
+          << ", Time(min): " << this->timePoints[i]/60.0;
+      labelArray->InsertNextValue(oss.str());
   }
   tableNode->AddColumn(tacArray);
+  tableNode->AddColumn(labelArray);
 
   vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
   scene->AddNode(scatterSeries);
@@ -3452,6 +3548,7 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
   scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
   scatterSeries->SetXColumnName("Time (min)");
   scatterSeries->SetYColumnName("TAC");
+  scatterSeries->SetLabelColumnName("ToolTipLabelTAC");
   scatterSeries->SetUniqueColor();
   scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
@@ -3471,7 +3568,6 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
 
       vtkNew<vtkDoubleArray> fitArray;
       fitArray->SetName(modelName.c_str());
-
       for (size_t i = 0; i < this->timePoints.size(); ++i)
       {
           fitArray->InsertNextValue(fitArrayPtr[i]);
@@ -3486,6 +3582,7 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
       lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
       lineSeries->SetXColumnName("Time (min)");
       lineSeries->SetYColumnName(modelName.c_str());
+      lineSeries->SetLabelColumnName("ToolTipLabelTAC");
       lineSeries->SetUniqueColor();
       lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
       chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
@@ -3542,19 +3639,27 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   // Create or get table
   vtkSmartPointer<vtkMRMLTableNode> tableNode = this->GetOrCreatePlotTable();
 
-  // X values
   vtkNew<vtkDoubleArray> xArray;
-  xArray->SetName("X");
-  for (double xv : params.x)
-    xArray->InsertNextValue(xv);
-  tableNode->AddColumn(xArray);
-
-  // Y measured values
   vtkNew<vtkDoubleArray> yArray;
+  vtkNew<vtkStringArray> labelArray;
+  xArray->SetName("X");
   yArray->SetName("Data");
-  for (double yv : params.y)
+  labelArray->SetName("ToolTipData");
+  for (int i=0;  i < params.x.size(); ++i) {
+    double xv = params.x[i];
+    double yv = params.y[i];
+    xArray->InsertNextValue(xv);
     yArray->InsertNextValue(yv);
+    std::ostringstream oss;
+    oss << "Frame: " << params.frame[i]
+        << ", Time(s): " << this->timePoints[i]
+        << ", Time(min): " << this->timePoints[i]/60.0;
+    labelArray->InsertNextValue(oss.str());
+  }
+  tableNode->AddColumn(xArray);
   tableNode->AddColumn(yArray);
+  tableNode->AddColumn(labelArray);
+
 
   // Create plot chart
   vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
@@ -3567,6 +3672,7 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
   scatterSeries->SetXColumnName("X");
   scatterSeries->SetYColumnName("Data");
+  scatterSeries->SetLabelColumnName("ToolTipData");
   scatterSeries->SetUniqueColor();
   scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
@@ -3598,6 +3704,7 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
   lineSeries->SetXColumnName("X");
   lineSeries->SetYColumnName(modelName.c_str());
+  lineSeries->SetLabelColumnName("ToolTipData");
   lineSeries->SetUniqueColor();
   lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());

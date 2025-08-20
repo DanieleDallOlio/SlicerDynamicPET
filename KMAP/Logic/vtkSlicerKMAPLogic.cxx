@@ -32,6 +32,11 @@
 // for linear regression
 #include <Eigen/Dense>
 
+static double norm_cdf(double x)
+{
+    return 0.5 * std::erfc(-x / std::sqrt(2.0));
+}
+
 //----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkSlicerKMAPLogic);
 
@@ -501,6 +506,16 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.td = fitted_params[3];
     params.Ki = params.K1;
     params.DV = params.K1/(params.k2 + 1e-16);
+    params.weights.assign(wt, wt + Nframe);
+    params.dof = std::count(sens, sens + Nframe, true);
+    std :: cout << "dof=" << params.dof;
+    std::vector<double> fittedTCMvalues(fitted_curve,
+                                        fitted_curve + Nframe);
+    std :: vector<double> tac_vec(tac_flatten, tac_flatten + Nframe);
+    std :: vector<double> predicted_tac(fitted_curve, fitted_curve + Nframe);
+    params.AIC  = this->computeAIC(tac_vec, predicted_tac, params.dof, wgt);
+    params.BIC  = this->computeBIC(tac_vec, predicted_tac, params.dof, wgt);
+    params.MASE = this->MASE(tac_vec, predicted_tac, wgt);
     // std :: cout << "fitted_params" << std ::endl;
     // print_vec(fitted_params, 4*Nvox);
     // std :: cout << "fitted_curve" << std ::endl;
@@ -536,6 +551,16 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.td = fitted_params[5];
     params.Ki = params.K1 * params.k3 / (params.k2 + params.k3);
     params.DV = params.K1/(params.k2 + 1e-16) * (1 + params.k3/(params.k4 + 1e-16));
+    params.weights.assign(wt, wt + Nframe);
+    params.dof = std::count(sens, sens + Nframe, true);
+    std :: cout << "dof=" << params.dof;
+    std::vector<double> fittedTCMvalues(fitted_curve,
+                                        fitted_curve + Nframe);
+    std :: vector<double> tac_vec(tac_flatten, tac_flatten + Nframe);
+    std :: vector<double> predicted_tac(fitted_curve, fitted_curve + Nframe);
+    params.AIC  = this->computeAIC(tac_vec, predicted_tac, params.dof, wgt);
+    params.BIC  = this->computeBIC(tac_vec, predicted_tac, params.dof, wgt);
+    params.MASE = this->MASE(tac_vec, predicted_tac, wgt);
     // std :: cout << "fitted_params" << std ::endl;
     // print_vec(fitted_params, 6*Nvox);
     // std :: cout << "fitted_curve" << std ::endl;
@@ -833,6 +858,98 @@ double vtkSlicerKMAPLogic::computeR2(const std::vector<double>& obs,
     return 1.0 - (sse / sst);
 }
 
+
+double vtkSlicerKMAPLogic::computeVuongP(const std::vector<double>& r1,
+                                         const std::vector<double>& r2,
+                                         const std::vector<double>* wgt,
+                                         int k1, int k2,
+                                         VuongCorrection corr,
+                                         Tail tail
+                                       )
+{
+    size_t N = r1.size();
+    if (r1.size() != N || r2.size() != N)
+        throw std::invalid_argument("Models do not have the same number of observations");
+
+    // Weights: default to 1, then normalize to sum=1 (w~)
+    std::vector<double> w(N, 1.0);
+    if (wgt)
+    {
+      if (wgt->size() != N) {
+        std::ostringstream oss;
+        oss << "weights size (" << wgt->size() << ") must match residuals size (" << N << ")";
+        throw std::invalid_argument(oss.str());
+      }
+      w = *wgt;
+    }
+
+    double sumw = 0.0;
+    for (double wi : w) {
+      if (wi <= 0.0) throw std::invalid_argument("All weights must be positive.");
+      sumw += wi;
+    }
+    for (double& wi : w) wi /= sumw; // now sum(w) = 1
+
+    // Pointwise log-likelihood differences under Gaussian with unit variance:
+    // m_i = -0.5*r1^2 - (-0.5*r2^2) = 0.5*(r2^2 - r1^2)
+    std::vector<double> m(N);
+    for (size_t i = 0; i < N; ++i)
+      m[i] = 0.5 * (r2[i]*r2[i] - r1[i]*r1[i]);
+
+    // Weighted mean of m
+    double mean_m = 0.0;
+    for (size_t i = 0; i < N; ++i) mean_m += w[i] * m[i];
+
+    // Unbiased weighted variance of m (with  reliability weights)
+    // s2 = sum_i w_i (m_i - mean)^2 / (1 - sum_i w_i^2)
+    double sumw2 = 0.0;
+    for (double wi : w) sumw2 += wi*wi;
+
+    double num = 0.0;
+    for (size_t i = 0; i < N; ++i) {
+      const double d = (m[i] - mean_m);
+      num += w[i] * d * d;
+    }
+    const double denom = std::max(1e-16, 1.0 - sumw2); // guard
+    const double s2 = num / denom;
+    const double s  = std::sqrt(std::max(s2, 1e-16));
+
+    // Effective sample size (Kish)
+    const double n_eff = 1.0 / sumw2; // equals N if all weights equal
+
+    // Penalty c_N
+    const int dk = (k1 - k2);
+    double cN = 0.0;
+    if (corr == VuongCorrection::AIC) {
+      cN = static_cast<double>(dk);
+    } else if (corr == VuongCorrection::BIC) {
+      cN = 0.5 * static_cast<double>(dk) * std::log(static_cast<double>(N));
+      // If you're heavily weighting, you *may* prefer log(n_eff) here; keep N for standard practice.
+    }
+
+    // Corrected mean: subtract penalty per observation
+    const double mean_corr = mean_m - (cN / static_cast<double>(N));
+
+    // Vuong Z
+    const double Z = std::sqrt(n_eff) * mean_corr / s;
+
+    // p-value
+    double p = 1.0;
+
+    if (tail == Tail::TwoSided) {
+      const double phi = norm_cdf(Z);
+      p = 2.0 * std::min(phi, 1.0 - phi);
+    } else if (tail == Tail::Model1Greater) {
+      // H1: model1 better (Z large positive)
+      p = 1.0 - norm_cdf(Z);
+    } else { // Tail::Model2Greater
+      // H1: model2 better (Z large negative)
+      p = norm_cdf(Z);
+    }
+
+    return std::max(0.0, std::min(1.0, p));
+}
+
 void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
                                 const std::vector<double>& Cp,
                                 const std::vector<double>& framing,
@@ -955,8 +1072,16 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
 
   // fitted values
   fittedValues.resize(n);
-  for (size_t i = 0; i < n; ++i)
-      fittedValues[i] = intercept + slope * outX[i];
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    fittedValues[i] = intercept + slope * outX[i];
+    params.r[i] = outY[i] - fittedValues[i];
+  }
+
+  // AIC and MASE
+  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
+  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 
   // de-standardize if needed
   if (std)
@@ -982,10 +1107,15 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   params.frame = outframe;
   params.fitted = fittedValues;
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.dof = 2;
+  if (wgt == nullptr)
+  {
+      params.weights.assign(n, 1.0);  // fills with ones
+  }
+  else
+  {
+      params.weights = wgt_adj;  // copy from your pre-filled vector
+  }
 }
 
 void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
@@ -1121,8 +1251,16 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
 
   // Fitted values
   fittedValues.resize(n);
-  for (size_t i = 0; i < n; ++i)
-      fittedValues[i] = intercept + slope * outX[i];
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i) {
+    fittedValues[i] = intercept + slope * outX[i];
+    params.r[i] = outY[i] - fittedValues[i];
+  }
+
+  // AIC and MASE
+  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
+  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 
   // De-standardize if needed
   if (std)
@@ -1148,10 +1286,15 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   params.frame = outframe;
   params.fitted = fittedValues;
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.dof = 2;
+  if (wgt == nullptr)
+  {
+      params.weights.assign(n, 1.0);  // fills with ones
+  }
+  else
+  {
+      params.weights = wgt_adj;  // copy from your pre-filled vector
+  }
 }
 
 void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
@@ -1286,8 +1429,16 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
 
   // Fitted values
   fittedValues.resize(n);
-  for (size_t i = 0; i < n; ++i)
-      fittedValues[i] = intercept + slope * outX[i];
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i){
+    fittedValues[i] = intercept + slope * outX[i];
+    params.r[i] = outY[i] - fittedValues[i];
+  }
+
+  // AIC and MASE
+  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
+  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
 
   // De-standardize if needed
   if (std)
@@ -1313,8 +1464,13 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   params.frame = outframe;
   params.fitted = fittedValues;
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.dof = 2;
+  if (wgt == nullptr)
+  {
+      params.weights.assign(n, 1.0);  // fills with ones
+  }
+  else
+  {
+      params.weights = wgt_adj;  // copy from your pre-filled vector
+  }
 }

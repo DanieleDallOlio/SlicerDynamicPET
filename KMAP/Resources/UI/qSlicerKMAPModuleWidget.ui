@@ -834,6 +834,56 @@
               </layout>
              </widget>
             </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="MTGAStatTestButton">
+                <property name="text">
+                 <string>Statistical Test</string>
+                </property>
+                <layout class="QGridLayout" name="MTGAStatTestFormLayout">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="voiresMTGAvuong">
+                    <property name="text">
+                     <string>Vuong's Test between two models</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QComboBox" name="MTGAModel1">
+                     <property name="toolTip">
+                      <string>Choose model 1.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                   <widget class="QComboBox" name="MTGAModel2">
+                     <property name="toolTip">
+                      <string>Choose model 2.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="0" colspan="2">
+                    <widget class="QLabel" name="MTGAVuongPLabel">
+                      <property name="text">
+                        <string>Vuong's Test p-value</string>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="0" colspan="2">
+                    <widget class="QLineEdit" name="MTGAVuongP">
+                      <property name="readOnly">
+                        <bool>true</bool>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                </layout>
+              </widget>
+            </item>
           </layout>
         </widget>
         <widget class="QWidget" name="TCMWidget">

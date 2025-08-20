@@ -54,6 +54,10 @@ public:
   void populateModelsTCM(std :: string segmentID);
   void populateModelsMTGA(std :: string segmentID);
   void populateTimeBarMTGA();
+  void populateModelCombo(QComboBox* comboToFill,
+                          const std::string& otherSelectedModel,
+                          const std::string& currentSelectedModel,
+                          const std::string& segmentID);
 };
 
 //-----------------------------------------------------------------------------
@@ -126,6 +130,7 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->saveMTGAfittedExcelButton->setEnabled(false);
   this->saveTCMExcelButton->setEnabled(false);
   this->saveMTGAExcelButton->setEnabled(false);
+
 
   // Make connections
   QObject::connect( this->PatSelector, SIGNAL(currentIndexChanged(int)),
@@ -212,6 +217,10 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onStdFitclicked()));
   QObject::connect(this->weightFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onWFitclicked()));
+  QObject::connect(this->MTGAModel1, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onMTGAModelBox(int)));
+  QObject::connect(this->MTGAModel2, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onMTGAModelBox(int)));
 
   // MTGA controls
   this->setDoubleField(this->framingNormEdit, 0.0, 3600.0, 2);
@@ -256,6 +265,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->TACCollapsibleButton->setCollapsed(true);
   this->TCMCollapsibleButton->setCollapsed(true);
   this->MTGACollapsibleButton->setCollapsed(true);
+  this->MTGAStatTestButton->setCollapsed(true);
+  this->MTGAStatTestButton->setEnabled(false);
   for (const QString& name : q->checkboxNames)
   {
     QCheckBox* cb = new QCheckBox(name, this->PlotStatsCheckContents);
@@ -1334,6 +1345,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
   if (segmentID.empty())
   {
     this->populateModelsMTGA(segmentID);
+    this->populateModelCombo(this->MTGAModel1, "", "", segmentID);
+    this->populateModelCombo(this->MTGAModel2, "", "", segmentID);
+    this->MTGAVuongP->setText("");
     return;
   }
 
@@ -1371,6 +1385,17 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
   this->MTGAResultsTable->resizeColumnsToContents();
   this->populateModelsMTGA(segmentID);
 
+  std::string sel1, sel2;
+  int idx1 = this->MTGAModel1->currentIndex();
+  if (idx1 >= 0)
+    sel1 = this->MTGAModel1->itemData(idx1).toString().toStdString();
+  int idx2 = this->MTGAModel2->currentIndex();
+  if (idx2 >= 0)
+    sel2 = this->MTGAModel2->itemData(idx2).toString().toStdString();
+  this->populateModelCombo(this->MTGAModel1, sel2, sel1, segmentID);
+  this->populateModelCombo(this->MTGAModel2, sel1, sel2, segmentID);
+  if (idx1 > 0 & idx2 >0)
+    q->runVuong(sel1, sel2, segmentID);
 }
 
 
@@ -1471,6 +1496,57 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelsMTGA(std :: string segmentID)
   std :: string passonID = restoredIndex>0 ? currentSelectedID : "";
   q->plotMTGAModel = passonID;
   q->onPlotMTGAbutton();
+}
+
+void qSlicerKMAPModuleWidgetPrivate::populateModelCombo(
+    QComboBox* comboToFill,
+    const std::string& otherSelectedModel,
+    const std::string& currentSelectedModel,
+    const std::string& segmentID)
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  if (segmentID.empty()) {
+    this->MTGAModel1->clear();
+    this->MTGAModel2->clear();
+    this->MTGAVuongP->setText("");
+    this->MTGAStatTestButton->setCollapsed(true);
+    this->MTGAStatTestButton->setEnabled(false);
+    return;
+  }
+
+  auto it = q->segmentMTGA.find(segmentID);
+  if (it == q->segmentMTGA.end()) {
+    this->MTGAModel1->clear();
+    this->MTGAModel2->clear();
+    this->MTGAVuongP->setText("");
+    this->MTGAStatTestButton->setCollapsed(true);
+    this->MTGAStatTestButton->setEnabled(false);
+    return;
+  }
+  this->MTGAStatTestButton->setEnabled(true);
+  const auto& modelsForSegment = it->second;
+
+  comboToFill->blockSignals(true);
+  comboToFill->clear();
+  comboToFill->addItem("", "");  // empty choice
+
+  int restoredIndex = 0;
+  for (const auto& [modelName, params] : modelsForSegment)
+  {
+    if (!otherSelectedModel.empty() && modelName == otherSelectedModel)
+      continue;  // skip what’s selected in the other box
+
+    comboToFill->addItem(QString::fromStdString(modelName), QString::fromStdString(modelName));
+
+    if (modelName == currentSelectedModel)
+    {
+      restoredIndex = comboToFill->count() - 1;
+    }
+  }
+
+  comboToFill->setCurrentIndex(restoredIndex);
+  comboToFill->blockSignals(false);
 }
 
 
@@ -2673,6 +2749,101 @@ void qSlicerKMAPModuleWidget::onSliderChanged(int index)
   d->timeMinEdit->setText(QString::number(timeMin, 'f', 2));
 }
 
+void qSlicerKMAPModuleWidget::runVuong(std::string sel1,
+                                       std::string sel2,
+                                       std::string segmentID
+                                     )
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    std::cerr << "Missing Logic!" << std::endl;
+    return;
+  }
+
+  if (segmentID.empty()) {
+    d->MTGAModel1->clear();
+    d->MTGAModel2->clear();
+    d->MTGAVuongP->setText("");
+    return;
+  }
+
+  auto it = this->segmentMTGA.find(segmentID);
+  if (it == this->segmentMTGA.end()) {
+    d->MTGAModel1->clear();
+    d->MTGAModel2->clear();
+    d->MTGAVuongP->setText("");
+    return;
+  }
+  auto& modelsForSegment = it->second;
+
+  const int N1 = modelsForSegment[sel1].y.size();
+  const int N2 = modelsForSegment[sel2].y.size();
+  if (N1 != N2) {
+    throw std::runtime_error(
+        sel1 + " has not been fitted with the same number of datapoints (" + std::to_string(N1) +
+        ") of " + sel2 + " (" + std::to_string(N2) + ")."
+    );
+  }
+  std::vector<double> w1 = modelsForSegment[sel1].weights;
+  std::vector<double> w2 = modelsForSegment[sel2].weights;
+  // Check they are the same length
+  if (w1.size() != w2.size()) {
+      throw std::invalid_argument("Weight vectors must have the same length");
+  }
+  // Compute average weights
+  std::vector<double> wgt_avg(w1.size());
+  for (size_t i = 0; i < w1.size(); ++i) {
+      wgt_avg[i] = 0.5 * (w1[i] + w2[i]);
+  }
+  const std::vector<double>* wgt = &wgt_avg;
+  double p = logic->computeVuongP(modelsForSegment[sel1].r,
+                                  modelsForSegment[sel2].r,
+                                  wgt,
+                                  modelsForSegment[sel1].dof,
+                                  modelsForSegment[sel2].dof,
+                                  VuongCorrection::BIC,
+                                  Tail::TwoSided
+                                );
+  d->MTGAVuongP->setText(QString::number(p, 'g', 4));
+  // d->MTGAVuongP->adjustSize();
+  return;
+}
+
+void qSlicerKMAPModuleWidget::onMTGAModelBox(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  std::string selectedVOI = this->plotMTGAVOI;
+  if (selectedVOI.empty()) {
+    d->MTGAModel1->clear();
+    d->MTGAModel2->clear();
+    d->MTGAVuongP->setText("");
+    return;
+  }
+
+  auto it = this->segmentMTGA.find(selectedVOI);
+  if (it == this->segmentMTGA.end()) {
+    d->MTGAModel1->clear();
+    d->MTGAModel2->clear();
+    d->MTGAVuongP->setText("");
+    return;
+  }
+  const auto& modelsForSegment = it->second;
+  std::string sel1, sel2;
+  int idx1 = d->MTGAModel1->currentIndex();
+  if (idx1 >= 0)
+    sel1 = d->MTGAModel1->itemData(idx1).toString().toStdString();
+  int idx2 = d->MTGAModel2->currentIndex();
+  if (idx2 >= 0)
+    sel2 = d->MTGAModel2->itemData(idx2).toString().toStdString();
+  d->populateModelCombo(d->MTGAModel1, sel2, sel1, selectedVOI);
+  d->populateModelCombo(d->MTGAModel2, sel1, sel2, selectedVOI);
+  if (idx1>0 & idx2>0)
+    this->runVuong(sel1, sel2, selectedVOI);
+  return;
+}
+
 void qSlicerKMAPModuleWidget::clearFITdata() {
   Q_D(qSlicerKMAPModuleWidget);
   this->segmentTCM.clear();
@@ -2889,7 +3060,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
     }
   }
   this->segmentTAC4TCMfits = tac;
-  this->segmentWeights4TCMfits = wgtVec;
 
   const double dk = d->decayConstEdit->text().toDouble();
   const double timestep = d->timeStepEdit->text().toDouble();
@@ -2927,23 +3097,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
         //                     ub_1tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["1TCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TCM"],
-                                            this->segmentTCMfits[segmentID]["1TCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["1TCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                    );
-        this->segmentTCM[segmentID]["1TCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                    );
-        this->segmentTCM[segmentID]["1TCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "1TdCM") {
         bool sens[] = {true, true, true, true};
@@ -2962,23 +3115,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
         //                     ub_1tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["1TdCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TdCM"],
-                                            this->segmentTCMfits[segmentID]["1TdCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["1TdCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TdCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TdCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "1TiCM") {
         bool sens[] = {true, true, false, false};
@@ -2997,23 +3133,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
         //                     ub_1tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["1TiCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TiCM"],
-                                            this->segmentTCMfits[segmentID]["1TiCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["1TiCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TiCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TiCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "1TidCM") {
         bool sens[] = {true, true, false, true};
@@ -3032,23 +3151,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
         //                     ub_1tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["1TidCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["1TidCM"],
-                                            this->segmentTCMfits[segmentID]["1TidCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["1TidCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TidCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["1TidCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "2TCM") {
         bool sens[] = {true, true, true, true, true, false};
@@ -3067,23 +3169,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
         //                     ub_2tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["2TCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TCM"],
-                                            this->segmentTCMfits[segmentID]["2TCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["2TCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "2dTCM") {
         bool sens[] = {true, true, true, true, true, true};
@@ -3102,23 +3187,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
         //                     ub_2tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["2dTCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2dTCM"],
-                                            this->segmentTCMfits[segmentID]["2dTCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["2dTCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2dTCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2dTCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "2TiCM") {
         bool sens[] = {true, true, true, true, false, false};
@@ -3139,21 +3207,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     1, this->segmentTCM[segmentID]["2TiCM"]);
         std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TiCM"],
                                             this->segmentTCMfits[segmentID]["2TiCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["2TiCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TiCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TiCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       }
       else if (modelID == "2TidCM") {
         bool sens[] = {true, true, true, true, false, true};
@@ -3172,23 +3225,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
         //                     ub_2tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["2TidCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TidCM"],
-                                            this->segmentTCMfits[segmentID]["2TidCM"] + Nframe);
-        int dof = std::accumulate(std::begin(sens), std::end(sens), 0);
-        this->segmentTCM[segmentID]["2TidCM"].AIC = logic->computeAIC(tac_flatten,
-                                                                    fittedTCMvalues,
-                                                                    dof,
-                                                                    wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TidCM"].BIC = logic->computeBIC(tac_flatten,
-                                                                  fittedTCMvalues,
-                                                                  dof,
-                                                                  wgt
-                                                                  );
-        this->segmentTCM[segmentID]["2TidCM"].MASE = logic->MASE(tac_flatten,
-                                                               fittedTCMvalues,
-                                                               wgt
-                                                              );
       } else {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;

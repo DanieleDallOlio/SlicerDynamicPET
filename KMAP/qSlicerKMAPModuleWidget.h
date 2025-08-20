@@ -75,6 +75,7 @@ public:
   void enableTACbutton();
   void enableFITbutton();
   void enableFITMTGAbutton();
+  void runVuong(std::string sel1, std::string sel2, std::string segmentID);
   QVariantMap TACtoPythonDict();
   QVariantMap fittedTCMtoPythonDict();
   QVariantMap fittedMTGAtoPythonDict();
@@ -128,6 +129,7 @@ public slots:
   void onSliderChanged(int index);
   void onStdFitclicked();
   void onWFitclicked();
+  void onMTGAModelBox(int index);
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -145,7 +147,6 @@ private:
   std::map<std::string, std::map<std::string, MTGAParameters>> segmentMTGA;
   std::map<std::string, std::map<std::string, TCMParameters>> segmentTCM;
   std::map<std::string, std::vector<std::vector<double>>> segmentTAC4TCMfits;
-  std::map< std::string, std::vector<double>> segmentWeights4TCMfits;
   std::map<std::string, std::map<std::string, double*>> segmentTCMfits;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;

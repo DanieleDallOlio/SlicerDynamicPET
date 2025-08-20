@@ -77,7 +77,8 @@ struct MTGAParameters
   double AIC = 0;
   double MASE = 0;
   double R2 = 0;
-  std::vector<double> x, y, fitted;
+  int dof = 0;
+  std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
 };
 
@@ -94,7 +95,13 @@ struct TCMParameters
   double AIC = 0.;
   double MASE = 0.;
   double BIC = 0.;
+  int dof = 0;
+  std::vector<double> weights;
 };
+
+enum class VuongCorrection { None, AIC, BIC };
+
+enum class Tail { TwoSided, Model1Greater, Model2Greater };
 
 class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
   public vtkSlicerModuleLogic
@@ -154,6 +161,12 @@ public:
   double computeR2(const std::vector<double>& obs,
                    const std::vector<double>& est,
                    const std::vector<double>* wgt);
+  double computeVuongP(const std::vector<double>& r1,
+                       const std::vector<double>& r2,
+                       const std::vector<double>* wgt,
+                       int k1, int k2,
+                       VuongCorrection corr,
+                       Tail tail);
   double MASE(const std::vector<double>& Actual,
               const std::vector<double>& Predicted,
               const std::vector<double>* wgt = nullptr);

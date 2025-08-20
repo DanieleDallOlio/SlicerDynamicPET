@@ -113,7 +113,7 @@ public:
   void PrintSelf(ostream& os, vtkIndent indent) override;
   void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
   void setupSeg(vtkMRMLSegmentationNode* segNode);
-  VoxelStatistics ComputeVoxelStatistics(vtkImageData* petImage, vtkImageData* labelmap, int labelValue = 1);
+  VoxelStatistics ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue = 1);
   void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
   void callTCM(std :: vector< std :: vector<double> > tac,
                std :: vector< std :: vector<double> > Cp,

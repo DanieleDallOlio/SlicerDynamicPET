@@ -131,6 +131,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->saveTCMExcelButton->setEnabled(false);
   this->saveMTGAExcelButton->setEnabled(false);
 
+  this->TCMResultsTable->setSortingEnabled(true);
+  this->MTGAResultsTable->setSortingEnabled(true);
 
   // Make connections
   QObject::connect( this->PatSelector, SIGNAL(currentIndexChanged(int)),
@@ -1571,7 +1573,7 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->ProgressBar->setMaximum(100);
   this->ProgressBar->setValue(0);
   this->checkboxNames = QStringList{
-    "Mean", "Median", "Min", "Max", "VoxelCount", "Volume(cc)"
+    "Mean", "Median", "Min", "Max"//, "VoxelCount", "Volume(cc)"
   };
   this->ModelsNamesMTGA = QStringList{
     "Patlak", "Logan", "RE"

@@ -235,15 +235,16 @@ void vtkSlicerKMAPLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
 }
 
 
-VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkImageData* petImage, vtkImageData* labelmap, int labelValue)
+VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue)
 {
+  vtkImageData* petImage = PETVolume->GetImageData();
   VoxelStatistics stats;
   std::vector<double> values;
 
   int dims[3];
   double spacing[3];
   petImage->GetDimensions(dims);
-  petImage->GetSpacing(spacing);
+  PETVolume->GetSpacing(spacing);
 
   double voxelVolume = spacing[0] * spacing[1] * spacing[2];
 
@@ -372,7 +373,7 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
         continue;
       }
       VoxelStatistics stats = ComputeVoxelStatistics(
-        PETVolume->GetImageData(), labelmap, 1);
+        PETVolume, labelmap, 1);
 
       segmentTACs[segmentID].emplace_back(stats);
     }

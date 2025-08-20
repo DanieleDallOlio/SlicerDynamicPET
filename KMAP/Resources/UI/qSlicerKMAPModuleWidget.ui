@@ -1510,6 +1510,76 @@
               </layout>
              </widget>
             </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="TCMStatTestButton">
+                <property name="text">
+                 <string>Statistical Test</string>
+                </property>
+                <layout class="QGridLayout" name="TCMStatTestFormLayout">
+                  <item row="0" column="0">
+                   <widget class="QLabel" name="voiresTCM">
+                    <property name="text">
+                     <string>Likelihood Ratio Test and Vuong's Test between two models</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="0">
+                   <widget class="QComboBox" name="TCMModel1">
+                     <property name="toolTip">
+                      <string>Choose model 1.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="1" column="1">
+                   <widget class="QComboBox" name="TCMModel2">
+                     <property name="toolTip">
+                      <string>Choose model 2.</string>
+                     </property>
+                   </widget>
+                  </item>
+                  <item row="2" column="0">
+                    <widget class="QLabel" name="TCMPLabel">
+                      <property name="text">
+                        <string>LRT's p-value</string>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="2" column="1">
+                    <widget class="QLabel" name="TCMPLabel2">
+                      <property name="text">
+                        <string>Vuong's p-value</string>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="0">
+                    <widget class="QLineEdit" name="TCMLRTP">
+                      <property name="readOnly">
+                        <bool>true</bool>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                  <item row="3" column="1">
+                    <widget class="QLineEdit" name="TCMVuongP">
+                      <property name="readOnly">
+                        <bool>true</bool>
+                      </property>
+                      <property name="alignment">
+                        <set>Qt::AlignCenter</set>
+                      </property>
+                    </widget>
+                  </item>
+                </layout>
+              </widget>
+            </item>
           </layout>
         </widget>
       </widget>

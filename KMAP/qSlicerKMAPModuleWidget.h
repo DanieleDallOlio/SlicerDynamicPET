@@ -76,6 +76,7 @@ public:
   void enableFITbutton();
   void enableFITMTGAbutton();
   void runVuong(std::string sel1, std::string sel2, std::string segmentID);
+  void runTCMstat(std::string sel1, std::string sel2, std::string segmentID);
   QVariantMap TACtoPythonDict();
   QVariantMap fittedTCMtoPythonDict();
   QVariantMap fittedMTGAtoPythonDict();
@@ -130,6 +131,7 @@ public slots:
   void onStdFitclicked();
   void onWFitclicked();
   void onMTGAModelBox(int index);
+  void onTCMModelBox(int index);
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;

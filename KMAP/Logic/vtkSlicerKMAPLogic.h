@@ -77,6 +77,7 @@ struct MTGAParameters
   double AIC = 0;
   double MASE = 0;
   double R2 = 0;
+  double chi2 = 0.;
   int dof = 0;
   std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
@@ -95,8 +96,10 @@ struct TCMParameters
   double AIC = 0.;
   double MASE = 0.;
   double BIC = 0.;
+  double chi2 = 0.;
+  double loglik = 0;
   int dof = 0;
-  std::vector<double> weights;
+  std::vector<double> weights, r;
 };
 
 enum class VuongCorrection { None, AIC, BIC };
@@ -115,6 +118,9 @@ public:
   void setupSeg(vtkMRMLSegmentationNode* segNode);
   VoxelStatistics ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue = 1);
   void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
+  double computeLogLik(const std::vector<double>& y,
+                       const std::vector<double>& fitted,
+                       const std::vector<double>* weights);
   void callTCM(std :: vector< std :: vector<double> > tac,
                std :: vector< std :: vector<double> > Cp,
                std :: vector< std :: vector<double> > framing,
@@ -161,12 +167,16 @@ public:
   double computeR2(const std::vector<double>& obs,
                    const std::vector<double>& est,
                    const std::vector<double>* wgt);
+  double computeChi2(const std::vector<double>& y,
+                     const std::vector<double>& fitted,
+                     const std::vector<double>* weights);
   double computeVuongP(const std::vector<double>& r1,
                        const std::vector<double>& r2,
                        const std::vector<double>* wgt,
                        int k1, int k2,
                        VuongCorrection corr,
                        Tail tail);
+  double computeLRTP(const double logLik1, const double logLik2, int df2, int df1);
   double MASE(const std::vector<double>& Actual,
               const std::vector<double>& Predicted,
               const std::vector<double>* wgt = nullptr);

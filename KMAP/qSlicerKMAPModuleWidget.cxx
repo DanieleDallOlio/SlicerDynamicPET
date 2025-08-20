@@ -58,6 +58,10 @@ public:
                           const std::string& otherSelectedModel,
                           const std::string& currentSelectedModel,
                           const std::string& segmentID);
+  void populateModelComboTCM(QComboBox* comboToFill,
+                             const std::string& otherSelectedModel,
+                             const std::string& currentSelectedModel,
+                             const std::string& segmentID);
 };
 
 //-----------------------------------------------------------------------------
@@ -223,6 +227,11 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onMTGAModelBox(int)));
   QObject::connect(this->MTGAModel2, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onMTGAModelBox(int)));
+  QObject::connect(this->TCMModel1, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onTCMModelBox(int)));
+  QObject::connect(this->TCMModel2, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onTCMModelBox(int)));
+
 
   // MTGA controls
   this->setDoubleField(this->framingNormEdit, 0.0, 3600.0, 2);
@@ -269,6 +278,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->MTGACollapsibleButton->setCollapsed(true);
   this->MTGAStatTestButton->setCollapsed(true);
   this->MTGAStatTestButton->setEnabled(false);
+  this->TCMStatTestButton->setCollapsed(true);
+  this->TCMStatTestButton->setEnabled(false);
   for (const QString& name : q->checkboxNames)
   {
     QCheckBox* cb = new QCheckBox(name, this->PlotStatsCheckContents);
@@ -313,7 +324,7 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE"]]
+            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
@@ -1281,6 +1292,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsVOIMTGA()
   return;
 }
 
+auto makeNumericItem = [](double value, int precision = 6) {
+    auto *item = new QTableWidgetItem(QString::number(value));
+    item->setData(Qt::EditRole, value);  // ensures numeric sorting
+    item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    return item;
+};
+
 void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentID)
 {
   Q_Q(qSlicerKMAPModuleWidget);
@@ -1292,11 +1310,15 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   if (segmentID.empty())
   {
     this->populateModelsTCM(segmentID);
+    this->populateModelComboTCM(this->TCMModel1, "", "", segmentID);
+    this->populateModelComboTCM(this->TCMModel2, "", "", segmentID);
+    this->TCMLRTP->setText("");
+    this->TCMVuongP->setText("");
     return;
   }
 
   // Define column headers
-  QStringList headers = { "", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE" };
+  QStringList headers = { "", "K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu"};
   this->TCMResultsTable->setColumnCount(headers.size());
   this->TCMResultsTable->setHorizontalHeaderLabels(headers);
 
@@ -1310,17 +1332,18 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   for (const auto& [label, params] : labelMap)
   {
     this->TCMResultsTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(label)));
-    this->TCMResultsTable->setItem(row, 1, new QTableWidgetItem(QString::number(params.K1)));
-    this->TCMResultsTable->setItem(row, 2, new QTableWidgetItem(QString::number(params.k2)));
-    this->TCMResultsTable->setItem(row, 3, new QTableWidgetItem(QString::number(params.k3)));
-    this->TCMResultsTable->setItem(row, 4, new QTableWidgetItem(QString::number(params.k4)));
-    this->TCMResultsTable->setItem(row, 5, new QTableWidgetItem(QString::number(params.vb)));
-    this->TCMResultsTable->setItem(row, 6, new QTableWidgetItem(QString::number(params.td)));
-    this->TCMResultsTable->setItem(row, 7, new QTableWidgetItem(QString::number(params.Ki)));
-    this->TCMResultsTable->setItem(row, 8, new QTableWidgetItem(QString::number(params.DV)));
-    this->TCMResultsTable->setItem(row, 9, new QTableWidgetItem(QString::number(params.AIC)));
-    this->TCMResultsTable->setItem(row, 10, new QTableWidgetItem(QString::number(params.BIC)));
-    this->TCMResultsTable->setItem(row, 11, new QTableWidgetItem(QString::number(params.MASE)));
+    this->TCMResultsTable->setItem(row, 1, makeNumericItem(params.K1));
+    this->TCMResultsTable->setItem(row, 2, makeNumericItem(params.k2));
+    this->TCMResultsTable->setItem(row, 3, makeNumericItem(params.k3));
+    this->TCMResultsTable->setItem(row, 4, makeNumericItem(params.k4));
+    this->TCMResultsTable->setItem(row, 5, makeNumericItem(params.vb));
+    this->TCMResultsTable->setItem(row, 6, makeNumericItem(params.td));
+    this->TCMResultsTable->setItem(row, 7, makeNumericItem(params.Ki));
+    this->TCMResultsTable->setItem(row, 8, makeNumericItem(params.DV));
+    this->TCMResultsTable->setItem(row, 9, makeNumericItem(params.AIC));
+    this->TCMResultsTable->setItem(row, 10, makeNumericItem(params.BIC));
+    this->TCMResultsTable->setItem(row, 11, makeNumericItem(params.MASE));
+    this->TCMResultsTable->setItem(row, 12, makeNumericItem(params.chi2));
 
     totalRowHeight += this->TCMResultsTable->rowHeight(row);
     ++row;
@@ -1334,6 +1357,21 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   this->TCMResultsTable->resizeColumnsToContents();
   this->populateModelsTCM(segmentID);
 
+  std::string sel1, sel2;
+  int idx1 = this->TCMModel1->currentIndex();
+  if (idx1 >= 0)
+    sel1 = this->TCMModel1->itemData(idx1).toString().toStdString();
+  int idx2 = this->TCMModel2->currentIndex();
+  if (idx2 >= 0)
+    sel2 = this->TCMModel2->itemData(idx2).toString().toStdString();
+  this->populateModelComboTCM(this->TCMModel1, sel2, sel1, segmentID);
+  this->populateModelComboTCM(this->TCMModel2, sel1, sel2, segmentID);
+  if (idx1 > 0 & idx2 >0){
+    q->runTCMstat(sel1, sel2, segmentID);
+  } else {
+    this->TCMLRTP->setText("");
+    this->TCMVuongP->setText("");
+  }
 }
 
 void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segmentID)
@@ -1354,7 +1392,7 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
   }
 
   // Define column headers
-  QStringList headers = { "", "Ki", "DV", "Intercept", "R2", "AIC", "MASE" };
+  QStringList headers = { "", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"};
   this->MTGAResultsTable->setColumnCount(headers.size());
   this->MTGAResultsTable->setHorizontalHeaderLabels(headers);
 
@@ -1368,12 +1406,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
   for (const auto& [label, params] : labelMap)
   {
     this->MTGAResultsTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(label)));
-    this->MTGAResultsTable->setItem(row, 1, new QTableWidgetItem(QString::number(params.Ki)));
-    this->MTGAResultsTable->setItem(row, 2, new QTableWidgetItem(QString::number(params.DV)));
-    this->MTGAResultsTable->setItem(row, 3, new QTableWidgetItem(QString::number(params.Intercept)));
-    this->MTGAResultsTable->setItem(row, 4, new QTableWidgetItem(QString::number(params.R2)));
-    this->MTGAResultsTable->setItem(row, 5, new QTableWidgetItem(QString::number(params.AIC)));
-    this->MTGAResultsTable->setItem(row, 6, new QTableWidgetItem(QString::number(params.MASE)));
+    this->MTGAResultsTable->setItem(row, 1, makeNumericItem(params.Ki));
+    this->MTGAResultsTable->setItem(row, 2, makeNumericItem(params.DV));
+    this->MTGAResultsTable->setItem(row, 3, makeNumericItem(params.Intercept));
+    this->MTGAResultsTable->setItem(row, 4, makeNumericItem(params.R2));
+    this->MTGAResultsTable->setItem(row, 5, makeNumericItem(params.AIC));
+    this->MTGAResultsTable->setItem(row, 6, makeNumericItem(params.MASE));
+    // this->MTGAResultsTable->setItem(row, 7, makeNumericItem(params.chi2));
 
     totalRowHeight += this->MTGAResultsTable->rowHeight(row);
     ++row;
@@ -1396,8 +1435,11 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
     sel2 = this->MTGAModel2->itemData(idx2).toString().toStdString();
   this->populateModelCombo(this->MTGAModel1, sel2, sel1, segmentID);
   this->populateModelCombo(this->MTGAModel2, sel1, sel2, segmentID);
-  if (idx1 > 0 & idx2 >0)
+  if (idx1 > 0 & idx2 >0) {
     q->runVuong(sel1, sel2, segmentID);
+  } else {
+    this->MTGAVuongP->setText("");
+  }
 }
 
 
@@ -1527,6 +1569,59 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelCombo(
     return;
   }
   this->MTGAStatTestButton->setEnabled(true);
+  const auto& modelsForSegment = it->second;
+
+  comboToFill->blockSignals(true);
+  comboToFill->clear();
+  comboToFill->addItem("", "");  // empty choice
+
+  int restoredIndex = 0;
+  for (const auto& [modelName, params] : modelsForSegment)
+  {
+    if (!otherSelectedModel.empty() && modelName == otherSelectedModel)
+      continue;  // skip what’s selected in the other box
+
+    comboToFill->addItem(QString::fromStdString(modelName), QString::fromStdString(modelName));
+
+    if (modelName == currentSelectedModel)
+    {
+      restoredIndex = comboToFill->count() - 1;
+    }
+  }
+
+  comboToFill->setCurrentIndex(restoredIndex);
+  comboToFill->blockSignals(false);
+}
+
+void qSlicerKMAPModuleWidgetPrivate::populateModelComboTCM(
+    QComboBox* comboToFill,
+    const std::string& otherSelectedModel,
+    const std::string& currentSelectedModel,
+    const std::string& segmentID)
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  if (segmentID.empty()) {
+    this->TCMModel1->clear();
+    this->TCMModel2->clear();
+    this->TCMLRTP->setText("");
+    this->TCMVuongP->setText("");
+    this->TCMStatTestButton->setCollapsed(true);
+    this->TCMStatTestButton->setEnabled(false);
+    return;
+  }
+
+  auto it = q->segmentTCM.find(segmentID);
+  if (it == q->segmentTCM.end()) {
+    this->TCMModel1->clear();
+    this->TCMModel2->clear();
+    this->TCMLRTP->setText("");
+    this->TCMVuongP->setText("");
+    this->TCMStatTestButton->setCollapsed(true);
+    this->TCMStatTestButton->setEnabled(false);
+    return;
+  }
+  this->TCMStatTestButton->setEnabled(true);
   const auto& modelsForSegment = it->second;
 
   comboToFill->blockSignals(true);
@@ -2216,6 +2311,7 @@ QVariantMap qSlicerKMAPModuleWidget::TCMParamsToPythonDict()
       row["AIC"]   = params.AIC;
       row["BIC"]   = params.BIC;
       row["MASE"]  = params.MASE;
+      row["chi^2_nu"]  = params.chi2;
 
       rows.append(row);
     }
@@ -2251,6 +2347,7 @@ QVariantMap qSlicerKMAPModuleWidget::MTGAParamsToPythonDict()
       row["R2"]   = params.R2;
       row["AIC"]   = params.AIC;
       row["MASE"]  = params.MASE;
+      // row["chi^2_nu"]  = params.chi2;
 
       rows.append(row);
     }
@@ -2812,6 +2909,93 @@ void qSlicerKMAPModuleWidget::runVuong(std::string sel1,
   return;
 }
 
+void qSlicerKMAPModuleWidget::runTCMstat(std::string sel1,
+                                         std::string sel2,
+                                         std::string segmentID
+                                        )
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    std::cerr << "Missing Logic!" << std::endl;
+    return;
+  }
+
+  if (segmentID.empty()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+
+  auto it = this->segmentTCM.find(segmentID);
+  if (it == this->segmentTCM.end()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+  auto& modelsForSegment = it->second;
+
+  auto itTac = this->segmentTAC4TCMfits.find(segmentID);
+  if (itTac == this->segmentTAC4TCMfits.end()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+
+  auto itFits = this->segmentTCMfits.find(segmentID);
+  if (itFits == this->segmentTCMfits.end()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+
+
+  const int N1 = modelsForSegment[sel1].weights.size();
+  const int N2 = modelsForSegment[sel2].weights.size();
+  if (N1 != N2) {
+    throw std::runtime_error(
+        sel1 + " has not been fitted with the same number of datapoints (" + std::to_string(N1) +
+        ") of " + sel2 + " (" + std::to_string(N2) + ")."
+    );
+  }
+  std::vector<double> w1 = modelsForSegment[sel1].weights;
+  std::vector<double> w2 = modelsForSegment[sel2].weights;
+  // Check they are the same length
+  if (w1.size() != w2.size()) {
+      throw std::invalid_argument("Weight vectors must have the same length");
+  }
+  // Compute average weights
+  std::vector<double> wgt_avg(w1.size());
+  for (size_t i = 0; i < w1.size(); ++i) {
+      wgt_avg[i] = 0.5 * (w1[i] + w2[i]);
+  }
+  const std::vector<double>* wgt = &wgt_avg;
+  double p = logic->computeLRTP(modelsForSegment[sel1].loglik,
+                                modelsForSegment[sel2].loglik,
+                                modelsForSegment[sel1].dof,
+                                modelsForSegment[sel2].dof
+                                );
+  d->TCMLRTP->setText(QString::number(p, 'g', 4));
+  double pvuong = logic->computeVuongP(modelsForSegment[sel1].r,
+                                       modelsForSegment[sel2].r,
+                                       wgt,
+                                       modelsForSegment[sel1].dof,
+                                       modelsForSegment[sel2].dof,
+                                       VuongCorrection::BIC,
+                                       Tail::TwoSided
+                                     );
+  d->TCMVuongP->setText(QString::number(pvuong, 'g', 4));
+  return;
+}
+
 void qSlicerKMAPModuleWidget::onMTGAModelBox(int index)
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -2841,8 +3025,51 @@ void qSlicerKMAPModuleWidget::onMTGAModelBox(int index)
     sel2 = d->MTGAModel2->itemData(idx2).toString().toStdString();
   d->populateModelCombo(d->MTGAModel1, sel2, sel1, selectedVOI);
   d->populateModelCombo(d->MTGAModel2, sel1, sel2, selectedVOI);
-  if (idx1>0 & idx2>0)
+  if (idx1>0 & idx2>0) {
     this->runVuong(sel1, sel2, selectedVOI);
+  } else {
+    d->MTGAVuongP->setText("");
+  }
+  return;
+}
+
+void qSlicerKMAPModuleWidget::onTCMModelBox(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  std::string selectedVOI = this->plotTCMVOI;
+  if (selectedVOI.empty()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+
+  auto it = this->segmentTCM.find(selectedVOI);
+  if (it == this->segmentTCM.end()) {
+    d->TCMModel1->clear();
+    d->TCMModel2->clear();
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+    return;
+  }
+  const auto& modelsForSegment = it->second;
+  std::string sel1, sel2;
+  int idx1 = d->TCMModel1->currentIndex();
+  if (idx1 >= 0)
+    sel1 = d->TCMModel1->itemData(idx1).toString().toStdString();
+  int idx2 = d->TCMModel2->currentIndex();
+  if (idx2 >= 0)
+    sel2 = d->TCMModel2->itemData(idx2).toString().toStdString();
+  d->populateModelComboTCM(d->TCMModel1, sel2, sel1, selectedVOI);
+  d->populateModelComboTCM(d->TCMModel2, sel1, sel2, selectedVOI);
+  if (idx1>0 & idx2>0) {
+    this->runTCMstat(sel1, sel2, selectedVOI);
+  } else {
+    d->TCMLRTP->setText("");
+    d->TCMVuongP->setText("");
+  }
   return;
 }
 

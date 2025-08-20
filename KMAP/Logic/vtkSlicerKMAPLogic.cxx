@@ -37,6 +37,27 @@ static double norm_cdf(double x)
     return 0.5 * std::erfc(-x / std::sqrt(2.0));
 }
 
+static double chi2_cdf(double x, int df)
+{
+    // Regularized gamma function approximation
+    // Here we use std::tgamma and std::lgamma for stability
+    // P(k/2, x/2) = lower_gamma(k/2, x/2) / Gamma(k/2)
+    double k = df * 0.5;
+    double t = x * 0.5;
+
+    // Series expansion for lower incomplete gamma (simple for moderate df)
+    double sum = 1.0 / k;
+    double term = sum;
+    for (int n = 1; n < 100; ++n) {
+        term *= t / (k + n);
+        sum += term;
+        if (term < 1e-12) break;
+    }
+
+    double result = std::exp(-t + k * std::log(t) - std::lgamma(k)) * sum;
+    return result;
+}
+
 //----------------------------------------------------------------------------
 vtkStandardNewMacro(vtkSlicerKMAPLogic);
 
@@ -383,6 +404,36 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
 
 }
 
+double vtkSlicerKMAPLogic::computeLogLik(const std::vector<double>& y,
+                                         const std::vector<double>& fitted,
+                                         const std::vector<double>* wgt)
+{
+    size_t n = y.size();
+
+    std::vector<double> weights;
+    if (wgt == nullptr)
+        weights.assign(n, 1.0);
+    else {
+        if (wgt->size() != n)
+            throw std::invalid_argument("weights size must match obs");
+        weights = *wgt;
+    }
+
+    if (y.size() != fitted.size() || y.size() != weights.size()) {
+        throw std::invalid_argument("Input vectors must have same length");
+    }
+
+    double logLik = 0.0;
+    for (size_t i = 0; i < y.size(); ++i) {
+        double r = y[i] - fitted[i];
+        double wi = weights[i];
+        if (wi <= 0) continue; // skip invalid weights
+
+        logLik += -0.5 * (std::log(2.0 * M_PI / wi) + wi * r * r);
+    }
+    return logLik;
+}
+
 
 void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
                                  std :: vector< std :: vector<double> > Cp,
@@ -508,8 +559,7 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.Ki = params.K1;
     params.DV = params.K1/(params.k2 + 1e-16);
     params.weights.assign(wt, wt + Nframe);
-    params.dof = std::count(sens, sens + Nframe, true);
-    std :: cout << "dof=" << params.dof;
+    params.dof = std::count(sens, sens + 4, true);
     std::vector<double> fittedTCMvalues(fitted_curve,
                                         fitted_curve + Nframe);
     std :: vector<double> tac_vec(tac_flatten, tac_flatten + Nframe);
@@ -517,6 +567,12 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.AIC  = this->computeAIC(tac_vec, predicted_tac, params.dof, wgt);
     params.BIC  = this->computeBIC(tac_vec, predicted_tac, params.dof, wgt);
     params.MASE = this->MASE(tac_vec, predicted_tac, wgt);
+    params.chi2 = this->computeChi2(tac_vec, predicted_tac, wgt) / (Nframe-params.dof);
+    params.loglik = this->computeLogLik(tac_vec, predicted_tac, wgt);
+    params.r.resize(Nframe);
+    for (size_t i = 0; i < Nframe; ++i) {
+      params.r[i] = tac_vec[i] - predicted_tac[i];
+    }
     // std :: cout << "fitted_params" << std ::endl;
     // print_vec(fitted_params, 4*Nvox);
     // std :: cout << "fitted_curve" << std ::endl;
@@ -553,8 +609,7 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.Ki = params.K1 * params.k3 / (params.k2 + params.k3);
     params.DV = params.K1/(params.k2 + 1e-16) * (1 + params.k3/(params.k4 + 1e-16));
     params.weights.assign(wt, wt + Nframe);
-    params.dof = std::count(sens, sens + Nframe, true);
-    std :: cout << "dof=" << params.dof;
+    params.dof = std::count(sens, sens + 6, true);
     std::vector<double> fittedTCMvalues(fitted_curve,
                                         fitted_curve + Nframe);
     std :: vector<double> tac_vec(tac_flatten, tac_flatten + Nframe);
@@ -562,6 +617,12 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     params.AIC  = this->computeAIC(tac_vec, predicted_tac, params.dof, wgt);
     params.BIC  = this->computeBIC(tac_vec, predicted_tac, params.dof, wgt);
     params.MASE = this->MASE(tac_vec, predicted_tac, wgt);
+    params.chi2 = this->computeChi2(tac_vec, predicted_tac, wgt)/ (Nframe-params.dof);
+    params.loglik = this->computeLogLik(tac_vec, predicted_tac, wgt);
+    params.r.resize(Nframe);
+    for (size_t i = 0; i < Nframe; ++i) {
+      params.r[i] = tac_vec[i] - predicted_tac[i];
+    }
     // std :: cout << "fitted_params" << std ::endl;
     // print_vec(fitted_params, 6*Nvox);
     // std :: cout << "fitted_curve" << std ::endl;
@@ -859,6 +920,32 @@ double vtkSlicerKMAPLogic::computeR2(const std::vector<double>& obs,
     return 1.0 - (sse / sst);
 }
 
+double vtkSlicerKMAPLogic::computeChi2(const std::vector<double>& y,
+                                       const std::vector<double>& fitted,
+                                       const std::vector<double>* wgt)
+{
+    size_t n = y.size();
+
+    std::vector<double> weights;
+    if (wgt == nullptr)
+        weights.assign(n, 1.0);
+    else {
+        if (wgt->size() != n)
+            throw std::invalid_argument("weights size must match obs");
+        weights = *wgt;
+    }
+
+    if (y.size() != fitted.size() || y.size() != weights.size()) {
+        throw std::invalid_argument("Vectors must have the same length");
+    }
+
+    double chi2 = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double r = y[i] - fitted[i];
+        chi2 += weights[i] * r * r;
+    }
+    return chi2;
+}
 
 double vtkSlicerKMAPLogic::computeVuongP(const std::vector<double>& r1,
                                          const std::vector<double>& r2,
@@ -949,6 +1036,33 @@ double vtkSlicerKMAPLogic::computeVuongP(const std::vector<double>& r1,
     }
 
     return std::max(0.0, std::min(1.0, p));
+}
+
+
+
+double vtkSlicerKMAPLogic::computeLRTP(double logLik1,
+                                       double logLik2,
+                                       int df2, int df1
+                                      )
+{
+  // Determine complexity ordering
+  int dfDiff = df2 - df1;
+  if (dfDiff == 0) {
+    return std::numeric_limits<double>::quiet_NaN(); // cannot compute
+  }
+
+  // Ensure model2 is more complex
+  if (dfDiff < 0) {
+      std::swap(logLik1, logLik2);
+      std::swap(df1, df2);
+      dfDiff = -dfDiff;
+  }
+
+  double Lambda = -2.0 * (logLik1 - logLik2);
+  if (Lambda < 0) Lambda = 0.0;
+
+  double p = 1.0 - chi2_cdf(Lambda, dfDiff);
+  return p;
 }
 
 void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
@@ -1083,6 +1197,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
   params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
 
   // de-standardize if needed
   if (std)
@@ -1262,6 +1377,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
   params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
 
   // De-standardize if needed
   if (std)
@@ -1440,6 +1556,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
   params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
   params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
+  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
 
   // De-standardize if needed
   if (std)

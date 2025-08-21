@@ -36,6 +36,7 @@
 #include <vtkSegmentation.h>
 #include <vtkSlicerKMAPLogic.h>
 #include <QProgressBar.h>
+#include <QMessageBox.h>
 
 #include <ctkDICOMDatabase.h>
 #include <qSlicerApplication.h>
@@ -46,6 +47,8 @@
 #include <vtkMRMLPlotSeriesNode.h>
 #include <vtkMRMLLayoutNode.h>
 #include <vtkMRMLPlotViewNode.h>
+#include <vtkMRMLScalarVolumeDisplayNode.h>
+#include <vtkMRMLProceduralColorNode.h>
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;
@@ -132,17 +135,22 @@ public slots:
   void onWFitclicked();
   void onMTGAModelBox(int index);
   void onTCMModelBox(int index);
+  void onSegmentContourChanged(vtkObject* caller, void* callData);
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
   bool IsActive{false};
-
+  vtkMRMLSequenceNode* sequencePETNode;
+  vtkMRMLSequenceNode* segSequenceNode;
+  vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode;
 private:
   Q_DECLARE_PRIVATE(qSlicerKMAPModuleWidget);
   Q_DISABLE_COPY(qSlicerKMAPModuleWidget);
   std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
+
+  int numberOfTimepoints;
   std::vector<QString> segmentIDs;
   std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
   std::map<std::string, std::string> segmentTACsnames;

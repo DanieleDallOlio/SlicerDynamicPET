@@ -121,7 +121,6 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->CTSelector->setEnabled(false);
   this->PETSelector->setEnabled(false);
   this->SegSelector->setEnabled(false);
-  this->SegSelector->setEnabled(false);
   this->segmentSelectAll->setEnabled(false);
   this->saveExcelButton->setEnabled(false);
   this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->MTGAWidget), false);
@@ -708,6 +707,15 @@ void qSlicerKMAPModuleWidgetPrivate::populateNodeComboBox(
     return;
   }
 
+  if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
+    if (q->petID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
+      comboBox->setEnabled(false);
+      comboBox->blockSignals(false);
+      q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+      this->populateSegmentCheckboxes(q->segID);
+      return;
+    }
+  }
   comboBox->setEnabled(true);
   int restoredIndex = 0;
 
@@ -831,6 +839,14 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     return;
   }
 
+  if (q->sequencePETNode == nullptr || q->segSequenceNode == nullptr) {
+    this->SegmentCheckContents->blockSignals(false);
+    q->segmentIDs.clear();
+    q->enableTACbutton();
+    this->segmentSelectAll->setEnabled(false);
+    return;
+  }
+
   vtkSegmentation* segmentation = segNode->GetSegmentation();
   if (!segmentation) {
     this->SegmentCheckContents->blockSignals(false);
@@ -845,7 +861,8 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
   for (vtkIdType i = 0; i < segmentIDs.size(); ++i)
   {
     std::string segmentID = segmentIDs[i];
-    std::string segmentName = segmentation->GetSegment(segmentID)->GetName();
+    vtkSegment* vtksegment = segmentation->GetSegment(segmentID);
+    std::string segmentName = vtksegment->GetName();
 
     QCheckBox* checkbox = new QCheckBox(QString::fromStdString(segmentName));
     checkbox->setProperty("SegmentID", QString::fromStdString(segmentID));
@@ -855,8 +872,12 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
     this->segmentCheckLayout->addWidget(checkbox);
     QObject::connect(checkbox, SIGNAL(stateChanged(int)),
                  q, SLOT(onSegmentsChanged()));
-    if (wasSelected)
+    if (wasSelected) {
       q->segmentIDs.push_back(QString::fromStdString(segmentID));
+      q->qvtkConnect(vtksegment,
+        vtkSegmentation::RepresentationModified,
+        q, SLOT(onSegmentContourChanged(vtkObject*, void*)));
+    }
   }
   q->enableTACbutton();
 
@@ -921,48 +942,8 @@ void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
 void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGA() {
   Q_Q(qSlicerKMAPModuleWidget);
 
-  vtkMRMLScene* scene = q->mrmlScene();
-  if (scene==nullptr) {
-    return;
-  }
-
-  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
-  if (!shNode) {
-    return;
-  }
-
-  // Fetch PET
-  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(q->petID));
-  if (!petNode) {
-    return;
-  }
-
-  // Collect the sequence for the dynamic PET
-  vtkMRMLSequenceNode* sequencePETNode = nullptr;
-  vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode = nullptr;
-  for (int i = 0; i < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode"); ++i)
-  {
-    vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
-    if (!browser)
-      continue;
-
-    // Check if this browser is using our PET node as a proxy node
-    vtkMRMLSequenceNode* seqNode = browser->GetSequenceNode(petNode);
-    if (seqNode)
-    {
-      sequencePETNode = seqNode;
-      sequenceBrowserPETNode = browser;
-      break;
-    }
-  }
-  if (!sequencePETNode || !sequenceBrowserPETNode)
-  {
-    std::cerr << "Could not find sequence or browser node for PET." << std::endl;
-    return;
-  }
-  int numberOfTimepoints = sequencePETNode->GetNumberOfDataNodes();
   this->timeOffsetSlider->setMinimum(1);
-  this->timeOffsetSlider->setMaximum(numberOfTimepoints);
+  this->timeOffsetSlider->setMaximum(q->numberOfTimepoints);
   this->timeOffsetSlider->setValue(1);
 
   frameEdit->setReadOnly(true);
@@ -1663,6 +1644,10 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  this->sequencePETNode = nullptr;
+  this->segSequenceNode = nullptr;
+  this->sequenceBrowserPETNode = nullptr;
+  this->numberOfTimepoints = 0;
   this->ProgressBar = new QProgressBar();
   this->ProgressBar->setObjectName(QString::fromUtf8("ProgressBar"));
   this->ProgressBar->setMaximum(100);
@@ -1977,8 +1962,119 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
 void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
   this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
+
+  this->sequencePETNode = nullptr;
+  this->sequenceBrowserPETNode = nullptr;
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  if (scene==nullptr) {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+  if (!shNode) {
+    return;
+  }
+  // Fetch PET
+  if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
+    d->populateNodeComboBox(d->SegSelector,
+                            this->stuID,
+                            "vtkMRMLSegmentationNode",
+                            ""
+                            );
+    return;
+  }
+  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(this->petID));
+  if (!petNode) {
+    d->populateNodeComboBox(d->SegSelector,
+                            this->stuID,
+                            "vtkMRMLSegmentationNode",
+                            ""
+                            );
+    return;
+  }
+
+  // Collect the sequence for the dynamic PET
+  for (int i = 0; i < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode"); ++i)
+  {
+    vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
+    if (!browser)
+      continue;
+
+    // Check if this browser is using our PET node as a proxy node
+    vtkMRMLSequenceNode* seqNode = browser->GetSequenceNode(petNode);
+    if (seqNode)
+    {
+      this->sequencePETNode = seqNode;
+      this->sequenceBrowserPETNode = browser;
+      break;
+    }
+  }
+  if (!this->sequencePETNode || !this->sequenceBrowserPETNode)
+  {
+    QMessageBox::warning(nullptr,
+                         tr("Missing node"),
+                         tr("Could not find sequence or browser node for PET."));
+    return;
+  }
+  this->numberOfTimepoints = this->sequencePETNode->GetNumberOfDataNodes();
+
+  d->populateNodeComboBox(d->SegSelector,
+                          this->stuID,
+                          "vtkMRMLSegmentationNode",
+                          ""
+                          );
+
   this->getDurations();
   this->enableTACbutton();
+
+  // Get proxy node for current time/frame
+  this->sequenceBrowserPETNode->SetSelectedItemNumber(this->numberOfTimepoints - 1);
+  vtkMRMLScalarVolumeNode* proxyVolume =
+      vtkMRMLScalarVolumeNode::SafeDownCast(this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+  if (!proxyVolume)
+  {
+      qCritical() << "Cannot get proxy volume for PET frame";
+      return;
+  }
+
+  vtkMRMLProceduralColorNode* petLUTNode =
+      vtkMRMLProceduralColorNode::SafeDownCast(
+          scene->GetFirstNodeByName("PET-DICOM"));
+  if (!petLUTNode)
+  {
+      qCritical() << "Could not find PET-DICOM procedural color node in the scene";
+      return;
+  }
+
+  // Apply LUT and auto window/level
+  vtkMRMLScalarVolumeDisplayNode* displayNode =
+      vtkMRMLScalarVolumeDisplayNode::SafeDownCast(proxyVolume->GetDisplayNode());
+
+  if (displayNode)
+  {
+      displayNode->SetAndObserveColorNodeID(petLUTNode->GetID());
+      displayNode->AutoWindowLevelOn();
+      displayNode->SetAutoWindowLevel(1);
+      displayNode->SetVisibility(true);
+  }
+
+  vtkSlicerApplicationLogic* appLogic = qSlicerApplication::application()->applicationLogic();
+  if (appLogic)
+  {
+      vtkMRMLSliceCompositeNode* compositeNode;
+
+      // Iterate over all slice views
+      for (int i = 0; i < appLogic->GetMRMLScene()->GetNumberOfNodesByClass("vtkMRMLSliceCompositeNode"); ++i)
+      {
+          compositeNode = vtkMRMLSliceCompositeNode::SafeDownCast(
+              appLogic->GetMRMLScene()->GetNthNodeByClass(i, "vtkMRMLSliceCompositeNode"));
+          if (compositeNode)
+          {
+              compositeNode->SetBackgroundVolumeID(proxyVolume->GetID());
+          }
+      }
+  }
+
   // if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   // {
   //   // "None" selected — ignore or reset state
@@ -1992,36 +2088,92 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
 void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
   this->segID = d->SegSelector->itemData(index).value<vtkIdType>();
+
+  this->segSequenceNode = nullptr;
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  if (scene==nullptr) {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+  if (!shNode) {
+    return;
+  }
+  // Fetch PET
+  if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
+    d->populateNodeComboBox(d->SegSelector,
+                            this->stuID,
+                            "vtkMRMLSegmentationNode",
+                            ""
+                            );
+    return;
+  }
+  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(this->petID));
+  if (!petNode || this->sequencePETNode == nullptr || this->sequenceBrowserPETNode == nullptr) {
+    d->populateNodeComboBox(d->SegSelector,
+                            this->stuID,
+                            "vtkMRMLSegmentationNode",
+                            ""
+                            );
+    return;
+  }
+  // Fetch Segmentation
+  if (this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
+    d->populateSegmentCheckboxes(this->segID);
+    return;
+  }
+  vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(this->segID));
+  if (!segNode) {
+    d->populateSegmentCheckboxes(this->segID);
+    return;
+  }
+  // Make sure the source of the segmentation is a binary label map, alongside a created closed surface
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    return;
+  }
+  logic->setupSeg(segNode);
+
+  // Setup the right sequence for the segmentation
+  this->segSequenceNode = this->sequenceBrowserPETNode->GetSequenceNode(segNode);
+  if (!segSequenceNode)
+  {
+    this->segSequenceNode = vtkMRMLSequenceNode::New();
+    this->segSequenceNode->SetName(shNode->GetItemName(segID).c_str());
+    scene->AddNode(this->segSequenceNode);
+    this->sequenceBrowserPETNode->AddProxyNode(segNode, this->segSequenceNode, false);
+    std::string indexValue;
+    this->sequenceBrowserPETNode->SetSaveChanges(this->segSequenceNode, true);
+    for (int i = 0; i < this->numberOfTimepoints; ++i) {
+      indexValue = this->sequencePETNode->GetNthIndexValue(i);
+      if (!this->segSequenceNode->GetDataNodeAtValue(indexValue))
+      {
+        this->segSequenceNode->SetDataNodeAtValue(segNode, indexValue);
+      }
+    }
+  }
+
   d->populateSegmentCheckboxes(this->segID);
   this->enableTACbutton();
-  // if (this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  // {
-  //   // "None" selected — ignore or reset state
-  //   return;
-  // }
-  // std :: string name = this->SubjectHierarchyNode->GetItemName(this->segID);
-  // std::cout << "Seg: " << name
-  //           << ", ID: " << this->segID << std::endl;
 }
 
 void qSlicerKMAPModuleWidget::onSegmentsChanged()
 {
   Q_D(qSlicerKMAPModuleWidget);
-  std::vector<QString> selectedSegmentIDs;
-
-  for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
-  {
-    QLayoutItem* item = d->segmentCheckLayout->itemAt(i);
-    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
-    {
-      QString segmentID = checkbox->property("SegmentID").toString();
-      selectedSegmentIDs.push_back(segmentID);
-    }
-  }
-  this->segmentIDs = selectedSegmentIDs;
-
-  this->enableTACbutton();
+  // std::vector<QString> selectedSegmentIDs;
+  //
+  // for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
+  // {
+  //   QLayoutItem* item = d->segmentCheckLayout->itemAt(i);
+  //   QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+  //   if (checkbox && checkbox->isChecked())
+  //   {
+  //     QString segmentID = checkbox->property("SegmentID").toString();
+  //     selectedSegmentIDs.push_back(segmentID);
+  //   }
+  // }
+  // this->segmentIDs = selectedSegmentIDs;
+  d->populateSegmentCheckboxes(this->segID);
 }
 
 void qSlicerKMAPModuleWidget::clearTACdata() {
@@ -2065,6 +2217,16 @@ void qSlicerKMAPModuleWidget::enableTACbutton() {
     return;
   }
   if (this->segmentIDs.empty()) {
+    d->TACbutton->setEnabled(false);
+    this->clearTACdata();
+    return;
+  }
+  if (this->sequencePETNode==nullptr || this->sequenceBrowserPETNode==nullptr) {
+    d->TACbutton->setEnabled(false);
+    this->clearTACdata();
+    return;
+  }
+  if (this->segSequenceNode==nullptr) {
     d->TACbutton->setEnabled(false);
     this->clearTACdata();
     return;
@@ -2168,7 +2330,8 @@ void qSlicerKMAPModuleWidget::onTACbutton()
 
   this->ProgressBar->setVisible(true);
   qApp->processEvents();
-  logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
+  // logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
+  logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
   this->ProgressBar->setValue(0);
   this->ProgressBar->setVisible(false);
   qApp->processEvents();
@@ -2182,6 +2345,7 @@ void qSlicerKMAPModuleWidget::onTACbutton()
 void qSlicerKMAPModuleWidget::onSelectAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
+  d->SegmentCheckContents->blockSignals(true);
   if (this->segmentIDs.size()==(d->segmentCheckLayout->count()-1)) {
     for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
     {
@@ -2189,7 +2353,9 @@ void qSlicerKMAPModuleWidget::onSelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(false);
+        cb->blockSignals(false);
       }
     }
   } else {
@@ -2199,10 +2365,13 @@ void qSlicerKMAPModuleWidget::onSelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(true);
+        cb->blockSignals(false);
       }
     }
   }
+  d->SegmentCheckContents->blockSignals(false);
   d->populateSegmentCheckboxes(this->segID);
 }
 
@@ -2719,6 +2888,7 @@ void qSlicerKMAPModuleWidget::onVOIMTGASelectionChanged(int index)
 void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
+  d->VOICheckContents->blockSignals(true);
   if (this->VOIsegmentIDs.size()==(d->VOICheckLayout->count()-1)) {
     for (int i = 0; i < d->VOICheckLayout->count(); ++i)
     {
@@ -2726,7 +2896,9 @@ void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(false);
+        cb->blockSignals(false);
       }
     }
   } else {
@@ -2736,16 +2908,20 @@ void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(true);
+        cb->blockSignals(false);
       }
     }
   }
+  d->VOICheckContents->blockSignals(false);
   d->populateVOI(this->IFID);
 }
 
 void qSlicerKMAPModuleWidget::onVOIMTGASelectAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
+  d->VOIMTGACheckContents->blockSignals(true);
   if (this->VOIMTGAsegmentIDs.size()==(d->VOIMTGACheckLayout->count()-1)) {
     for (int i = 0; i < d->VOIMTGACheckLayout->count(); ++i)
     {
@@ -2753,7 +2929,9 @@ void qSlicerKMAPModuleWidget::onVOIMTGASelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(false);
+        cb->blockSignals(false);
       }
     }
   } else {
@@ -2763,10 +2941,13 @@ void qSlicerKMAPModuleWidget::onVOIMTGASelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(true);
+        cb->blockSignals(false);
       }
     }
   }
+  d->VOIMTGACheckContents->blockSignals(false);
   d->populateVOIMTGA(this->IFID);
 }
 
@@ -3071,6 +3252,17 @@ void qSlicerKMAPModuleWidget::onTCMModelBox(int index)
     d->TCMVuongP->setText("");
   }
   return;
+}
+
+void qSlicerKMAPModuleWidget::onSegmentContourChanged(vtkObject* caller, void* callData)
+{
+  std :: cout << "Prova" << std :: endl;
+  vtkSegment* segment = vtkSegment::SafeDownCast(caller);
+  if (!segment)
+    return;
+
+  qDebug() << "Selected segment changed:" << segment->GetName();
+  // Your update/re-analysis here
 }
 
 void qSlicerKMAPModuleWidget::clearFITdata() {
@@ -3633,6 +3825,7 @@ void qSlicerKMAPModuleWidget::onModelsAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
 
+  d->ModelsCheckContents->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
   for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
   {
@@ -3652,7 +3845,9 @@ void qSlicerKMAPModuleWidget::onModelsAllbutton()
       QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
       if (checkbox)
       {
+        checkbox->blockSignals(true);
         checkbox->setChecked(false);
+        checkbox->blockSignals(false);
       }
     }
   } else {
@@ -3663,11 +3858,14 @@ void qSlicerKMAPModuleWidget::onModelsAllbutton()
       QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
       if (checkbox)
       {
+        checkbox->blockSignals(true);
         checkbox->setChecked(true);
+        checkbox->blockSignals(false);
         this->modelsID.push_back(checkbox->text().toStdString());
       }
     }
   }
+  d->ModelsCheckContents->blockSignals(false);
   this->enableFITbutton();
 
 }
@@ -3676,6 +3874,7 @@ void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
 
+  d->ModelsMTGACheckContents->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
   for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
   {
@@ -3695,7 +3894,9 @@ void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
       QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
       if (checkbox)
       {
+        checkbox->blockSignals(true);
         checkbox->setChecked(false);
+        checkbox->blockSignals(false);
       }
     }
   } else {
@@ -3706,11 +3907,14 @@ void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
       QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
       if (checkbox)
       {
+        checkbox->blockSignals(true);
         checkbox->setChecked(true);
+        checkbox->blockSignals(false);
         this->modelsMTGAID.push_back(checkbox->text().toStdString());
       }
     }
   }
+  d->ModelsMTGACheckContents->blockSignals(false);
   this->enableFITMTGAbutton();
 
 }
@@ -3754,6 +3958,7 @@ void qSlicerKMAPModuleWidget::onModelsMTGAChanged()
 void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
+  d->ModelsTCMCheckContents->blockSignals(true);
   QSet<QString> previouslySelectedIDs;
   for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
   {
@@ -3772,7 +3977,9 @@ void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(false);
+        cb->blockSignals(false);
       }
     }
   } else {
@@ -3782,10 +3989,13 @@ void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
       QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
       if (cb)
       {
+        cb->blockSignals(true);
         cb->setChecked(true);
+        cb->blockSignals(false);
       }
     }
   }
+  d->ModelsTCMCheckContents->blockSignals(false);
   d->populateModelsTCM(this->plotTCMVOI);
 }
 

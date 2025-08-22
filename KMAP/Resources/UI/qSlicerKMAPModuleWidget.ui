@@ -207,6 +207,19 @@
                           </property>
                         </widget>
                       </item>
+                      <item>
+                        <widget class="QCheckBox" name="PlotLiveSegEdit">
+                         <property name="toolTip">
+                          <string>TAC will adjust live on segment corrections.</string>
+                         </property>
+                         <property name="text">
+                          <string>SegmentEditor corrections</string>
+                         </property>
+                         <property name="checked">
+                          <bool>true</bool>
+                         </property>
+                        </widget>
+                      </item>
                       <!-- <item>
                         <widget class="QCheckBox" name="PlotErrorCheckbox">
                          <property name="toolTip">

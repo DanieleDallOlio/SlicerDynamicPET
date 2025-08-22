@@ -20,6 +20,7 @@
 
 // Slicer includes
 #include "qSlicerAbstractModuleWidget.h"
+#include "SegmentationChangeWatcher.h"
 
 #include "qSlicerKMAPModuleExport.h"
 #include "qMRMLNodeComboBox.h"
@@ -135,7 +136,6 @@ public slots:
   void onWFitclicked();
   void onMTGAModelBox(int index);
   void onTCMModelBox(int index);
-  void onSegmentContourChanged(vtkObject* caller, void* callData);
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -143,6 +143,7 @@ protected:
   vtkMRMLSequenceNode* sequencePETNode;
   vtkMRMLSequenceNode* segSequenceNode;
   vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode;
+  vtkSmartPointer<SegmentationChangeWatcher> SegWatcher;
 private:
   Q_DECLARE_PRIVATE(qSlicerKMAPModuleWidget);
   Q_DISABLE_COPY(qSlicerKMAPModuleWidget);

@@ -874,9 +874,6 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
                  q, SLOT(onSegmentsChanged()));
     if (wasSelected) {
       q->segmentIDs.push_back(QString::fromStdString(segmentID));
-      q->qvtkConnect(vtksegment,
-        vtkSegmentation::RepresentationModified,
-        q, SLOT(onSegmentContourChanged(vtkObject*, void*)));
     }
   }
   q->enableTACbutton();
@@ -1780,6 +1777,48 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
     this->qvtkConnect(this->SubjectHierarchyNode, vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemModifiedEvent,
                       this, SLOT(onSubjectHierarchyChanged()));
   }
+  this->SegWatcher = vtkSmartPointer<SegmentationChangeWatcher>::New();
+  this->SegWatcher->GetSequencePET = [this]() { return this->sequencePETNode; };
+  this->SegWatcher->GetLogic = [this]() { return vtkSlicerKMAPLogic::SafeDownCast(this->logic()); };
+  this->SegWatcher->GetsegmentTACs = [this]() { return &this->segmentTACs; };
+  this->SegWatcher->GetSegEditCorr = [d]() { return d->PlotLiveSegEdit->isChecked(); };
+  this->SegWatcher->RunPlot = [this]() { this->onPlotbutton(); };
+
+  // Observe all existing segmentation nodes
+  // int n_segnodes = this->mrmlScene()->GetNumberOfNodesByClass("vtkMRMLSegmentationNode");
+  // for (int i=0; i < n_segnodes; ++i)
+  // {
+  //   auto* segNode = vtkMRMLSegmentationNode::SafeDownCast(
+  //       this->mrmlScene()->GetNthNodeByClass(i, "vtkMRMLSegmentationNode"));
+  //   if (!segNode) {
+  //     continue;
+  //   }
+  //   this->SegWatcher->ObserveSegmentationNode(segNode);
+  // }
+
+  // // Also watch future nodes
+  // vtkSmartPointer<vtkCallbackCommand> sceneAddObserver = vtkSmartPointer<vtkCallbackCommand>::New();
+  // sceneAddObserver->SetClientData(this);
+  // sceneAddObserver->SetCallback([](vtkObject* caller,
+  //                                  unsigned long eid,
+  //                                  void* clientData,
+  //                                  void* callData)
+  // {
+  //   auto* self = reinterpret_cast<qSlicerKMAPModuleWidget*>(clientData);
+  //   vtkMRMLScene* scene = vtkMRMLScene::SafeDownCast(caller);
+  //   vtkMRMLNode* node = reinterpret_cast<vtkMRMLNode*>(callData);
+  //
+  //   if (scene && node)
+  //   {
+  //     if (auto* segNode = vtkMRMLSegmentationNode::SafeDownCast(node))
+  //     {
+  //       self->SegWatcher->ObserveSegmentationNode(segNode);
+  //       std :: cout << "Added watcher for segNodeID=" << segNode->GetID() << std :: endl;
+  //     }
+  //   }
+  // });
+  //
+  // this->mrmlScene()->AddObserver(vtkMRMLScene::NodeAddedEvent, sceneAddObserver);
 
 }
 
@@ -1965,6 +2004,7 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
 
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
+  this->SegWatcher->browser = nullptr;
 
   vtkMRMLScene* scene = this->mrmlScene();
   if (scene==nullptr) {
@@ -2006,6 +2046,7 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
     {
       this->sequencePETNode = seqNode;
       this->sequenceBrowserPETNode = browser;
+      this->SegWatcher->browser = browser;
       break;
     }
   }
@@ -2138,6 +2179,7 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   this->segSequenceNode = this->sequenceBrowserPETNode->GetSequenceNode(segNode);
   if (!segSequenceNode)
   {
+    this->SegWatcher->ObserveSegmentationNode(segNode);
     this->segSequenceNode = vtkMRMLSequenceNode::New();
     this->segSequenceNode->SetName(shNode->GetItemName(segID).c_str());
     scene->AddNode(this->segSequenceNode);
@@ -3252,17 +3294,6 @@ void qSlicerKMAPModuleWidget::onTCMModelBox(int index)
     d->TCMVuongP->setText("");
   }
   return;
-}
-
-void qSlicerKMAPModuleWidget::onSegmentContourChanged(vtkObject* caller, void* callData)
-{
-  std :: cout << "Prova" << std :: endl;
-  vtkSegment* segment = vtkSegment::SafeDownCast(caller);
-  if (!segment)
-    return;
-
-  qDebug() << "Selected segment changed:" << segment->GetName();
-  // Your update/re-analysis here
 }
 
 void qSlicerKMAPModuleWidget::clearFITdata() {

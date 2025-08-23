@@ -158,6 +158,7 @@ private:
   std::map<std::string, std::map<std::string, MTGAParameters>> segmentMTGA;
   std::map<std::string, std::map<std::string, TCMParameters>> segmentTCM;
   std::map<std::string, std::vector<std::vector<double>>> segmentTAC4TCMfits;
+  std::map<std::string, std::vector<bool>> segmentkeep4TCMfits;
   std::map<std::string, std::map<std::string, double*>> segmentTCMfits;
   QProgressBar* ProgressBar;
   std::vector<double> timePoints, durations;

@@ -56,7 +56,8 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
   vtkMRMLSegmentationNode* segNode = nullptr;
   std::string segmentId;
 
-  if (auto* segmentation = vtkSegmentation::SafeDownCast(caller))
+  auto* segmentation = vtkSegmentation::SafeDownCast(caller);
+  if (segmentation)
   {
       segNode = self->SegToNode[segmentation];
       if (callData)
@@ -68,6 +69,9 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
       self->ObserveSegmentationNode(node);
       return;
   }
+
+  if (self->GetCurrentSegID() != segNode->GetName())
+    return;
 
   if (!segNode || segmentId.empty())
       return;
@@ -105,6 +109,50 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
     return;
   }
 
+  vtkSegment* segment = segmentation->GetSegment(segmentId);
+  if (!segment || segment->GetRepresentation("Binary labelmap") == nullptr)
+  {
+    vtkGenericWarningMacro("Segment " << segmentId
+                       << " is empty at frame " << frameIndex);
+    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
+    (*segmentTACs)[segmentId][frameIndex].keep = false;
+    (*segmentTACs)[segmentId][frameIndex].empty = true;
+    if (self->RunPlot)
+    {
+      self->RunPlot();  // calls your widget function safely
+    }
+    return;
+  }
+
+  vtkOrientedImageData* segLabelmap = vtkOrientedImageData::SafeDownCast(
+      segment->GetRepresentation(vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName()));
+
+  if (!segLabelmap)
+  {
+    vtkGenericWarningMacro("No binary labelmap for " << segmentId << " at frame " << frameIndex);
+    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
+    (*segmentTACs)[segmentId][frameIndex].keep = false;
+    (*segmentTACs)[segmentId][frameIndex].empty = true;
+    if (self->RunPlot)
+    {
+      self->RunPlot();  // calls your widget function safely
+    }
+    return;
+  }
+  double range[2];
+  segLabelmap->GetScalarRange(range);
+  if (range[1] == 0.0) // max is zero → fully empty
+  {
+    vtkGenericWarningMacro("Segment " << segmentId << " is empty at frame " << frameIndex);
+    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
+    (*segmentTACs)[segmentId][frameIndex].keep = false;
+    (*segmentTACs)[segmentId][frameIndex].empty = true;
+    if (self->RunPlot)
+    {
+      self->RunPlot();  // calls your widget function safely
+    }
+    return;
+  }
   vtkNew<vtkStringArray> segmentArray;
   segmentArray->InsertNextValue(segmentId);
 
@@ -117,11 +165,16 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
                                                                                labelmap);
 
   VoxelStatistics stats;
-  if (labelmap && labelmap->GetNumberOfPoints() > 0) {
-    stats = logic->ComputeVoxelStatistics(PETVolume, labelmap, 1);
-  } else {
+
+  int labelOrientedImageDataEffectiveExtent[6] = { 0, -1, 0, -1, 0, -1 };
+  if (!vtkOrientedImageDataResample::CalculateEffectiveExtent(labelmap, labelOrientedImageDataEffectiveExtent))
+  {
     vtkGenericWarningMacro("Segment " << segmentId << " has been removed at frame " << frameIndex);
     stats = VoxelStatistics{};
+    stats.keep = false;
+    stats.empty = true;
+  } else {
+    stats = logic->ComputeVoxelStatistics(PETVolume, labelmap, 1);
   }
 
   (*segmentTACs)[segmentId][frameIndex] = stats;

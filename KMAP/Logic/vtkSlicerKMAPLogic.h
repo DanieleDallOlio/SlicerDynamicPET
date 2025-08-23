@@ -59,14 +59,16 @@ struct VoxelStatistics
   int count = 0;
   double mean = 0.0;
   double median = 0.0;
-  double min = std::numeric_limits<double>::max();
-  double max = std::numeric_limits<double>::lowest();
+  double min = 0.;
+  double max = 0.;
   double stddev = 0.0;
   double q1 = 0.0;
   double q3 = 0.0;
   double iqr = 0.0;
   double volume_mm3 = 0.0;
   double volume_cm3 = 0.0;
+  bool keep = true;
+  bool empty = false;
 };
 
 struct MTGAParameters
@@ -81,6 +83,7 @@ struct MTGAParameters
   int dof = 0;
   std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
+  std::vector<bool> keep;
 };
 
 struct TCMParameters
@@ -100,6 +103,7 @@ struct TCMParameters
   double loglik = 0;
   int dof = 0;
   std::vector<double> weights, r;
+  std::vector<bool> keep;
 };
 
 enum class VuongCorrection { None, AIC, BIC };

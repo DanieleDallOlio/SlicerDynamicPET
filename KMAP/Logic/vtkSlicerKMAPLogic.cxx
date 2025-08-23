@@ -134,35 +134,18 @@ void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
   if (!ctNode) {
     return;
   }
-  // std :: cout << ctID << std :: endl;
-  // std :: string name = shNode->GetItemName(ctID);
-  // std::cout << "CT: " << name
-  //           << ", ID: " << ctID << std::endl;
   // Fetch PET
   vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(petID));
   if (!petNode) {
     return;
   }
-  // name = shNode->GetItemName(petID);
-  // std::cout << "PET: " << name
-  //           << ", ID: " << petID << std::endl;
   // Fetch Segmentation
   vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(segID));
   if (!segNode) {
     return;
   }
-  // name = shNode->GetItemName(segID);
-  // std::cout << "SEG: " << name
-  //           << ", ID: " << segID << std::endl;
-  // Make sure the source of the segmentation is a binary label map, alongside a created closed surface
   setupSeg(segNode);
 
-  // std::cout << "Selected segments:" << std::endl;
-  // for (const QString& id : segmentsID)
-  // {
-  //   std::string segmentName = seg->GetSegment(id.toStdString())->GetName();
-  //   std::cout << segmentName << " - " << id.toStdString() << std::endl;
-  // }
 
   // Collect the sequence for the dynamic PET
   vtkMRMLSequenceNode* sequencePETNode = nullptr;
@@ -252,7 +235,6 @@ void vtkSlicerKMAPLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
   const std::string closedSurfRep = vtkSegmentationConverter::GetSegmentationClosedSurfaceRepresentationName();
   segmentation->CreateRepresentation(closedSurfRep);
 
-  // std::cout << "setupSeg: Segmentation representations ensured." << std::endl;
 }
 
 
@@ -390,7 +372,9 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       if (!labelmap)
       {
         std::cerr << "Failed to generate labelmap for segment: " << segmentID << " at timepoint " << i << std::endl;
-        segmentTACs[segmentName].emplace_back(VoxelStatistics{});  // Insert empty stats
+        VoxelStatistics stats = VoxelStatistics{};
+        stats.keep = false;
+        segmentTACs[segmentName].emplace_back(stats);  // Insert empty stats
         continue;
       }
       VoxelStatistics stats = ComputeVoxelStatistics(
@@ -478,6 +462,11 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
       );
     }
     std::copy(wgt->begin(), wgt->end(), wt);
+  }
+
+  params.keep.resize(Nframe);
+  for (int iz = 0; iz < Nframe; ++iz) {
+    params.keep[iz] = wt[iz]!=0. ? true : false;
   }
 
   // Cumulative sum
@@ -573,10 +562,6 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     for (size_t i = 0; i < Nframe; ++i) {
       params.r[i] = tac_vec[i] - predicted_tac[i];
     }
-    // std :: cout << "fitted_params" << std ::endl;
-    // print_vec(fitted_params, 4*Nvox);
-    // std :: cout << "fitted_curve" << std ::endl;
-    // print_vec(fitted_curve, Nframe*Nvox);
   } else if (n_tc == 2) {
     double *fitted_params = new double[6*Nvox];
     kfit_2tcm_mex_omp(tac_flatten,
@@ -623,11 +608,6 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
     for (size_t i = 0; i < Nframe; ++i) {
       params.r[i] = tac_vec[i] - predicted_tac[i];
     }
-    // std :: cout << "fitted_params" << std ::endl;
-    // print_vec(fitted_params, 6*Nvox);
-    // std :: cout << "fitted_curve" << std ::endl;
-    // print_vec(fitted_curve, Nframe*Nvox);
-
   } else {
     std :: cerr << "Forbidden number of tissue compartment: " << n_tc << std :: endl;
   }
@@ -1103,6 +1083,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
 
   // build X, Y with time filter
   std::vector<double> wgt_adj;
+  params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
       if (timeAlong[i] >= timeOffset)
@@ -1112,7 +1093,12 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
           outX.push_back(x);
           outY.push_back(y);
           outframe.push_back(i+1);
-          if (wgt) wgt_adj.push_back((*wgt)[i]);
+          if (wgt) {
+            wgt_adj.push_back((*wgt)[i]);
+            params.keep.push_back((*wgt)[i]==0. ? false : true);
+          } else {
+            params.keep.push_back(true);
+          }
       }
   }
 
@@ -1148,6 +1134,20 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   if (robust) {
     // simple robust regression using Iteratively Reweighted Least Squares (Huber)
     Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
+    std::vector<size_t> keepIndices;
+    if (!wgt_adj.empty())
+    {
+        for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
+        {
+            if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
+            {
+                keepIndices.push_back(iz);
+
+            } else {
+              weights(iz) = 0.;
+            }
+        }
+    }
     Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
     Eigen::VectorXd residuals(n), prev_coeff(2);
     for (int iter = 0; iter < max_iter; ++iter) {
@@ -1160,7 +1160,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
       prev_coeff = coeff;
       // Update residuals and weights
       residuals = Yv - A * coeff;
-      for (int i = 0; i < n; ++i) {
+      for (auto i: keepIndices) {
           double r = std::abs(residuals(i));
           weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);  // avoid div by 0
       }
@@ -1282,6 +1282,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
 
   // Build X, Y with time filter
   std::vector<double> wgt_adj;
+  params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
       if (timeAlong[i] >= timeOffset)
@@ -1291,7 +1292,12 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
           outX.push_back(x);
           outY.push_back(y);
           outframe.push_back(i+1);
-          if (wgt) wgt_adj.push_back((*wgt)[i]);
+          if (wgt) {
+            wgt_adj.push_back((*wgt)[i]);
+            params.keep.push_back((*wgt)[i]==0. ? false : true);
+          } else {
+            params.keep.push_back(true);
+          }
       }
   }
 
@@ -1328,6 +1334,19 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   {
       // Iteratively Reweighted Least Squares (Huber)
       Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
+      std::vector<size_t> keepIndices;
+      if (!wgt_adj.empty())
+      {
+          for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
+          {
+              if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
+              {
+                  keepIndices.push_back(iz);
+              } else {
+                weights(iz) = 0.;
+              }
+          }
+      }
       Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
       Eigen::VectorXd residuals(n), prev_coeff(2);
       for (int iter = 0; iter < max_iter; ++iter)
@@ -1337,8 +1356,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
           if (iter > 0 && (coeff - prev_coeff).norm() < tol) break;
           prev_coeff = coeff;
           residuals = Yv - A * coeff;
-          for (int i = 0; i < n; ++i)
-          {
+          for (auto i: keepIndices) {
               double r = std::abs(residuals(i));
               weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
           }
@@ -1461,6 +1479,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
 
   // Build X, Y with time filter
   std::vector<double> wgt_adj;
+  params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
       if (timeAlong[i] >= timeOffset)
@@ -1470,7 +1489,12 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
           outX.push_back(x);
           outY.push_back(y);
           outframe.push_back(i+1);
-          if (wgt) wgt_adj.push_back((*wgt)[i]);
+          if (wgt) {
+            wgt_adj.push_back((*wgt)[i]);
+            params.keep.push_back((*wgt)[i]==0. ? false : true);
+          } else {
+            params.keep.push_back(true);
+          }
       }
   }
 
@@ -1507,6 +1531,19 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   {
       // Iteratively Reweighted Least Squares (Huber)
       Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
+      std::vector<size_t> keepIndices;
+      if (!wgt_adj.empty())
+      {
+          for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
+          {
+              if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
+              {
+                  keepIndices.push_back(iz);
+              } else {
+                weights(iz) = 0.;
+              }
+          }
+      }
       Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
       Eigen::VectorXd residuals(n), prev_coeff(2);
       for (int iter = 0; iter < max_iter; ++iter)
@@ -1516,8 +1553,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
           if (iter > 0 && (coeff - prev_coeff).norm() < tol) break;
           prev_coeff = coeff;
           residuals = Yv - A * coeff;
-          for (int i = 0; i < n; ++i)
-          {
+          for (auto i: keepIndices) {
               double r = std::abs(residuals(i));
               weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
           }

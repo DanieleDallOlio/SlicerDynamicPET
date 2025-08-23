@@ -19,6 +19,7 @@ public:
   std::function<std::map<std::string, std::vector<VoxelStatistics>>*()> GetsegmentTACs;
   std::function<bool()> GetSegEditCorr;
   std::function<void()> RunPlot;
+  std::function<std :: string()> GetCurrentSegID;
   static SegmentationChangeWatcher* New();
   vtkTypeMacro(SegmentationChangeWatcher, vtkObject);
 

@@ -470,8 +470,6 @@ void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
   int restoredIndex = 0;
   for (vtkIdType id : patients)
   {
-    // std::cout << "Patient: " << shNode->GetItemName(id)
-    //           << " (ID: " << id << ")" << std::endl;
     std::string name = shNode->GetItemName(id);
     this->PatSelector->addItem(QString::fromStdString(name), QVariant::fromValue(id));
 
@@ -1783,6 +1781,7 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->SegWatcher->GetsegmentTACs = [this]() { return &this->segmentTACs; };
   this->SegWatcher->GetSegEditCorr = [d]() { return d->PlotLiveSegEdit->isChecked(); };
   this->SegWatcher->RunPlot = [this]() { this->onPlotbutton(); };
+  this->SegWatcher->GetCurrentSegID = [this]() { return this->SubjectHierarchyNode->GetItemName(this->segID); };
 
   // Observe all existing segmentation nodes
   // int n_segnodes = this->mrmlScene()->GetNumberOfNodesByClass("vtkMRMLSegmentationNode");
@@ -1813,7 +1812,6 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   //     if (auto* segNode = vtkMRMLSegmentationNode::SafeDownCast(node))
   //     {
   //       self->SegWatcher->ObserveSegmentationNode(segNode);
-  //       std :: cout << "Added watcher for segNodeID=" << segNode->GetID() << std :: endl;
   //     }
   //   }
   // });
@@ -1932,7 +1930,6 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
     d->fileexcel->setText(QString::fromStdString(".xlsx"));
     return;
   }
-  // std::cout << "Selected Patient ID: " << id << std::endl;
   std :: string name = this->SubjectHierarchyNode->GetItemName(this->patID);
   std :: string excelfile = name + "_TAC.xlsx";
   d->fileexcel->setText(QString::fromStdString(excelfile));
@@ -1944,9 +1941,6 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
   d->fileexcelmtga->setText(QString::fromStdString(excelfilemtga));
   std :: string excelfilemtgafitted = name + "_MTGAfitted.xlsx";
   d->fileexcelmtgafitted->setText(QString::fromStdString(excelfilemtgafitted));
-  //
-  // std::cout << "Name: " << name
-  //           << ", ID: " << id << std::endl;
 }
 
 
@@ -1968,17 +1962,6 @@ void qSlicerKMAPModuleWidget::onStuChanged (int index) {
                           "vtkMRMLSegmentationNode",
                           ""
                           );
-  // if (this->stuID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  // {
-  //   // "None" selected — ignore or reset state
-  //   return;
-  // }
-  // std::cout << "Selected Study ID: " << id << std::endl;
-  // std :: string name = this->SubjectHierarchyNode->GetItemName(id);
-  //
-  // std::cout << "Study: " << name
-  //           << ", ID: " << id << std::endl;
-
 }
 
 
@@ -1986,15 +1969,6 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
   this->ctID = d->CTSelector->itemData(index).value<vtkIdType>();
   this->enableTACbutton();
-  // if (this->ctID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  // {
-  //   // "None" selected — ignore or reset state
-  //   return;
-  // }
-  //
-  // std :: string name = this->SubjectHierarchyNode->GetItemName(this->ctID);
-  // std::cout << "CT: " << name
-  //           << ", ID: " << this->ctID << std::endl;
 }
 
 
@@ -2115,15 +2089,6 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
           }
       }
   }
-
-  // if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  // {
-  //   // "None" selected — ignore or reset state
-  //   return;
-  // }
-  // std :: string name = this->SubjectHierarchyNode->GetItemName(this->petID);
-  // std::cout << "PET: " << name
-  //           << ", ID: " << this->petID << std::endl;
 }
 
 void qSlicerKMAPModuleWidget::onSegChanged (int index) {
@@ -2179,7 +2144,6 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   this->segSequenceNode = this->sequenceBrowserPETNode->GetSequenceNode(segNode);
   if (!segSequenceNode)
   {
-    this->SegWatcher->ObserveSegmentationNode(segNode);
     this->segSequenceNode = vtkMRMLSequenceNode::New();
     this->segSequenceNode->SetName(shNode->GetItemName(segID).c_str());
     scene->AddNode(this->segSequenceNode);
@@ -2193,6 +2157,7 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
         this->segSequenceNode->SetDataNodeAtValue(segNode, indexValue);
       }
     }
+    this->SegWatcher->ObserveSegmentationNode(segNode);
   }
 
   d->populateSegmentCheckboxes(this->segID);
@@ -2787,7 +2752,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
     double t = this->timePoints[i];
     timeArray->InsertNextValue(t/60.);
     std::ostringstream oss;
-    oss << "Frame: " << i+1
+    oss << "Frame: " << i
         << ", Time(s): " << this->timePoints[i]
         << ", Time(min): " << this->timePoints[i]/60.0;
     labelArray->InsertNextValue(oss.str());
@@ -2814,28 +2779,90 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       std::string colErrName = colName + " Error";
       statErrArray->SetName(colErrName.c_str());
 
-      for (const VoxelStatistics& vs : this->segmentTACs[segmentID])
+      vtkNew<vtkDoubleArray> statArrayLine;
+      std::string statArrayLineName = colName + " Line";
+      statArrayLine->SetName(statArrayLineName.c_str());
+
+      for (int ivs=0; ivs<this->segmentTACs[segmentID].size(); ++ivs)
       {
-        if (statName == "Mean")
-        {
-          statArray->InsertNextValue(vs.mean);
-          // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
-          //   statErrArray->InsertNextValue(vs.stddev);
+        const VoxelStatistics& vs = this->segmentTACs[segmentID][ivs];
+        double value = std::numeric_limits<double>::quiet_NaN();
+        if (vs.keep) {
+          if (statName == "Mean")
+          {
+            value = vs.mean;
+            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+            //   statErrArray->InsertNextValue(vs.stddev);
+          }
+          else if (statName == "Median")
+          {
+            value = vs.median;
+            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+            //   statErrArray->InsertNextValue(vs.iqr);
+          }
+          else if (statName == "VoxelCount") value = vs.count;
+          else if (statName == "Min")        value = vs.min;
+          else if (statName == "Max")        value = vs.max;
+          else if (statName == "Volume(cc)") value = vs.volume_cm3;
+          else vtkGenericWarningMacro("Unknown stat name: " << statName);
         }
-        else if (statName == "Median")
-        {
-          statArray->InsertNextValue(vs.median);
-          // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
-          //   statErrArray->InsertNextValue(vs.iqr);
+
+        statArray->InsertNextValue(value);
+        // Line points
+        if (!std::isnan(value)) {
+          statArrayLine->InsertNextValue(value);
+        } else {
+          double nextValue = std::numeric_limits<double>::quiet_NaN();
+          double x1 = std::numeric_limits<double>::quiet_NaN();
+          for (int next_ivs = ivs+1; next_ivs<this->timePoints.size(); ++next_ivs) {
+            const VoxelStatistics& vsNext = this->segmentTACs[segmentID][next_ivs];
+            if (vsNext.keep)
+            {
+                x1 = this->timePoints[next_ivs];
+                if (statName == "Mean") nextValue = vsNext.mean;
+                else if (statName == "Median") nextValue = vsNext.median;
+                else if (statName == "VoxelCount") nextValue = vsNext.count;
+                else if (statName == "Min") nextValue = vsNext.min;
+                else if (statName == "Max") nextValue = vsNext.max;
+                else if (statName == "Volume(cc)") nextValue = vsNext.volume_cm3;
+                break;
+            }
+          }
+          if (std::isnan(nextValue)) {
+            statArrayLine->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+            continue;
+          }
+          double prevValue = std::numeric_limits<double>::quiet_NaN();
+          double x0 = std::numeric_limits<double>::quiet_NaN();
+          for (int prev_ivs = ivs-1; prev_ivs>=0; --prev_ivs) {
+            const VoxelStatistics& vsPrev = this->segmentTACs[segmentID][prev_ivs];
+            if (vsPrev.keep)
+            {
+                x0 = this->timePoints[prev_ivs];
+                if (statName == "Mean") prevValue = vsPrev.mean;
+                else if (statName == "Median") prevValue = vsPrev.median;
+                else if (statName == "VoxelCount") prevValue = vsPrev.count;
+                else if (statName == "Min") prevValue = vsPrev.min;
+                else if (statName == "Max") prevValue = vsPrev.max;
+                else if (statName == "Volume(cc)") prevValue = vsPrev.volume_cm3;
+                break;
+            }
+          }
+          if (std::isnan(prevValue)) {
+            statArrayLine->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+            continue;
+          }
+
+          double x  = this->timePoints[ivs];
+          // Proper linear interpolation
+          value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
+          statArrayLine->InsertNextValue(value);
         }
-        else if (statName == "VoxelCount") statArray->InsertNextValue(vs.count);
-        else if (statName == "Min")        statArray->InsertNextValue(vs.min);
-        else if (statName == "Max")        statArray->InsertNextValue(vs.max);
-        else if (statName == "Volume(cc)") statArray->InsertNextValue(vs.volume_cm3);
-        else std::cerr << "Unknown stat name: " << statName << std::endl;
+
       }
 
       tableNode->AddColumn(statArray);
+      tableNode->AddColumn(statArrayLine);
       // if (statErrArray->GetNumberOfTuples() > 0)
       //   tableNode->AddColumn(statErrArray);
 
@@ -2847,17 +2874,22 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       series->SetXColumnName("Time (min)");
       series->SetYColumnName(colName.c_str());
       series->SetLabelColumnName("ToolTipLabelTAC");
+      series->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
       series->SetUniqueColor();
-
-
-      // series->SetName(colName.c_str());
-      // series->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
-      // if (statErrArray->GetNumberOfTuples() > 0)
-      //   series->SetAttribute("yErrorColumnName", colErrName.c_str());
-
-      // chartNode->SetXAxisLabel("Time (s)");
-      // chartNode->SetYAxisLabel("SUVbw (g/mL)");
       chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
+
+      vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+      scene->AddNode(lineSeries);
+      lineSeries->SetName("");
+      lineSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+      lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
+      lineSeries->SetXColumnName("Time (min)");
+      lineSeries->SetYColumnName(statArrayLineName.c_str());
+      lineSeries->SetLabelColumnName("ToolTipLabelTAC");
+      lineSeries->SetColor(series->GetColor());
+      lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+
+      chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
     }
   }
 
@@ -3479,6 +3511,7 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   std::map< std::string, std::vector<double>> wgtVec;
 
   std::map<std::string, std::vector<std::vector<double>>> tac;
+  std::map<std::string, std::vector<bool>> keeptacvec;
   for (const auto& [segmentName, statsVec] : segmentTACs)
   {
     if (statsVec.size() != static_cast<size_t>(Nframe))
@@ -3488,30 +3521,41 @@ void qSlicerKMAPModuleWidget::onFITbutton()
     }
 
     tac[segmentName].reserve(Nframe);
-    for (const auto& vs : statsVec)
+    keeptacvec[segmentName].reserve(Nframe);
+    for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
+      const auto& vs = statsVec[ivs];
       double value;
       if (currentSelectedStatID == "Mean") {
         value = vs.mean;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
         }
       }
       else if (currentSelectedStatID == "Median") {
         value = vs.median;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
         }
       }
       else
       {
-        std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
+        vtkGenericWarningMacro("Unknown stat: " << currentSelectedStatID);
         return;
       }
+      if (!vs.keep) {
+        wgtVec[segmentName][ivs] = 0.;
+      }
       tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
+      keeptacvec[segmentName].push_back(vs.keep);  // Adds one-element row (column vector)
     }
   }
   this->segmentTAC4TCMfits = tac;
+  this->segmentkeep4TCMfits = keeptacvec;
 
   const double dk = d->decayConstEdit->text().toDouble();
   const double timestep = d->timeStepEdit->text().toDouble();
@@ -3526,9 +3570,7 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   {
     const auto& tacVOI = tac[segmentID];
     auto tac_flatten = extractColumn(tacVOI);
-    if (d->weightFitCheckBox->isChecked()) {
-      wgt = &wgtVec[segmentID];
-    }
+    wgt = &wgtVec[segmentID];
 
     for (const std::string& modelID : modelsID)
     {
@@ -3537,7 +3579,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, 0.};
         double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, 0.};
         double init_1tcm[] = {vbInit,  k1Init,  k2Init,  0.};
-        // std::cout << "Running 1TCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
@@ -3555,7 +3596,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, tdLower};
         double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, tdUpper};
         double init_1tcm[] = {vbInit,  k1Init,  k2Init,  tdInit};
-        // std::cout << "Running 1TdCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
@@ -3573,7 +3613,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, 0., 0.};
         double ub_1tcm[]   = {vbUpper, k1Upper, 0., 0.};
         double init_1tcm[] = {vbInit,  k1Init,  0.,  0.};
-        // std::cout << "Running 1TiCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
@@ -3591,7 +3630,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, 0., tdLower};
         double ub_1tcm[]   = {vbUpper, k1Upper, 0., tdUpper};
         double init_1tcm[] = {vbInit,  k1Init,  0.,  tdInit};
-        // std::cout << "Running 1TidCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, pbrp, maxiter, 1,
@@ -3609,7 +3647,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, 0.};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, 0.};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  0.};
-        // std::cout << "Running 2TCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
@@ -3627,7 +3664,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  tdInit};
-        // std::cout << "Running 2dTCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
@@ -3645,7 +3681,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., 0.};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., 0.};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0., 0.};
-        // std::cout << "Running 2TiCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
@@ -3665,7 +3700,6 @@ void qSlicerKMAPModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., tdLower};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., tdUpper};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0.,  tdInit};
-        // std::cout << "Running 2TidCM" << std::endl;
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
@@ -3742,7 +3776,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
 
   std::map<std::string, std::vector<std::vector<double>>> tac;
   const std::vector<double>* wgt = nullptr;
-  std::vector<double> wgtVec;
+  std::map< std::string, std::vector<double>> wgtVec;
 
   for (const auto& [segmentName, statsVec] : segmentTACs)
   {
@@ -3753,30 +3787,36 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
     }
 
     tac[segmentName].reserve(Nframe);
-    for (const auto& vs : statsVec)
+    for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
+      const auto& vs = statsVec[ivs];
       double value;
       if (currentSelectedStatID == "Mean") {
         value = vs.mean;
         if (d->weightedFitCheckBox->isChecked()) {
-          wgtVec.push_back(1./(vs.stddev+1e-16));
+          wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
         }
       }
       else if (currentSelectedStatID == "Median") {
         value = vs.median;
         if (d->weightedFitCheckBox->isChecked()) {
-          wgtVec.push_back(1./(vs.iqr+1e-16));
+          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
         }
       } else {
         std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
         return;
       }
+      if (!vs.keep) {
+        wgtVec[segmentName][ivs] = 0.;
+      }
       tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
     }
   }
-  if (d->weightedFitCheckBox->isChecked()) {
-    wgt = &wgtVec;
-  }
+
   // const double timeOffset =  d->timeOffsetEdit->text().toDouble();
   const double framingNorm = d->framingNormEdit->text().toDouble();
   const double timeOffset = this->timePoints[d->timeOffsetSlider->value()-1] / framingNorm;
@@ -3793,11 +3833,11 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
   {
     const auto& tacVOI = tac[segmentID];
     auto tac_flatten = extractColumn(tacVOI);
+    wgt = &wgtVec[segmentID];
 
     for (const std::string& modelID : this->modelsMTGAID)
     {
       if (modelID == "Patlak") {
-        // std::cout << "Running Patlak" << std::endl;
         logic->Patlak(tac_flatten,
                       Cp_flatten,
                       framing_flatten,
@@ -3813,7 +3853,6 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
                       );
       }
       else if (modelID == "Logan") {
-        // std::cout << "Running Logan" << std::endl;
         logic->Logan(tac_flatten,
                      Cp_flatten,
                      framing_flatten,
@@ -3829,7 +3868,6 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
                      );
       }
       else if (modelID == "RE") {
-        // std::cout << "Running RE" << std::endl;
         logic->RE(tac_flatten,
                   Cp_flatten,
                   framing_flatten,
@@ -4046,6 +4084,7 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
 
   // Get TAC to plot
   std::vector<std::vector<double>> tacvoi = this->segmentTAC4TCMfits[selectedVOI];
+  std::vector<bool> keepvoi = this->segmentkeep4TCMfits[selectedVOI];
 
   // Get TCM models to plot
   std::vector<std::string> PlotSelectedTCMs;
@@ -4088,9 +4127,9 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
   for (size_t i = 0; i < tacvoi.size(); ++i)
   {
       // Assuming tacvoi[0] holds measured values for VOI (adapt if structured differently)
-      tacArray->InsertNextValue(tacvoi[i][0]);
+      tacArray->InsertNextValue(keepvoi[i] ? tacvoi[i][0] : std::numeric_limits<double>::quiet_NaN());
       std::ostringstream oss;
-      oss << "Frame: " << i+1
+      oss << "Frame: " << i
           << ", Time(s): " << this->timePoints[i]
           << ", Time(min): " << this->timePoints[i]/60.0;
       labelArray->InsertNextValue(oss.str());
@@ -4119,15 +4158,52 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
       auto it = TCMfits.find(modelName);
       if (it == TCMfits.end() || !it->second)
         continue;
-
+      TCMParameters params = this->segmentTCM[selectedVOI][modelName];
 
       double* fitArrayPtr = it->second;
 
       vtkNew<vtkDoubleArray> fitArray;
       fitArray->SetName(modelName.c_str());
-      for (size_t i = 0; i < this->timePoints.size(); ++i)
+      for (size_t ivs = 0; ivs < this->timePoints.size(); ++ivs)
       {
-          fitArray->InsertNextValue(fitArrayPtr[i]);
+        double fv = fitArrayPtr[ivs];
+        fitArray->InsertNextValue(fv);
+        // if (params.keep[ivs]) {
+        //   double fv = fitArrayPtr[ivs];
+        //   fitArray->InsertNextValue(fv);
+        // } else {
+        //   double nextValue = std::numeric_limits<double>::quiet_NaN();
+        //   double x1 = std::numeric_limits<double>::quiet_NaN();
+        //   for (int next_ivs = ivs+1; next_ivs<this->timePoints.size(); ++next_ivs) {
+        //     if (params.keep[next_ivs])
+        //     {
+        //         x1 = this->timePoints[next_ivs];
+        //         nextValue = fitArrayPtr[next_ivs];
+        //     }
+        //   }
+        //   if (std::isnan(nextValue)) {
+        //     fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+        //     continue;
+        //   }
+        //   double prevValue = std::numeric_limits<double>::quiet_NaN();
+        //   double x0 = std::numeric_limits<double>::quiet_NaN();
+        //   for (int prev_ivs = ivs-1; prev_ivs>=0; --prev_ivs) {
+        //     if (params.keep[prev_ivs])
+        //     {
+        //         x0 = this->timePoints[prev_ivs];
+        //         prevValue = fitArrayPtr[prev_ivs];
+        //     }
+        //   }
+        //   if (std::isnan(prevValue)) {
+        //     fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+        //     continue;
+        //   }
+        //
+        //   double x  = this->timePoints[ivs];
+        //   // Proper linear interpolation
+        //   double value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
+        //   fitArray->InsertNextValue(value);
+        // }
       }
 
       tableNode->AddColumn(fitArray);
@@ -4206,9 +4282,9 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
     double xv = params.x[i];
     double yv = params.y[i];
     xArray->InsertNextValue(xv);
-    yArray->InsertNextValue(yv);
+    yArray->InsertNextValue(params.keep[i] ? yv : std::numeric_limits<double>::quiet_NaN());
     std::ostringstream oss;
-    oss << "Frame: " << params.frame[i]
+    oss << "Frame: " << params.frame[i]-1
         << ", Time(s): " << this->timePoints[i]
         << ", Time(min): " << this->timePoints[i]/60.0;
     labelArray->InsertNextValue(oss.str());
@@ -4250,8 +4326,44 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   // Fitted values as line plot
   vtkNew<vtkDoubleArray> fitArray;
   fitArray->SetName(modelName.c_str());
-  for (double fv : params.fitted)
-    fitArray->InsertNextValue(fv);
+  for (int ivs=0; ivs<params.fitted.size(); ++ivs) {
+    if (params.keep[ivs]) {
+      double fv = params.fitted[ivs];
+      fitArray->InsertNextValue(fv);
+    } else {
+      double nextValue = std::numeric_limits<double>::quiet_NaN();
+      double x1 = std::numeric_limits<double>::quiet_NaN();
+      for (int next_ivs = ivs+1; next_ivs<params.fitted.size(); ++next_ivs) {
+        if (params.keep[next_ivs])
+        {
+            x1 = params.x[next_ivs];
+            nextValue = params.fitted[next_ivs];
+        }
+      }
+      if (std::isnan(nextValue)) {
+        fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+        continue;
+      }
+      double prevValue = std::numeric_limits<double>::quiet_NaN();
+      double x0 = std::numeric_limits<double>::quiet_NaN();
+      for (int prev_ivs = ivs-1; prev_ivs>=0; --prev_ivs) {
+        if (params.keep[prev_ivs])
+        {
+            x0 = params.x[prev_ivs];
+            prevValue = params.fitted[prev_ivs];
+        }
+      }
+      if (std::isnan(prevValue)) {
+        fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+        continue;
+      }
+
+      double x  = params.x[ivs];
+      // Proper linear interpolation
+      double value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
+      fitArray->InsertNextValue(value);
+    }
+  }
   tableNode->AddColumn(fitArray);
 
   vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();

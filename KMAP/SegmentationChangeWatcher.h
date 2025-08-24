@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SegmentationChangeWatcher_h
+#define SegmentationChangeWatcher_h
 
 #include <vtkCallbackCommand.h>
 #include <vtkSegmentation.h>
@@ -41,3 +42,5 @@ protected:
   std::map<vtkSegmentation*, unsigned long> SegTags;
   vtkSmartPointer<vtkCallbackCommand> Callback;
 };
+
+#endif // SegmentationChangeWatcher_h

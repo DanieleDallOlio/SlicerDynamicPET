@@ -42,11 +42,15 @@ set(MODULE_SRCS
   qSlicer${MODULE_NAME}ModuleWidget.h
   SegmentationChangeWatcher.cxx
   SegmentationChangeWatcher.h
+  KeyPressWatcher.cxx
+  KeyPressWatcher.h
   )
 
 set(MODULE_MOC_SRCS
   qSlicer${MODULE_NAME}Module.h
   qSlicer${MODULE_NAME}ModuleWidget.h
+  SegmentationChangeWatcher.h
+  KeyPressWatcher.h
   )
 
 set(MODULE_UI_SRCS

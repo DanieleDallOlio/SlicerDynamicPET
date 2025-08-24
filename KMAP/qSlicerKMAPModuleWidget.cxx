@@ -182,6 +182,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
       q, SLOT(onModelsTCMSelectAllbutton()));
   QObject::connect( this->FITbutton, SIGNAL(clicked(bool)),
     q, SLOT(onFITbutton()));
+  QObject::connect( this->RESETbutton, SIGNAL(clicked(bool)),
+    q, SLOT(onResetbutton()));
   QObject::connect( this->FITMTGAbutton, SIGNAL(clicked(bool)),
     q, SLOT(onFITMTGAbutton()));
   QObject::connect( this->VOISelector, SIGNAL(currentIndexChanged(int)),
@@ -1659,6 +1661,20 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->StatsNames = QStringList{
     "Mean", "Median"
   };
+  this->PlotSelectedFrame = -1;
+  this->PlotSelectedVOI = "";
+  // Install global key watcher
+  QMainWindow* mainWindow = qobject_cast<QMainWindow*>(qSlicerApplication::application()->mainWindow());
+  if (mainWindow)
+  {
+    this->keyWatcher = new KeyPressWatcher(mainWindow);
+    mainWindow->installEventFilter(this->keyWatcher);
+    QObject::connect(this->keyWatcher, SIGNAL(deletePressed()), this, SLOT(onDeleteKeyPressed()));
+  }
+
+  // Optional: start with watcher disabled
+  this->keyWatcher->setActive(true);
+
   d->init();
 }
 
@@ -2703,12 +2719,106 @@ void qSlicerKMAPModuleWidget::onSaveMTGAfittedExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_genericMTGA_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
+void qSlicerKMAPModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol)
+{
+  if (!this->checkdisplayedKMAP())
+    return;
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  if (scene==nullptr)
+    return;
+
+  if (!mrmlPlotSeriesIDs || !selectionCol || this->MapPlotSeriesNodeIDToPlot.empty())
+    return;
+
+  QSet<QPair<QString, vtkIdType>> newSelection;
+
+  // Loop over each series that has selected points
+  int psf_value = -1;
+  std :: string psv_value = "";
+  std :: string lastseriesID = "";
+  for (vtkIdType i = 0; i < mrmlPlotSeriesIDs->GetNumberOfValues(); ++i)
+  {
+    QString seriesID = QString::fromStdString(mrmlPlotSeriesIDs->GetValue(i));
+    vtkIdTypeArray* selectedPoints = vtkIdTypeArray::SafeDownCast(
+        selectionCol->GetItemAsObject(i));
+
+    if (!selectedPoints)
+      continue;
+
+    vtkIdType pointIndex = selectedPoints->GetValue(selectedPoints->GetNumberOfTuples()-1);
+    QPair<QString, vtkIdType> candidate(seriesID, pointIndex);
+    vtkMRMLPlotSeriesNode* seriesNode = vtkMRMLPlotSeriesNode::SafeDownCast(
+        scene->GetNodeByID(seriesID.toStdString()));
+    if (!seriesNode)
+        return;
+    vtkMRMLTableNode* tableNode = seriesNode->GetTableNode();
+    if (!tableNode)
+        return;
+    vtkTable* table = tableNode->GetTable();
+    if (!table)
+        return;
+    std::string labelColName = seriesNode->GetLabelColumnName();
+    vtkAbstractArray* labelArray = table->GetColumnByName(labelColName.c_str());
+    if (!labelArray)
+        return;
+
+    vtkStringArray* strArray = vtkStringArray::SafeDownCast(labelArray);
+    if (!strArray)
+        return;
+
+    QString labelValue = QString::fromStdString(strArray->GetValue(pointIndex));
+    QStringList parts = labelValue.split(',');
+    if (!parts.isEmpty())
+    {
+      QString framePart = parts[0].trimmed();
+      framePart.remove("Frame:");
+      psf_value = framePart.trimmed().toInt();
+      psv_value = this->ColNameToSegmentID[seriesNode->GetName()];
+    }
+    if (!newSelection.contains(candidate))
+      newSelection.insert(candidate);
+    if (!this->lastSelection.contains(candidate))
+    {
+      this->PlotSelectedFrame = psf_value;
+      this->PlotSelectedVOI = psv_value;
+    } else {
+      if (this->PlotSelectedFrame == psf_value && this->PlotSelectedVOI == psv_value) {
+        lastseriesID = seriesID.toStdString();
+        continue;
+      }
+      if (!this->MapPlotSeriesNodeIDToPlot.contains(seriesID)) {
+        vtkGenericWarningMacro("MapPlotSeriesNodeIDToPlot does not contain seriesID=" << seriesID.toStdString());
+      }
+      vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(seriesID);
+      vtkSmartPointer<vtkIdTypeArray> emptySelection = vtkSmartPointer<vtkIdTypeArray>::New();
+      vtkplot->SetSelection(emptySelection);
+    }
+  }
+  if (newSelection.size()==0) {
+    // qDebug() << "No point selected";
+    this->PlotSelectedFrame = -1;
+    this->PlotSelectedVOI = "";
+  } else if (newSelection.size()==1 && lastseriesID!="") {
+    // qDebug() << "Old point selected";
+  } else {
+    // qDebug() << "New point selected";
+    if (!this->MapPlotSeriesNodeIDToPlot.contains(QString::fromStdString(lastseriesID))) {
+        vtkGenericWarningMacro("MapPlotSeriesNodeIDToPlot does not contain seriesID=" << lastseriesID);
+    }
+    vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(QString::fromStdString(lastseriesID));
+    vtkSmartPointer<vtkIdTypeArray> emptySelection = vtkSmartPointer<vtkIdTypeArray>::New();
+    vtkplot->SetSelection(emptySelection);
+  }
+  this->lastSelection = newSelection;
+}
+
 void qSlicerKMAPModuleWidget::onPlotbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
-
+  this->ColNameToSegmentID.clear();
+  this->MapPlotSeriesNodeIDToPlot.clear();
   vtkMRMLScene* scene = this->mrmlScene();
-
   // Get selected segments
   std::vector<std::string> PlotSelectedIDs;
   for (int i = 0; i < d->PlotsegmentCheckLayout->count(); ++i)
@@ -2765,13 +2875,14 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
   chartNode->SetTitle("Time Activity Curve");
   chartNode->SetXAxisTitle("Time (min)");
   chartNode->SetYAxisTitle("SUVbw (g/mL)");
-
+  std::unordered_map<std::string, std::string> LabelToSeriesID;
   for (const std::string& segmentID : PlotSelectedIDs)
   {
     std :: string segmentName = this->segmentTACsnames[segmentID];
     for (const std::string& statName : PlotSelectedStats)
     {
       std::string colName = segmentName + " - " + statName;
+      this->ColNameToSegmentID[colName] = segmentID;
       vtkNew<vtkDoubleArray> statArray;
       statArray->SetName(colName.c_str());
 
@@ -2866,6 +2977,18 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       // if (statErrArray->GetNumberOfTuples() > 0)
       //   tableNode->AddColumn(statErrArray);
 
+      vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+      scene->AddNode(lineSeries);
+      lineSeries->SetName("");
+      lineSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+      lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
+      lineSeries->SetXColumnName("Time (min)");
+      lineSeries->SetYColumnName(statArrayLineName.c_str());
+      lineSeries->SetLabelColumnName("ToolTipLabelTAC");
+      lineSeries->SetColor(lineSeries->GetColor());
+      lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+      chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
+
       vtkSmartPointer<vtkMRMLPlotSeriesNode> series = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
       scene->AddNode(series);
       series->SetName(colName.c_str());
@@ -2877,19 +3000,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       series->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
       series->SetUniqueColor();
       chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
-
-      vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
-      scene->AddNode(lineSeries);
-      lineSeries->SetName("");
-      lineSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
-      lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
-      lineSeries->SetXColumnName("Time (min)");
-      lineSeries->SetYColumnName(statArrayLineName.c_str());
-      lineSeries->SetLabelColumnName("ToolTipLabelTAC");
-      lineSeries->SetColor(series->GetColor());
-      lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
-
-      chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
+      LabelToSeriesID[colName] = series->GetID();
     }
   }
 
@@ -2903,8 +3014,30 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
   if (plotViewNode)
   {
     plotViewNode->SetPlotChartNodeID(chartNode->GetID());
-  }
+    qMRMLPlotWidget* plotWidget = nullptr;
+    if (qSlicerApplication::application())
+    {
+      qSlicerLayoutManager* layoutManager =
+          qSlicerApplication::application()->layoutManager();
+      qMRMLPlotWidget* plotWidget = nullptr;
+      plotWidget = layoutManager->plotWidget(0);
+      qMRMLPlotView* plotView = plotWidget->plotView();
+      if (plotView)
+      {
+        QObject::connect(plotView, SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
+                         this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)));
 
+        vtkSmartPointer<vtkChartXY> chart = plotView->chart();
+        for (int i = 0; i < chart->GetNumberOfPlots(); ++i)
+        {
+           vtkPlot* plot = chart->GetPlot(i);
+           std :: string PlotLabel = plot->GetLabel();
+           QString seriesNodeID = QString::fromStdString(LabelToSeriesID[PlotLabel]);
+           this->MapPlotSeriesNodeIDToPlot[seriesNodeID] = plot;
+        }
+      }
+    }
+  }
 }
 
 void qSlicerKMAPModuleWidget::onIFSelectionChanged(int index)
@@ -4072,7 +4205,8 @@ void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
 void qSlicerKMAPModuleWidget::onPlotTCMbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
-
+  this->ColNameToSegmentID.clear();
+  this->MapPlotSeriesNodeIDToPlot.clear();
   if (this->plotTCMVOI.empty()) {
     return;
   }
@@ -4136,21 +4270,6 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
   }
   tableNode->AddColumn(tacArray);
   tableNode->AddColumn(labelArray);
-
-  vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
-  scene->AddNode(scatterSeries);
-  scatterSeries->SetName("TAC");
-  scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);  // scatter points
-  scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
-  scatterSeries->SetXColumnName("Time (min)");
-  scatterSeries->SetYColumnName("TAC");
-  scatterSeries->SetLabelColumnName("ToolTipLabelTAC");
-  scatterSeries->SetUniqueColor();
-  scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
-  chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
-  chartNode->SetTitle(this->segmentTACsnames[selectedVOI].c_str());
-  chartNode->SetXAxisTitle("Time (min)");
-  chartNode->SetYAxisTitle("SUVbw (g/mL)");
 
   // TCM fits as line plots
   for (const std::string& modelName : PlotSelectedTCMs)
@@ -4221,6 +4340,22 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
       chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
   }
 
+  this->ColNameToSegmentID["TAC"]=selectedVOI;
+  vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+  scene->AddNode(scatterSeries);
+  scatterSeries->SetName("TAC");
+  scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);  // scatter points
+  scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
+  scatterSeries->SetXColumnName("Time (min)");
+  scatterSeries->SetYColumnName("TAC");
+  scatterSeries->SetLabelColumnName("ToolTipLabelTAC");
+  scatterSeries->SetUniqueColor();
+  scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
+  chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
+  chartNode->SetTitle(this->segmentTACsnames[selectedVOI].c_str());
+  chartNode->SetXAxisTitle("Time (min)");
+  chartNode->SetYAxisTitle("SUVbw (g/mL)");
+
   // Show plot view
   auto* layoutNode = vtkMRMLLayoutNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
   if (layoutNode)
@@ -4231,12 +4366,28 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
   if (plotViewNode)
   {
       plotViewNode->SetPlotChartNodeID(chartNode->GetID());
+      // qMRMLPlotWidget* plotWidget = nullptr;
+      // if (qSlicerApplication::application())
+      // {
+      //     qSlicerLayoutManager* layoutManager =
+      //         qSlicerApplication::application()->layoutManager();
+      //     qMRMLPlotWidget* plotWidget = nullptr;
+      //     plotWidget = layoutManager->plotWidget(0);
+      //     qMRMLPlotView* plotView = plotWidget->plotView();
+      //     if (plotView)
+      //     {
+      //       QObject::connect(plotView, SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
+      //                        this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)));
+      //     }
+      // }
   }
 
 }
 
 void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   Q_D(qSlicerKMAPModuleWidget);
+  this->ColNameToSegmentID.clear();
+  this->MapPlotSeriesNodeIDToPlot.clear();
 
   if (this->plotMTGAVOI.empty()) {
     return;
@@ -4297,32 +4448,6 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   // Create plot chart
   vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
 
-  // Scatter series for measured values
-  vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
-  scene->AddNode(scatterSeries);
-  scatterSeries->SetName("Data");
-  scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
-  scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
-  scatterSeries->SetXColumnName("X");
-  scatterSeries->SetYColumnName("Data");
-  scatterSeries->SetLabelColumnName("ToolTipData");
-  scatterSeries->SetUniqueColor();
-  scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
-  chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
-  chartNode->SetTitle((modelName + " - " + this->segmentTACsnames[selectedVOI]).c_str());
-  if (modelName=="Patlak") {
-    chartNode->SetXAxisTitle("intCp/Cp");
-    chartNode->SetYAxisTitle("Ct/Cp");
-  } else if (modelName=="Logan") {
-    chartNode->SetXAxisTitle("intCp/Ct");
-    chartNode->SetYAxisTitle("intCt/Ct");
-  } else if (modelName=="RE") {
-    chartNode->SetXAxisTitle("intCp/Cp");
-    chartNode->SetYAxisTitle("intCt/Cp");
-  } else {
-    std::cerr << "Unknown model: " << modelName << std::endl;
-  }
-
   // Fitted values as line plot
   vtkNew<vtkDoubleArray> fitArray;
   fitArray->SetName(modelName.c_str());
@@ -4378,6 +4503,32 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
 
+  // Scatter series for measured values
+  this->ColNameToSegmentID["Data"] = selectedVOI;
+  vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+  scene->AddNode(scatterSeries);
+  scatterSeries->SetName("Data");
+  scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+  scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
+  scatterSeries->SetXColumnName("X");
+  scatterSeries->SetYColumnName("Data");
+  scatterSeries->SetLabelColumnName("ToolTipData");
+  scatterSeries->SetUniqueColor();
+  scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
+  chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
+  chartNode->SetTitle((modelName + " - " + this->segmentTACsnames[selectedVOI]).c_str());
+  if (modelName=="Patlak") {
+    chartNode->SetXAxisTitle("intCp/Cp");
+    chartNode->SetYAxisTitle("Ct/Cp");
+  } else if (modelName=="Logan") {
+    chartNode->SetXAxisTitle("intCp/Ct");
+    chartNode->SetYAxisTitle("intCt/Ct");
+  } else if (modelName=="RE") {
+    chartNode->SetXAxisTitle("intCp/Cp");
+    chartNode->SetYAxisTitle("intCt/Cp");
+  } else {
+    std::cerr << "Unknown model: " << modelName << std::endl;
+  }
 
   // Show plot view
   auto* layoutNode = vtkMRMLLayoutNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
@@ -4386,7 +4537,103 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
 
   vtkMRMLPlotViewNode* plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(
       scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
-  if (plotViewNode)
+  if (plotViewNode) {
     plotViewNode->SetPlotChartNodeID(chartNode->GetID());
+    // qMRMLPlotWidget* plotWidget = nullptr;
+    // if (qSlicerApplication::application())
+    // {
+    //     qSlicerLayoutManager* layoutManager =
+    //         qSlicerApplication::application()->layoutManager();
+    //     qMRMLPlotWidget* plotWidget = nullptr;
+    //     plotWidget = layoutManager->plotWidget(0);
+    //     qMRMLPlotView* plotView = plotWidget->plotView();
+    //     if (plotView)
+    //     {
+    //       QObject::connect(plotView, SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
+    //                        this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)));
+    //     }
+    // }
+  }
+}
 
+bool qSlicerKMAPModuleWidget::checkdisplayedKMAP() {
+  vtkMRMLPlotViewNode* plotViewNode = nullptr;
+  vtkCollection* viewNodes = this->mrmlScene()->GetNodesByClass("vtkMRMLPlotViewNode");
+  if (!viewNodes || viewNodes->GetNumberOfItems() == 0)
+  {
+      return false; // no plot view node
+  }
+
+  plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(viewNodes->GetItemAsObject(0));
+  if (!plotViewNode)
+  {
+      return false;
+  }
+
+  // Get the currently displayed plot chart
+  vtkMRMLPlotChartNode* currentPlot = vtkMRMLPlotChartNode::SafeDownCast(
+      this->mrmlScene()->GetNodeByID(plotViewNode->GetPlotChartNodeID())
+  );
+  if (!currentPlot)
+  {
+      return false;
+  }
+
+  // Check if the currently displayed plot is your "KMAP.PlotChart"
+  if (currentPlot->GetName() == nullptr || std::string(currentPlot->GetName()) != "KMAP.PlotChart")
+  {
+      return false; // not the KMAP plot, do nothing
+  }
+  return true;
+}
+
+void qSlicerKMAPModuleWidget::onDeleteKeyPressed() {
+  Q_D(qSlicerKMAPModuleWidget);
+  if (!this->checkdisplayedKMAP())
+    return;
+
+  if (this->PlotSelectedFrame == -1)
+    return;
+
+  if (this->PlotSelectedVOI == "")
+    return;
+
+  if (this->segmentTACs.empty())
+    return;
+
+  vtkGenericWarningMacro("Segment " << this->segmentTACsnames[this->PlotSelectedVOI] << " removed at frame " << this->PlotSelectedFrame);
+  this->segmentTACs[this->PlotSelectedVOI][this->PlotSelectedFrame].keep = false;
+  this->segmentTACs[this->PlotSelectedVOI][this->PlotSelectedFrame].empty = false;
+  this->onPlotbutton();
+  this->PlotSelectedFrame = -1;
+  this->PlotSelectedVOI = "";
+  return;
+}
+
+void qSlicerKMAPModuleWidget::onResetbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  vtkGenericWarningMacro("Restoring removed points ");
+
+  if (this->segmentTACs.empty())
+    return;
+
+  for (auto& segmentPair : this->segmentTACs)
+  {
+    const std::string& segmentID = segmentPair.first;
+    std::vector<VoxelStatistics>& tacVector = segmentPair.second;
+
+    for (size_t frameID = 0; frameID < tacVector.size(); ++frameID)
+    {
+      VoxelStatistics& vs = tacVector[frameID];
+      if (!vs.empty)
+      {
+          vs.keep = true;
+      }
+    }
+  }
+  if (this->checkdisplayedKMAP()) {
+    this->onPlotbutton();
+  }
+  return;
 }

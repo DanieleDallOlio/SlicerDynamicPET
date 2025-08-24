@@ -21,6 +21,7 @@
 // Slicer includes
 #include "qSlicerAbstractModuleWidget.h"
 #include "SegmentationChangeWatcher.h"
+#include "KeyPressWatcher.h"
 
 #include "qSlicerKMAPModuleExport.h"
 #include "qMRMLNodeComboBox.h"
@@ -50,6 +51,13 @@
 #include <vtkMRMLPlotViewNode.h>
 #include <vtkMRMLScalarVolumeDisplayNode.h>
 #include <vtkMRMLProceduralColorNode.h>
+#include <qMRMLPlotWidget.h>
+#include <qSlicerLayoutManager.h>
+#include <qMRMLPlotView.h>
+#include <QKeyEvent>
+#include <QMainWindow>
+#include <vtkChartXY.h>
+#include <vtkPlot.h>
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;
@@ -89,6 +97,7 @@ public:
   void RemoveExistingPlotChartAndTable();
   vtkMRMLPlotChartNode* GetOrCreatePlotChart();
   vtkMRMLTableNode* GetOrCreatePlotTable();
+  bool checkdisplayedKMAP();
 
 public slots:
   void onSubjectHierarchyChanged();
@@ -116,6 +125,7 @@ public slots:
   void onVOISelectAllbutton();
   void onVOIMTGASelectAllbutton();
   void onFITbutton();
+  void onResetbutton();
   void onFITMTGAbutton();
   void onVOISegmentsChanged();
   void onVOIMTGASegmentsChanged();
@@ -136,6 +146,8 @@ public slots:
   void onWFitclicked();
   void onMTGAModelBox(int index);
   void onTCMModelBox(int index);
+  void onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol);
+  void onDeleteKeyPressed();
 
 protected:
   QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
@@ -165,6 +177,12 @@ private:
   QStringList checkboxNames, ModelsNamesTCM, ModelsNamesMTGA, StatsNames;
   std :: string IFID, plotTCMVOI, plotMTGAVOI, plotMTGAModel;
   std :: vector < std :: string > VOIsegmentIDs, VOIMTGAsegmentIDs, modelsID, modelsMTGAID;
+  int PlotSelectedFrame;
+  std :: string PlotSelectedVOI;
+  KeyPressWatcher* keyWatcher{nullptr};
+  QSet<QPair<QString, vtkIdType>> lastSelection;
+  std::unordered_map<std::string, std::string> ColNameToSegmentID;
+  QMap<QString, vtkPlot*> MapPlotSeriesNodeIDToPlot;
 };
 
 #endif

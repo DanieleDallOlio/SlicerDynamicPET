@@ -15,6 +15,12 @@
 
 ==============================================================================*/
 
+#ifdef _WIN32
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#endif
+
+
 // Qt includes
 #include <QDebug>
 
@@ -22,6 +28,19 @@
 #include "qSlicerKMAPModuleWidget.h"
 #include "ui_qSlicerKMAPModuleWidget.h"
 #include <QApplication>
+
+#ifdef _WIN32
+#include <sstream>
+#include <iomanip>
+
+// strptime replacement for Windows
+inline char* strptime(const char* s, const char* f, struct tm* tm) {
+    std::istringstream input(s);
+    input >> std::get_time(tm, f);
+    if (input.fail()) return nullptr;
+    return (char*)(s + input.tellg());
+}
+#endif
 
 
 
@@ -36,7 +55,7 @@ protected:
   void setIntField(QLineEdit* le, int lo, int hi);
 public:
   qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModuleWidget& object);
-  ~qSlicerKMAPModuleWidgetPrivate();
+  ~qSlicerKMAPModuleWidgetPrivate()=default;
   void init();
   void populatePatientComboBox();
   void populateStudyComboBox(vtkIdType patientID);

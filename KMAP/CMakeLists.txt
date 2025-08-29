@@ -5,6 +5,13 @@ set(MODULE_NAME KMAP)
 string(TOUPPER ${MODULE_NAME} MODULE_NAME_UPPER)
 
 # -----------------------------------------------------------------------------
+# Fetch Python
+find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
+include_directories(${Python3_INCLUDE_DIRS})
+link_libraries(${Python3_LIBRARIES})
+
+
+# -----------------------------------------------------------------------------
 # Fetch Eigen only once at the top level
 find_package(Eigen3 QUIET)
 
@@ -31,8 +38,6 @@ set(MODULE_INCLUDE_DIRECTORIES
   ${CMAKE_CURRENT_BINARY_DIR}/Logic
   ${CMAKE_CURRENT_SOURCE_DIR}/Widgets
   ${CMAKE_CURRENT_BINARY_DIR}/Widgets
-  ${CMAKE_SOURCE_DIR}/KMAP-PY/include
-  ${CMAKE_SOURCE_DIR}/KMAP-PY/hpp
   )
 
 set(MODULE_SRCS
@@ -61,6 +66,7 @@ set(MODULE_TARGET_LIBRARIES
   vtkSlicer${MODULE_NAME}ModuleLogic
   qSlicer${MODULE_NAME}ModuleWidgets
   ${EIGEN3_LIBRARIES}
+  kmap
   )
 
 set(MODULE_RESOURCES

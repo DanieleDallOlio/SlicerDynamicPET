@@ -15,12 +15,20 @@
 
 ==============================================================================*/
 
+#ifdef _WIN32
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#endif
+
+
 // KMAP Logic includes
 #include <vtkSlicerKMAPLogic.h>
 
 // KMAP includes
 #include "qSlicerKMAPModule.h"
 #include "qSlicerKMAPModuleWidget.h"
+
+
 
 //-----------------------------------------------------------------------------
 class qSlicerKMAPModulePrivate

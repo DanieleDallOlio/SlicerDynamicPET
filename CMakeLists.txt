@@ -19,6 +19,15 @@ include(${Slicer_USE_FILE})
 #-----------------------------------------------------------------------------
 # External library
 add_subdirectory(KMAP-PY)
+set_target_properties(kmap PROPERTIES
+  RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:qSlicerKMAPModuleWidgets>
+)
+install(TARGETS kmap
+  RUNTIME DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_BIN_DIR}
+  LIBRARY DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
+  ARCHIVE DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
+)
+
 
 #-----------------------------------------------------------------------------
 # Extension modules

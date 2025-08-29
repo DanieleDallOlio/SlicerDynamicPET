@@ -18,6 +18,11 @@
 #ifndef __qSlicerKMAPModuleWidget_h
 #define __qSlicerKMAPModuleWidget_h
 
+#ifdef _WIN32
+#define PY_SSIZE_T_CLEAN
+#include <Python.h>
+#endif
+
 // Slicer includes
 #include "qSlicerAbstractModuleWidget.h"
 #include "SegmentationChangeWatcher.h"

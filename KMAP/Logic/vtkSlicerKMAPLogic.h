@@ -50,7 +50,7 @@
 #include <vtkDoubleArray.h>
 #include <vtkOrientedImageData.h>
 #include "vtkSlicerSegmentationsModuleLogic.h"
-#include <QProgressBar.h>
+#include <QProgressBar>
 #include <kmodels.h>
 #include <utils.hpp>
 

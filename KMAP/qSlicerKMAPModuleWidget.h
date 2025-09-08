@@ -39,11 +39,11 @@
 #include <vtkMRMLSubjectHierarchyNode.h>
 #include <vector>
 #include <QPointer>
-#include <QCheckBox.h>
+#include <QCheckBox>
 #include <vtkSegmentation.h>
 #include <vtkSlicerKMAPLogic.h>
-#include <QProgressBar.h>
-#include <QMessageBox.h>
+#include <QProgressBar>
+#include <QMessageBox>
 
 #include <ctkDICOMDatabase.h>
 #include <qSlicerApplication.h>

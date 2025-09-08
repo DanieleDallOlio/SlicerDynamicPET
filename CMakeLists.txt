@@ -19,7 +19,7 @@ include(${Slicer_USE_FILE})
 #-----------------------------------------------------------------------------
 # External library
 add_subdirectory(KMAP-PY)
-if(WIN32)
+if(NOT APPLE)
   set_target_properties(kmap PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:qSlicerKMAPModuleWidgets>
   )

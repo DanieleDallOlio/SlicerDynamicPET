@@ -1884,6 +1884,11 @@ void qSlicerKMAPModuleWidget::getDurations()
   QString seriesUID = db->seriesForFile(db->fileForInstance(instanceUID));
   QStringList fileList = db->filesForSeries(seriesUID);
 
+  if (fileList.empty())
+    throw std::runtime_error(
+        "No files found for " + seriesUID.toStdString()
+    );
+
   std::map<double, double> timeSorteddurations;
   for (const QString& file : fileList)
   {

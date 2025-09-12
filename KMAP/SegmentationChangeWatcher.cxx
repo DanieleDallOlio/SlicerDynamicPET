@@ -109,6 +109,9 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
     return;
   }
 
+  // Make sure the
+  segmentation->SeparateSegmentLabelmap(segmentId);
+
   vtkSegment* segment = segmentation->GetSegment(segmentId);
   if (!segment || segment->GetRepresentation("Binary labelmap") == nullptr)
   {

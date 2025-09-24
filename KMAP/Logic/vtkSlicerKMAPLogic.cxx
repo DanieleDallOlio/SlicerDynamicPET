@@ -383,7 +383,7 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
     omp_set_num_threads(max_hw_threads);
     #pragma omp parallel for
     #endif
-    for (size_t s = 0; s < segmentsID.size(); ++s)
+    for (int s = 0; s < segmentsID.size(); ++s)
     {
       if (stopRequested) continue;
       const std::string& segmentID = segmentsID[s].toStdString();
@@ -1774,7 +1774,7 @@ void vtkSlicerKMAPLogic::Image2Flatten(
   omp_set_num_threads(max_hw_threads);
   #pragma omp parallel for
   #endif
-  for (vtkIdType v = 0; v < nVoxels; ++v)
+  for (int v = 0; v < nVoxels; ++v)
   {
     flatten_voxels_values[v].resize(numberOfTimepoints);
   }
@@ -1811,7 +1811,7 @@ void vtkSlicerKMAPLogic::Image2Flatten(
     #ifdef HAVE_OPENMP
     #pragma omp parallel for
     #endif
-    for (vtkIdType v = 0; v < nVoxels; ++v)
+    for (int v = 0; v < nVoxels; ++v)
     {
       if (stopRequested) continue;
       flatten_voxels_values[v][i] = petArray->GetComponent(v, 0);
@@ -1868,7 +1868,7 @@ vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
   omp_set_num_threads(max_hw_threads);
   #pragma omp parallel for
   #endif
-  for (vtkIdType i = 0; i < nVoxels; ++i)
+  for (int i = 0; i < nVoxels; ++i)
   {
     scalars->SetValue(i, flatten_values[i]);
   }
@@ -2008,7 +2008,7 @@ void vtkSlicerKMAPLogic::Patlak4Img(
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (size_t v = 0; v < nVoxels; ++v)
+        for (int v = 0; v < nVoxels; ++v)
         {
             if (stopRequested) continue;
             MTGAParameters params;
@@ -2124,8 +2124,7 @@ void vtkSlicerKMAPLogic::Patlak4Img(
                     {
                         progressBar->setValue(progress);
                         // qApp->processEvents();
-                    }
-                    else
+                    } else
                     {
                         QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
                     }
@@ -2234,7 +2233,7 @@ void vtkSlicerKMAPLogic::Logan4Img(
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (size_t v = 0; v < nVoxels; ++v)
+        for (int v = 0; v < nVoxels; ++v)
         {
             if (stopRequested) continue;
             MTGAParameters params;
@@ -2370,8 +2369,7 @@ void vtkSlicerKMAPLogic::Logan4Img(
                     {
                         progressBar->setValue(progress);
                         // qApp->processEvents();
-                    }
-                    else
+                    } else
                     {
                         QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
                     }
@@ -2509,7 +2507,7 @@ void vtkSlicerKMAPLogic::RE4Img(
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (size_t v = 0; v < nVoxels; ++v)
+        for (int v = 0; v < nVoxels; ++v)
         {
             if (stopRequested) continue;
             MTGAParameters params;
@@ -2635,9 +2633,7 @@ void vtkSlicerKMAPLogic::RE4Img(
                     {
                         progressBar->setValue(progress);
                         // qApp->processEvents();
-                    }
-                    else
-                    {
+                    } else {
                         QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
                     }
                 }
@@ -2761,7 +2757,10 @@ void vtkSlicerKMAPLogic::callTCMImg(
     }
 
     // ---------- 3) Scant and whole blood ----------
-    std::vector<std::array<double,2>> scant(Nframe);
+    std::vector<double*> scant(Nframe);
+    for (int i = 0; i < Nframe; ++i) {
+      scant[i] = new double[2];
+    }
     std::vector<double> cwb(Nframe);
     for (int i = 0; i < Nframe; ++i) {
         scant[i][0] = (i==0)?0.0:cumsum[i-1];
@@ -2894,9 +2893,9 @@ void vtkSlicerKMAPLogic::callTCMImg(
             // ---------- Progress update ----------
             if (progressBar)
             {
-                size_t done = ++voxProcessed;
+                int done = ++voxProcessed;
 
-                size_t updateInterval = std::max(static_cast<size_t>(1),
+                int updateInterval = std::max(static_cast<size_t>(1),
                                                  std::min(static_cast<size_t>(Nvox) / 1000, static_cast<size_t>(10000))
                                                 );
 
@@ -2907,8 +2906,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
                     {
                         progressBar->setValue(progress);
                         // qApp->processEvents();
-                    }
-                    else
+                    } else
                     {
                         QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
                     }

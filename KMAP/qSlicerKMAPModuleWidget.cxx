@@ -4374,6 +4374,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "1TdCM") {
       bool sens[] = {true, true, true, true};
@@ -4400,6 +4409,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "1TiCM") {
       bool sens[] = {true, true, false, false};
@@ -4426,6 +4444,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "1TidCM") {
       bool sens[] = {true, true, false, true};
@@ -4452,6 +4479,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "2TCM") {
       bool sens[] = {true, true, true, true, true, false};
@@ -4478,6 +4514,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "2dTCM") {
       bool sens[] = {true, true, true, true, true, true};
@@ -4504,6 +4549,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "2TiCM") {
       bool sens[] = {true, true, true, true, false, false};
@@ -4530,6 +4584,15 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
     }
     else if (modelID == "2TidCM") {
       bool sens[] = {true, true, true, true, false, true};
@@ -4556,6 +4619,16 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           numThreads,
           this->stopButton
           );
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID],
+          this->PETdims,
+          {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
+
     } else {
       std::cerr << "Unknown model ID: " << modelID << std::endl;
       return;
@@ -4563,15 +4636,6 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
     if (this->stopRequested) {
       break;
     }
-    logic->CreateTCMParametricImages(
-        this->TCMImgOutcomes[modelID],
-        this->PETdims,
-        {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
-        modelID,
-        this->petNode,
-        this->SubjectHierarchyNode,
-        this->petID
-      );
   }
 }
 

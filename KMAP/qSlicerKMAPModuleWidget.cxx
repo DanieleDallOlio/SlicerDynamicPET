@@ -64,6 +64,7 @@ public:
   void populatePlotSegmentCheckboxes();
   void populateIF();
   void populateIFMTGA();
+  void populateIFImg();
   void populateVOI(std :: string ifID);
   void populateVOIMTGA(std :: string ifID);
   void populateResultsVOI();
@@ -73,6 +74,7 @@ public:
   void populateModelsTCM(std :: string segmentID);
   void populateModelsMTGA(std :: string segmentID);
   void populateTimeBarMTGA();
+  void populateTimeBarMTGAImg();
   void populateModelCombo(QComboBox* comboToFill,
                           const std::string& otherSelectedModel,
                           const std::string& currentSelectedModel,
@@ -146,6 +148,9 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->MTGAWidget->setEnabled(false);
   this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->TCMWidget), false);
   this->TCMWidget->setEnabled(false);
+  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), false);
+  this->ImagingWidget->setEnabled(false);
+
   this->VOIsegmentSelectAll->setEnabled(false);
   this->VOIMTGAsegmentSelectAll->setEnabled(false);
   this->saveTCMfittedExcelButton->setEnabled(false);
@@ -189,6 +194,8 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onIFSelectionChanged(int)));
   QObject::connect( this->IFSelectorMTGA, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onIFMTGASelectionChanged(int)));
+  QObject::connect( this->IFSelectorImg, SIGNAL(currentIndexChanged(int)),
+    q, SLOT(onIFImgSelectionChanged(int)));
   QObject::connect( this->VOIsegmentSelectAll, SIGNAL(clicked(bool)),
     q, SLOT(onVOISelectAllbutton()));
   QObject::connect( this->VOIMTGAsegmentSelectAll, SIGNAL(clicked(bool)),
@@ -199,12 +206,20 @@ void qSlicerKMAPModuleWidgetPrivate::init()
       q, SLOT(onModelsMTGAAllbutton()));
   QObject::connect( this->ModelsTCMSelectAll, SIGNAL(clicked(bool)),
       q, SLOT(onModelsTCMSelectAllbutton()));
+  QObject::connect( this->ModelsSelectAllMTGAImg, SIGNAL(clicked(bool)),
+      q, SLOT(onModelsSelectAllMTGAImgbutton()));
+  QObject::connect( this->ModelsSelectAllTCMImg, SIGNAL(clicked(bool)),
+      q, SLOT(onModelsSelectAllTCMImgbutton()));
   QObject::connect( this->FITbutton, SIGNAL(clicked(bool)),
     q, SLOT(onFITbutton()));
+  QObject::connect( this->FITbuttonTCMImg, SIGNAL(clicked(bool)),
+    q, SLOT(onFITTCMImgbutton()));
   QObject::connect( this->RESETbutton, SIGNAL(clicked(bool)),
     q, SLOT(onResetbutton()));
   QObject::connect( this->FITMTGAbutton, SIGNAL(clicked(bool)),
     q, SLOT(onFITMTGAbutton()));
+  QObject::connect( this->FITbuttonMTGAImg, SIGNAL(clicked(bool)),
+    q, SLOT(onFITMTGAImgbutton()));
   QObject::connect( this->VOISelector, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onVOISelectionChanged(int)));
   QObject::connect( this->VOISelectorMTGA, SIGNAL(currentIndexChanged(int)),
@@ -235,14 +250,24 @@ void qSlicerKMAPModuleWidgetPrivate::init()
     q, SLOT(onSaveMTGAfittedExcelbutton()));
   QObject::connect(this->olsFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onOLSclicked()));
+  QObject::connect(this->olsFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onOLSImgclicked()));
   QObject::connect(this->weightedFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onWLSclicked()));
+  QObject::connect(this->weightedFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onWLSImgclicked()));
   QObject::connect(this->robustFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onRLSclicked()));
+  QObject::connect(this->robustFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onRLSImgclicked()));
   QObject::connect(this->standardFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onStdFitclicked()));
+  QObject::connect(this->standardFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onStdFitImgclicked()));
   QObject::connect(this->weightFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onWFitclicked()));
+  QObject::connect(this->weightFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onWFitImgclicked()));
   QObject::connect(this->MTGAModel1, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onMTGAModelBox(int)));
   QObject::connect(this->MTGAModel2, SIGNAL(currentIndexChanged(int)),
@@ -259,7 +284,19 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->setDoubleField(this->tolEdit,        1e-12, 1e-1, 12);
   this->setIntField   (this->maxIterEdit,    1,     100000);
 
-  // TCM params (examples; keep the ranges you want)
+  // MTGA imaging controls
+  this->setDoubleField(this->framingNormEditImg, 0.0, 3600.0, 2);
+  this->setDoubleField(this->huberTuneEditImg,  1e-3, 10.0,   6);
+  this->setDoubleField(this->tolEditImg,        1e-12, 1e-1, 12);
+  this->setIntField   (this->maxIterEditImg,    1,     100000);
+  #ifdef HAVE_OPENMP
+  this->setIntField(this->numThreadsMTGA, 1, omp_get_max_threads());
+  this->numThreadsMTGA->setText(QString::number(omp_get_max_threads()));
+  #else
+  this->setIntField(this->numThreadsMTGA, 1, 1);
+  #endif
+
+  // TCM params
   this->setDoubleField(this->k1Initial, 0.0, 5.0, 6);
   this->setDoubleField(this->k1Lower,   0.0, 5.0, 6);
   this->setDoubleField(this->k1Upper,   0.0, 5.0, 6);
@@ -292,6 +329,47 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->setDoubleField(this->pbrp3Edit, 0.0, 1.0, 6);
 
   this->setIntField(this->maxIterTCMEdit, 1, 100000);
+
+  // TCM imaging params
+  this->setDoubleField(this->k1InitialImg, 0.0, 5.0, 6);
+  this->setDoubleField(this->k1LowerImg,   0.0, 5.0, 6);
+  this->setDoubleField(this->k1UpperImg,   0.0, 5.0, 6);
+
+  this->setDoubleField(this->k2InitialImg, 0.0, 2.0, 6);
+  this->setDoubleField(this->k2LowerImg,   0.0, 2.0, 6);
+  this->setDoubleField(this->k2UpperImg,   0.0, 2.0, 6);
+
+  this->setDoubleField(this->k3InitialImg, 0.0, 2.0, 6);
+  this->setDoubleField(this->k3LowerImg,   0.0, 2.0, 6);
+  this->setDoubleField(this->k3UpperImg,   0.0, 2.0, 6);
+
+  this->setDoubleField(this->k4InitialImg, 0.0, 1.0, 6);
+  this->setDoubleField(this->k4LowerImg,   0.0, 1.0, 6);
+  this->setDoubleField(this->k4UpperImg,   0.0, 1.0, 6);
+
+  this->setDoubleField(this->vbInitialImg, 0.0, 1.0, 6);
+  this->setDoubleField(this->vbLowerImg,   0.0, 1.0, 6);
+  this->setDoubleField(this->vbUpperImg,   0.0, 1.0, 6);
+
+  this->setDoubleField(this->tdInitialImg, -10.0, 120.0, 3);
+  this->setDoubleField(this->tdLowerImg,   -10.0, 120.0, 3);
+  this->setDoubleField(this->tdUpperImg,   -10.0, 120.0, 3);
+
+  this->setDoubleField(this->decayConstEditImg, 1e-6, 10.0, 10);
+  this->setDoubleField(this->timeStepEditImg,   0.001, 60.0, 6);
+
+  this->setDoubleField(this->pbrp1EditImg, 0.0, 1.0, 6);
+  this->setDoubleField(this->pbrp2EditImg, 0.0, 1.0, 6);
+  this->setDoubleField(this->pbrp3EditImg, 0.0, 1.0, 6);
+
+  this->setIntField(this->maxIterTCMEditImg, 1, 100000);
+  #ifdef HAVE_OPENMP
+  this->setIntField(this->numThreadsTCM, 1, omp_get_max_threads());
+  this->numThreadsTCM->setText(QString::number(omp_get_max_threads()));
+  #else
+  this->setIntField(this->numThreadsTCM, 1, 1);
+  #endif
+
 
   this->TACCollapsibleButton->setCollapsed(true);
   this->TCMCollapsibleButton->setCollapsed(true);
@@ -414,6 +492,9 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     this->ModelsMTGACheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsMTGAChanged()));
+    this->ModelsCheckLayoutMTGAImg->addWidget(cb);
+    QObject::connect(cb, SIGNAL(stateChanged(int)),
+                q, SLOT(onModelsMTGAImgChanged()));
   }
 
   for (const QString& name : q->ModelsNamesTCM)
@@ -422,16 +503,21 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     this->ModelsCheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsChanged()));
+    this->ModelsCheckLayoutTCMImg->addWidget(cb);
+    QObject::connect(cb, SIGNAL(stateChanged(int)),
+                q, SLOT(onModelsTCMImgChanged()));
   }
 
   for (int i = 0; i < q->StatsNames.size(); ++i)
   {
     this->StatSelector->addItem(q->StatsNames[i], q->StatsNames[i]);
     this->StatSelectorMTGA->addItem(q->StatsNames[i], q->StatsNames[i]);
+    this->StatSelectorImg->addItem(q->StatsNames[i], q->StatsNames[i]);
   }
 
   this->StatSelector->setCurrentIndex(0);
   this->StatSelectorMTGA->setCurrentIndex(0);
+  this->StatSelectorImg->setCurrentIndex(0);
 
 }
 
@@ -971,6 +1057,22 @@ void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGA() {
     q, SLOT(onSliderChanged(int)));
 }
 
+void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGAImg() {
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  this->timeOffsetSliderImg->setMinimum(1);
+  this->timeOffsetSliderImg->setMaximum(q->numberOfTimepoints);
+  this->timeOffsetSliderImg->setValue(1);
+
+  frameEdit->setReadOnly(true);
+  timeSecEdit->setReadOnly(true);
+  timeMinEdit->setReadOnly(true);
+  q->onSliderImgChanged(1);
+
+  QObject::connect( this->timeOffsetSliderImg, SIGNAL(valueChanged(int)),
+    q, SLOT(onSliderImgChanged(int)));
+}
+
 void qSlicerKMAPModuleWidgetPrivate::populateIF()
 {
   Q_Q(qSlicerKMAPModuleWidget);
@@ -1064,6 +1166,51 @@ void qSlicerKMAPModuleWidgetPrivate::populateIFMTGA()
   std :: string passonID = restoredIndex>0 ? currentSelectedID : "";
   q-> IFID = passonID;
   this->populateVOIMTGA(q-> IFID);
+  return;
+}
+
+void qSlicerKMAPModuleWidgetPrivate::populateIFImg()
+{
+  Q_Q(qSlicerKMAPModuleWidget);
+
+  std :: string currentSelectedID = "";
+  int currentIndex = this->IFSelectorImg->currentIndex();
+  if (currentIndex >= 0)
+  {
+    currentSelectedID = this->IFSelectorImg->itemData(currentIndex).toString().toStdString();
+  }
+
+  this->IFSelectorImg->blockSignals(true);  // Optional: prevent signal emission
+  this->IFSelectorImg->clear();
+  this->IFSelectorImg->addItem(QString::fromStdString("None"), QString::fromStdString(""));
+
+  if (q->segmentTACsnames.empty() || q->segmentTACs.empty())
+  {
+    this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), false);
+    this->ImagingWidget->setEnabled(false);
+    this->IFSelectorImg->blockSignals(false);
+    return;
+  }
+  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), true);
+  this->ImagingWidget->setEnabled(true);
+
+  int restoredIndex = 0;
+  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  {
+    this->IFSelectorImg->addItem(QString::fromStdString(displayName), QString::fromStdString(segmentID));
+    if (segmentID==currentSelectedID) {
+      restoredIndex = this->IFSelectorImg->count() - 1;
+    }
+  }
+
+  // Restore previous selection if possible
+  if (restoredIndex >= 0)
+  {
+    this->IFSelectorImg->setCurrentIndex(restoredIndex);
+  }
+
+  this->IFSelectorImg->blockSignals(false);
+
   return;
 }
 
@@ -1664,10 +1811,36 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->segSequenceNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
   this->numberOfTimepoints = 0;
-  this->ProgressBar = new QProgressBar();
+  QMainWindow* mainWindow = qobject_cast<QMainWindow*>(qSlicerApplication::application()->mainWindow());
+  this->ProgressBar = new QProgressBar(mainWindow);
   this->ProgressBar->setObjectName(QString::fromUtf8("ProgressBar"));
   this->ProgressBar->setMaximum(100);
   this->ProgressBar->setValue(0);
+  this->ProgressBar->resize(300, 30);
+  QRect parentGeometry = this->ProgressBar->parentWidget()->geometry();
+  QRect barGeometry = this->ProgressBar->frameGeometry();
+  this->ProgressBar->move(
+      (parentGeometry.width() - barGeometry.width()) / 2,
+      (parentGeometry.height() - barGeometry.height()) / 2
+  );
+  this->stopButton = new QPushButton("Stop", mainWindow);
+  stopButton->move(this->ProgressBar->x(), this->ProgressBar->y() + 40);
+
+  this->stopButton->setStyleSheet(
+      "QPushButton {"
+      "  background-color: red;"
+      "  color: white;"        // Text color
+      "  font-weight: bold;"
+      "}"
+      "QPushButton:pressed {"
+      "  background-color: darkred;"
+      "}"
+  );
+  this->stopRequested = false;
+  QObject::connect(stopButton, &QPushButton::clicked, [this]() {
+      this->stopRequested = true;
+  });
+
   this->checkboxNames = QStringList{
     "Mean", "Median", "Min", "Max"//, "VoxelCount", "Volume(cc)"
   };
@@ -1683,7 +1856,6 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->PlotSelectedFrame = -1;
   this->PlotSelectedVOI = "";
   // Install global key watcher
-  QMainWindow* mainWindow = qobject_cast<QMainWindow*>(qSlicerApplication::application()->mainWindow());
   if (mainWindow)
   {
     this->keyWatcher = new KeyPressWatcher(mainWindow);
@@ -1693,7 +1865,10 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
 
   // Optional: start with watcher disabled
   this->keyWatcher->setActive(true);
-
+  this->PET_flatten_values.clear();
+  this->PETdims[0] = 0;
+  this->PETdims[1] = 0;
+  this->PETdims[2] = 0;
   d->init();
 }
 
@@ -1878,6 +2053,7 @@ void qSlicerKMAPModuleWidget::getDurations()
     this->timePoints.clear();
     return;
   }
+  this->petNode = petNode;
 
   ctkDICOMDatabase* db = qSlicerApplication::application()->dicomDatabase();
   QString instanceUID = petNode->GetAttribute("DICOM.instanceUIDs");
@@ -2230,6 +2406,7 @@ void qSlicerKMAPModuleWidget::clearTACdata() {
   d->populatePlotSegmentCheckboxes();
   d->populateIF();
   d->populateIFMTGA();
+  d->populateIFImg();
   d->TACCollapsibleButton->setCollapsed(true);
   for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
   {
@@ -2376,16 +2553,28 @@ void qSlicerKMAPModuleWidget::onTACbutton()
   }
 
   this->ProgressBar->setVisible(true);
-  qApp->processEvents();
+  this->ProgressBar->show();
   // logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
-  logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
+  this->stopRequested = false;
+  if (this->PET_flatten_values.empty()) {
+    logic->Image2Flatten(this->petID, this->PET_flatten_values, this->PETdims, this->numberOfTimepoints, this->ProgressBar, this->stopButton, this->stopRequested);
+  }
+  if (this->stopRequested) {
+    return;
+  }
+  logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar, this->stopButton, this->stopRequested);
   this->ProgressBar->setValue(0);
   this->ProgressBar->setVisible(false);
-  qApp->processEvents();
+  if (this->stopRequested) {
+    return;
+  }
+  // qApp->processEvents();
   d->populatePlotSegmentCheckboxes();
   d->populateIF();
   d->populateTimeBarMTGA();
+  d->populateTimeBarMTGAImg();
   d->populateIFMTGA();
+  d->populateIFImg();
   return;
 }
 
@@ -3009,7 +3198,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       lineSeries->SetXColumnName("Time (min)");
       lineSeries->SetYColumnName(statArrayLineName.c_str());
       lineSeries->SetLabelColumnName("ToolTipLabelTAC");
-      lineSeries->SetColor(lineSeries->GetColor());
+      lineSeries->SetUniqueColor();
       lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
       chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
 
@@ -3022,7 +3211,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
       series->SetYColumnName(colName.c_str());
       series->SetLabelColumnName("ToolTipLabelTAC");
       series->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
-      series->SetUniqueColor();
+      series->SetColor(lineSeries->GetColor());
       chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
       LabelToSeriesID[colName] = series->GetID();
     }
@@ -3071,6 +3260,7 @@ void qSlicerKMAPModuleWidget::onIFSelectionChanged(int index)
   d->populateVOI(this->IFID);
   d->IFSelectorMTGA->setCurrentIndex(index);
   d->populateVOIMTGA(this->IFID);
+  d->IFSelectorImg->setCurrentIndex(index);
   if (this->IFID == "")
   {
     return;
@@ -3085,6 +3275,22 @@ void qSlicerKMAPModuleWidget::onIFMTGASelectionChanged(int index)
   d->populateVOIMTGA(this->IFID);
   d->IFSelector->setCurrentIndex(index);
   d->populateVOI(this->IFID);
+  d->IFSelectorImg->setCurrentIndex(index);
+  if (this->IFID == "")
+  {
+    return;
+  }
+
+}
+
+void qSlicerKMAPModuleWidget::onIFImgSelectionChanged(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  this->IFID = d->IFSelectorImg->itemData(index).toString().toStdString();
+  d->IFSelector->setCurrentIndex(index);
+  d->IFSelectorMTGA->setCurrentIndex(index);
+  d->populateVOI(this->IFID);
+  d->populateVOIMTGA(this->IFID);
   if (this->IFID == "")
   {
     return;
@@ -3196,6 +3402,20 @@ void qSlicerKMAPModuleWidget::onOLSclicked()
     d->olsFitCheckBox->setChecked(true);
 }
 
+void qSlicerKMAPModuleWidget::onOLSImgclicked()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->weightedFitCheckBoxImg->blockSignals(true);
+  d->robustFitCheckBoxImg->blockSignals(true);
+  d->weightedFitCheckBoxImg->setChecked(false);
+  d->robustFitCheckBoxImg->setChecked(false);
+  d->weightedFitCheckBoxImg->blockSignals(false);
+  d->robustFitCheckBoxImg->blockSignals(false);
+  d->robustParamsWidgetImg->setVisible(false);
+  if (!d->olsFitCheckBoxImg->isChecked())
+    d->olsFitCheckBoxImg->setChecked(true);
+}
+
 void qSlicerKMAPModuleWidget::onWLSclicked()
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -3208,6 +3428,20 @@ void qSlicerKMAPModuleWidget::onWLSclicked()
   d->robustParamsWidget->setVisible(false);
   if (!d->weightedFitCheckBox->isChecked())
     d->olsFitCheckBox->setChecked(true);
+}
+
+void qSlicerKMAPModuleWidget::onWLSImgclicked()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->olsFitCheckBoxImg->blockSignals(true);
+  d->robustFitCheckBoxImg->blockSignals(true);
+  d->olsFitCheckBoxImg->setChecked(false);
+  d->robustFitCheckBoxImg->setChecked(false);
+  d->olsFitCheckBoxImg->blockSignals(false);
+  d->robustFitCheckBoxImg->blockSignals(false);
+  d->robustParamsWidgetImg->setVisible(false);
+  if (!d->weightedFitCheckBoxImg->isChecked())
+    d->olsFitCheckBoxImg->setChecked(true);
 }
 
 void qSlicerKMAPModuleWidget::onRLSclicked()
@@ -3227,6 +3461,23 @@ void qSlicerKMAPModuleWidget::onRLSclicked()
   }
 }
 
+void qSlicerKMAPModuleWidget::onRLSImgclicked()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->olsFitCheckBoxImg->blockSignals(true);
+  d->weightedFitCheckBoxImg->blockSignals(true);
+  d->olsFitCheckBoxImg->setChecked(false);
+  d->weightedFitCheckBoxImg->setChecked(false);
+  d->olsFitCheckBoxImg->blockSignals(false);
+  d->weightedFitCheckBoxImg->blockSignals(false);
+  if (!d->robustFitCheckBoxImg->isChecked()) {
+    d->olsFitCheckBoxImg->setChecked(true);
+    d->robustParamsWidgetImg->setVisible(false);
+  } else {
+    d->robustParamsWidgetImg->setVisible(true);
+  }
+}
+
 void qSlicerKMAPModuleWidget::onStdFitclicked()
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -3235,6 +3486,17 @@ void qSlicerKMAPModuleWidget::onStdFitclicked()
   d->weightFitCheckBox->blockSignals(false);
   if (!d->standardFitCheckBox->isChecked()) {
     d->standardFitCheckBox->setChecked(true);
+  }
+}
+
+void qSlicerKMAPModuleWidget::onStdFitImgclicked()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->weightFitCheckBoxImg->blockSignals(true);
+  d->weightFitCheckBoxImg->setChecked(false);
+  d->weightFitCheckBoxImg->blockSignals(false);
+  if (!d->standardFitCheckBoxImg->isChecked()) {
+    d->standardFitCheckBoxImg->setChecked(true);
   }
 }
 
@@ -3249,6 +3511,17 @@ void qSlicerKMAPModuleWidget::onWFitclicked()
   }
 }
 
+void qSlicerKMAPModuleWidget::onWFitImgclicked()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  d->standardFitCheckBoxImg->blockSignals(true);
+  d->standardFitCheckBoxImg->setChecked(false);
+  d->standardFitCheckBoxImg->blockSignals(false);
+  if (!d->weightFitCheckBoxImg->isChecked()) {
+    d->standardFitCheckBoxImg->setChecked(true);
+  }
+}
+
 void qSlicerKMAPModuleWidget::onSliderChanged(int index)
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -3258,6 +3531,17 @@ void qSlicerKMAPModuleWidget::onSliderChanged(int index)
   d->frameEdit->setText(QString::number(index));
   d->timeSecEdit->setText(QString::number(timeSec, 'f', 2));
   d->timeMinEdit->setText(QString::number(timeMin, 'f', 2));
+}
+
+void qSlicerKMAPModuleWidget::onSliderImgChanged(int index)
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  double timeSec = this->timePoints[index-1];
+  double timeMin = timeSec / 60.0;
+
+  d->frameEditImg->setText(QString::number(index));
+  d->timeSecEditImg->setText(QString::number(timeSec, 'f', 2));
+  d->timeMinEditImg->setText(QString::number(timeMin, 'f', 2));
 }
 
 void qSlicerKMAPModuleWidget::runVuong(std::string sel1,
@@ -3524,6 +3808,21 @@ void qSlicerKMAPModuleWidget::enableFITbutton() {
   d->FITbutton->setEnabled(true);
 }
 
+void qSlicerKMAPModuleWidget::enableFITTCMImgbutton() {
+  Q_D(qSlicerKMAPModuleWidget);
+  if (this->IFID=="") {
+    d->FITbuttonTCMImg->setEnabled(false);
+    // this->clearFITTCMImgdata();
+    return;
+  }
+  if (this->modelsTCMImgID.empty()) {
+    d->FITbuttonTCMImg->setEnabled(false);
+    // this->clearFITTCMImgdata();
+    return;
+  }
+  d->FITbuttonTCMImg->setEnabled(true);
+}
+
 void qSlicerKMAPModuleWidget::enableFITMTGAbutton() {
   Q_D(qSlicerKMAPModuleWidget);
   if (this->IFID=="") {
@@ -3543,6 +3842,22 @@ void qSlicerKMAPModuleWidget::enableFITMTGAbutton() {
   }
   d->FITMTGAbutton->setEnabled(true);
 }
+
+void qSlicerKMAPModuleWidget::enableFITMTGAImgbutton() {
+  Q_D(qSlicerKMAPModuleWidget);
+  if (this->IFID=="") {
+    d->FITbuttonMTGAImg->setEnabled(false);
+    // this->clearFITMTGAImgdata();
+    return;
+  }
+  if (this->modelsMTGAImgID.empty()) {
+    d->FITbuttonMTGAImg->setEnabled(false);
+    // this->clearFITMTGAImgdata();
+    return;
+  }
+  d->FITbuttonMTGAImg->setEnabled(true);
+}
+
 
 
 void qSlicerKMAPModuleWidget::onVOISegmentsChanged()
@@ -3877,6 +4192,389 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   d->populateResultsVOI();
 }
 
+void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  if ((this->PETdims[0]==0) | (this->PETdims[1]==0) | (this->PETdims[2]==0)) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing PET dimensions"),
+                         tr("Something went wrong to determine PET dimensions."));
+  }
+  if (this->numberOfTimepoints<1) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing dynamic PET"),
+                         tr("Dynamic PET has non-positive number of timepoints."));
+  }
+
+  if (this->PET_flatten_values.empty()) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing dynamic PET values"),
+                         tr("Dynamic PET values are empty."));
+  }
+
+  int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
+  if (this->PET_flatten_values.size()!=numVoxels) {
+    QMessageBox::warning(nullptr,
+                         tr("Dynamic PET: mismatch values"),
+                         tr("Number of dynamic PET is not as expected."));
+  }
+
+  if (this->PET_flatten_values[0].size()!=this->numberOfTimepoints) {
+    QMessageBox::warning(nullptr,
+                         tr("Dynamic PET: mismatch values"),
+                         tr("Number of timepoints is not as expected."));
+  }
+
+  if (segmentTACsnames.empty() || segmentTACs.empty()) {
+    std::cerr << "Missing TACs!" << std::endl;
+    return;
+  }
+
+  if (durations.empty() || timePoints.empty()) {
+    std::cerr << "Missing frame time information!" << std::endl;
+    return;
+  }
+
+  int statIDQString = d->StatSelectorImg->currentIndex();
+  if (statIDQString<0) {
+    std::cerr << "Missing stat choice!" << std::endl;
+    return;
+  }
+  std::string currentSelectedStatID = d->StatSelectorImg->itemData(statIDQString).toString().toStdString();
+
+
+  if (this->IFID.empty()) {
+    std::cerr << "Missing input function!" << std::endl;
+    return;
+  }
+
+  if (modelsTCMImgID.empty()) {
+    std::cerr << "Missing Models to fit!" << std::endl;
+    return;
+  }
+
+  // Run TAC computation
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    std::cerr << "Missing Logic!" << std::endl;
+    return;
+  }
+
+  // Collect parameters using a lambda for brevity
+  auto getParamTriplet = [&](QLineEdit* init, QLineEdit* lb, QLineEdit* ub) {
+    return std::tuple<double, double, double>{
+      init->text().toDouble(), lb->text().toDouble(), ub->text().toDouble()
+    };
+  };
+
+  auto [k1Init, k1Lower, k1Upper] = getParamTriplet(d->k1InitialImg, d->k1LowerImg, d->k1UpperImg);
+  auto [k2Init, k2Lower, k2Upper] = getParamTriplet(d->k2InitialImg, d->k2LowerImg, d->k2UpperImg);
+  auto [k3Init, k3Lower, k3Upper] = getParamTriplet(d->k3InitialImg, d->k3LowerImg, d->k3UpperImg);
+  auto [k4Init, k4Lower, k4Upper] = getParamTriplet(d->k4InitialImg, d->k4LowerImg, d->k4UpperImg);
+  auto [vbInit, vbLower, vbUpper] = getParamTriplet(d->vbInitialImg, d->vbLowerImg, d->vbUpperImg);
+  auto [tdInit, tdLower, tdUpper] = getParamTriplet(d->tdInitialImg, d->tdLowerImg, d->tdUpperImg);
+
+  const long Nframe = timePoints.size();
+  const long Nvox = 1;
+
+  std::vector<std::vector<double>> framing;
+  framing.reserve(Nframe);
+  for (double d : durations)
+  {
+    framing.emplace_back(1, d);  // Adds a vector with 1 element (column vector)
+  }
+
+  const std::vector<double>* wgt = nullptr;
+  std::map< std::string, std::vector<double>> wgtVec;
+
+  std::map<std::string, std::vector<std::vector<double>>> tac;
+  std::map<std::string, std::vector<bool>> keeptacvec;
+
+  std :: string& segmentName = this->IFID;
+  const auto& statsVec = segmentTACs[segmentName];
+
+  if (statsVec.size() != static_cast<size_t>(Nframe))
+  {
+    std::cerr << "Mismatch in TAC frame size for segment " << segmentName << std::endl;
+    return;
+  }
+
+  tac[segmentName].reserve(Nframe);
+  keeptacvec[segmentName].reserve(Nframe);
+  for (int ivs=0; ivs<statsVec.size(); ++ivs)
+  {
+    const auto& vs = statsVec[ivs];
+    double value;
+    if (currentSelectedStatID == "Mean") {
+      value = vs.mean;
+      if (d->weightFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    }
+    else if (currentSelectedStatID == "Median") {
+      value = vs.median;
+      if (d->weightFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    }
+    else
+    {
+      vtkGenericWarningMacro("Unknown stat: " << currentSelectedStatID);
+      return;
+    }
+    if (!vs.keep) {
+      wgtVec[segmentName][ivs] = 0.;
+    }
+    tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
+    keeptacvec[segmentName].push_back(vs.keep);  // Adds one-element row (column vector)
+  }
+
+  const double dk = d->decayConstEditImg->text().toDouble();
+  const double timestep = d->timeStepEditImg->text().toDouble();
+
+  auto [pbrp1, pbrp2, pbrp3] = getParamTriplet(d->pbrp1EditImg, d->pbrp2EditImg, d->pbrp3EditImg);
+  const double pbrp[] = {pbrp1, pbrp2, pbrp3};
+  const int maxiter = d->maxIterTCMEditImg->text().toInt();
+  const int numThreads = d->numThreadsTCM->text().toInt();
+
+  std::vector<std::vector<double>> Cp = tac[IFID];
+  wgt = &wgtVec[segmentName];
+  auto Cp_flatten = extractColumn(Cp);
+  std::vector<double> framing_flatten = extractColumn(framing);
+
+  this->stopRequested = false;
+  for (const std::string& modelID : modelsTCMImgID) {
+    if (modelID == "1TCM") {
+      bool sens[] = {true, true, true, false};
+      double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, 0.};
+      double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, 0.};
+      double init_1tcm[] = {vbInit,  k1Init,  k2Init,  0.};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_1tcm,
+          lb_1tcm,
+          ub_1tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          1,
+          this->TCMImgOutcomes[modelID],
+          "1TCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "1TdCM") {
+      bool sens[] = {true, true, true, true};
+      double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, tdLower};
+      double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, tdUpper};
+      double init_1tcm[] = {vbInit,  k1Init,  k2Init,  tdInit};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_1tcm,
+          lb_1tcm,
+          ub_1tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          1,
+          this->TCMImgOutcomes[modelID],
+          "1TdCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "1TiCM") {
+      bool sens[] = {true, true, false, false};
+      double lb_1tcm[]   = {vbLower, k1Lower, 0., 0.};
+      double ub_1tcm[]   = {vbUpper, k1Upper, 0., 0.};
+      double init_1tcm[] = {vbInit,  k1Init,  0.,  0.};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_1tcm,
+          lb_1tcm,
+          ub_1tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          1,
+          this->TCMImgOutcomes[modelID],
+          "1TiCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "1TidCM") {
+      bool sens[] = {true, true, false, true};
+      double lb_1tcm[]   = {vbLower, k1Lower, 0., tdLower};
+      double ub_1tcm[]   = {vbUpper, k1Upper, 0., tdUpper};
+      double init_1tcm[] = {vbInit,  k1Init,  0.,  tdInit};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_1tcm,
+          lb_1tcm,
+          ub_1tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          1,
+          this->TCMImgOutcomes[modelID],
+          "1TidCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "2TCM") {
+      bool sens[] = {true, true, true, true, true, false};
+      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, 0.};
+      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, 0.};
+      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  0.};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_2tcm,
+          lb_2tcm,
+          ub_2tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          2,
+          this->TCMImgOutcomes[modelID],
+          "2TCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "2dTCM") {
+      bool sens[] = {true, true, true, true, true, true};
+      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
+      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
+      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  tdInit};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_2tcm,
+          lb_2tcm,
+          ub_2tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          2,
+          this->TCMImgOutcomes[modelID],
+          "2dTCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "2TiCM") {
+      bool sens[] = {true, true, true, true, false, false};
+      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., 0.};
+      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., 0.};
+      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0., 0.};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_2tcm,
+          lb_2tcm,
+          ub_2tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          2,
+          this->TCMImgOutcomes[modelID],
+          "2TiCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    }
+    else if (modelID == "2TidCM") {
+      bool sens[] = {true, true, true, true, false, true};
+      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., tdLower};
+      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., tdUpper};
+      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0.,  tdInit};
+      logic->callTCMImg(this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          init_2tcm,
+          lb_2tcm,
+          ub_2tcm,
+          sens,
+          dk,
+          timestep,
+          pbrp,
+          maxiter,
+          2,
+          this->TCMImgOutcomes[modelID],
+          "2TidCM",
+          this->stopRequested,
+          wgt,
+          this->ProgressBar,
+          numThreads,
+          this->stopButton
+          );
+    } else {
+      std::cerr << "Unknown model ID: " << modelID << std::endl;
+      return;
+    }
+    if (this->stopRequested) {
+      break;
+    }
+    logic->CreateTCMParametricImages(
+        this->TCMImgOutcomes[modelID],
+        this->PETdims,
+        {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
+        modelID,
+        this->petNode,
+        this->SubjectHierarchyNode,
+        this->petID
+      );
+  }
+}
+
 void qSlicerKMAPModuleWidget::onFITMTGAbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -4047,6 +4745,248 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
   d->populateResultsVOIMTGA();
 }
 
+void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  if ((this->PETdims[0]==0) | (this->PETdims[1]==0) | (this->PETdims[2]==0)) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing PET dimensions"),
+                         tr("Something went wrong to determine PET dimensions."));
+    return;
+  }
+  if (this->numberOfTimepoints<1) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing dynamic PET"),
+                         tr("Dynamic PET has non-positive number of timepoints."));
+    return;
+  }
+
+  if (this->PET_flatten_values.empty()) {
+    QMessageBox::warning(nullptr,
+                         tr("Missing dynamic PET values"),
+                         tr("Dynamic PET values are empty."));
+    return;
+  }
+
+  int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
+  if (this->PET_flatten_values.size()!=numVoxels) {
+    QMessageBox::warning(nullptr,
+                         tr("Dynamic PET: mismatch values"),
+                         tr("Number of voxels is not as expected."));
+    return;
+  }
+
+  if (this->PET_flatten_values[0].size()!=this->numberOfTimepoints) {
+    QMessageBox::warning(nullptr,
+                         tr("Dynamic PET: mismatch values"),
+                         tr("Number of timepoints is not as expected."));
+    return;
+  }
+
+  if (segmentTACsnames.empty() || segmentTACs.empty()) {
+    std::cerr << "Missing TACs!" << std::endl;
+    return;
+  }
+
+  if (durations.empty() || timePoints.empty()) {
+    std::cerr << "Missing frame time information!" << std::endl;
+    return;
+  }
+
+  int statIDQString = d->StatSelectorImg->currentIndex();
+  if (statIDQString<0) {
+    std::cerr << "Missing stat choice!" << std::endl;
+    return;
+  }
+  std::string currentSelectedStatID = d->StatSelectorImg->itemData(statIDQString).toString().toStdString();
+
+  if (this->IFID.empty()) {
+    std::cerr << "Missing input function!" << std::endl;
+    return;
+  }
+
+  if (this->modelsMTGAImgID.empty()) {
+    std::cerr << "Missing Models to fit!" << std::endl;
+    return;
+  }
+
+  // Run TAC computation
+  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  if (!logic) {
+    std::cerr << "Missing Logic!" << std::endl;
+    return;
+  }
+
+  const long Nframe = timePoints.size();
+
+  std::vector<std::vector<double>> framing;
+  framing.reserve(Nframe);
+  for (double d : durations)
+  {
+    framing.emplace_back(1, d);  // Adds a vector with 1 element (column vector)
+  }
+  std::vector<double> framing_flatten = extractColumn(framing);
+  std::map<std::string, std::vector<std::vector<double>>> tac;
+  const std::vector<double>* wgt = nullptr;
+  std::map< std::string, std::vector<double>> wgtVec;
+
+  std :: string& segmentName = this->IFID;
+  const auto& statsVec = segmentTACs[segmentName];
+  if (statsVec.size() != static_cast<size_t>(Nframe))
+  {
+    std::cerr << "Mismatch in TAC frame size for segment " << segmentName << std::endl;
+    return;
+  }
+
+  tac[segmentName].reserve(Nframe);
+  for (int ivs=0; ivs<statsVec.size(); ++ivs)
+  {
+    const auto& vs = statsVec[ivs];
+    double value;
+    if (currentSelectedStatID == "Mean") {
+      value = vs.mean;
+      if (d->weightedFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    }
+    else if (currentSelectedStatID == "Median") {
+      value = vs.median;
+      if (d->weightedFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    } else {
+      std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
+      return;
+    }
+    if (!vs.keep) {
+      wgtVec[segmentName][ivs] = 0.;
+    }
+    tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
+  }
+
+  // const double timeOffset =  d->timeOffsetEdit->text().toDouble();
+  const double framingNorm = d->framingNormEditImg->text().toDouble();
+  const double timeOffset = this->timePoints[d->timeOffsetSliderImg->value()-1] / framingNorm;
+  const bool robust = d->robustFitCheckBoxImg->isChecked();
+  const bool std = d->standardizationCheckBoxImg->isChecked();
+  const double huber_tune = d->huberTuneEditImg->text().toDouble();
+  const double tol = d->tolEditImg->text().toDouble();
+  const int max_iter = d->maxIterEditImg->text().toInt();
+  const int numThreads = d->numThreadsMTGA->text().toInt();
+
+
+  std::vector<std::vector<double>> Cp = tac[IFID];
+  auto Cp_flatten = extractColumn(Cp);
+  wgt = &wgtVec[segmentName];
+
+  this->stopRequested = false;
+  for (const std::string& modelID : this->modelsMTGAImgID) {
+    if (modelID == "Patlak") {
+      logic->Patlak4Img(
+        this->PET_flatten_values,
+        Cp_flatten,
+        framing_flatten,
+        wgt,
+        timeOffset,
+        framingNorm,
+        robust,
+        std,
+        huber_tune,
+        tol,
+        max_iter,
+        this->MTGAImgOutcomes[modelID],
+        this->stopRequested,
+        this->ProgressBar,
+        numThreads,
+        this->stopButton
+      );
+      if (this->stopRequested) {
+        break;
+      }
+      logic->CreateMTGAParametricImages(
+          this->MTGAImgOutcomes[modelID],
+          this->PETdims,
+          {"Ki", "Intercept", "AIC", "MASE", "R2", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
+    } else if (modelID == "Logan") {
+      logic->Logan4Img(
+        this->PET_flatten_values,
+        Cp_flatten,
+        framing_flatten,
+        wgt,
+        timeOffset,
+        framingNorm,
+        robust,
+        std,
+        huber_tune,
+        tol,
+        max_iter,
+        this->MTGAImgOutcomes[modelID],
+        this->stopRequested,
+        this->ProgressBar,
+        numThreads,
+        this->stopButton
+      );
+      if (this->stopRequested) {
+        break;
+      }
+      logic->CreateMTGAParametricImages(
+          this->MTGAImgOutcomes[modelID],
+          this->PETdims,
+          {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
+    } else if (modelID == "RE") {
+      logic->RE4Img(
+        this->PET_flatten_values,
+        Cp_flatten,
+        framing_flatten,
+        wgt,
+        timeOffset,
+        framingNorm,
+        robust,
+        std,
+        huber_tune,
+        tol,
+        max_iter,
+        this->MTGAImgOutcomes[modelID],
+        this->stopRequested,
+        this->ProgressBar,
+        numThreads,
+        this->stopButton
+      );
+      if (this->stopRequested) {
+        break;
+      }
+      logic->CreateMTGAParametricImages(
+          this->MTGAImgOutcomes[modelID],
+          this->PETdims,
+          {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
+          modelID,
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+        );
+    } else {
+      std::cerr << "Unknown model ID: " << modelID << std::endl;
+      return;
+    }
+  }
+}
+
+
 void qSlicerKMAPModuleWidget::onModelsAllbutton()
 {
   Q_D(qSlicerKMAPModuleWidget);
@@ -4145,6 +5085,55 @@ void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
 
 }
 
+void qSlicerKMAPModuleWidget::onModelsSelectAllMTGAImgbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  d->ModelsCheckContentsMTGAImg->blockSignals(true);
+  std :: vector < std :: string > previouslySelectedModels;
+  for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslySelectedModels.push_back(checkbox->text().toStdString());
+    }
+  }
+
+  if (previouslySelectedModels.size()==(d->ModelsCheckLayoutMTGAImg->count())) {
+    this->modelsMTGAImgID.clear();
+    for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->blockSignals(true);
+        checkbox->setChecked(false);
+        checkbox->blockSignals(false);
+      }
+    }
+  } else {
+    this->modelsMTGAImgID.clear();
+    for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->blockSignals(true);
+        checkbox->setChecked(true);
+        checkbox->blockSignals(false);
+        this->modelsMTGAImgID.push_back(checkbox->text().toStdString());
+      }
+    }
+  }
+  d->ModelsCheckContentsMTGAImg->blockSignals(false);
+  this->enableFITMTGAImgbutton();
+
+}
+
 void qSlicerKMAPModuleWidget::onModelsChanged()
 {
   Q_D(const qSlicerKMAPModuleWidget);
@@ -4163,6 +5152,24 @@ void qSlicerKMAPModuleWidget::onModelsChanged()
   return ;
 }
 
+void qSlicerKMAPModuleWidget::onModelsTCMImgChanged()
+{
+  Q_D(const qSlicerKMAPModuleWidget);
+
+  this->modelsTCMImgID.clear();
+  for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      this->modelsTCMImgID.push_back(checkbox->text().toStdString());
+    }
+  }
+  this->enableFITTCMImgbutton();
+  return ;
+}
+
 void qSlicerKMAPModuleWidget::onModelsMTGAChanged()
 {
   Q_D(const qSlicerKMAPModuleWidget);
@@ -4178,6 +5185,24 @@ void qSlicerKMAPModuleWidget::onModelsMTGAChanged()
     }
   }
   this->enableFITMTGAbutton();
+  return ;
+}
+
+void qSlicerKMAPModuleWidget::onModelsMTGAImgChanged()
+{
+  Q_D(const qSlicerKMAPModuleWidget);
+
+  this->modelsMTGAImgID.clear();
+  for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      this->modelsMTGAImgID.push_back(checkbox->text().toStdString());
+    }
+  }
+  this->enableFITMTGAImgbutton();
   return ;
 }
 
@@ -4223,6 +5248,55 @@ void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
   }
   d->ModelsTCMCheckContents->blockSignals(false);
   d->populateModelsTCM(this->plotTCMVOI);
+}
+
+void qSlicerKMAPModuleWidget::onModelsSelectAllTCMImgbutton()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+
+  d->ModelsCheckContentsTCMImg->blockSignals(true);
+  std :: vector < std :: string > previouslySelectedModels;
+  for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+  {
+    QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+    if (checkbox && checkbox->isChecked())
+    {
+      previouslySelectedModels.push_back(checkbox->text().toStdString());
+    }
+  }
+
+  if (previouslySelectedModels.size()==(d->ModelsCheckLayoutTCMImg->count())) {
+    this->modelsTCMImgID.clear();
+    for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->blockSignals(true);
+        checkbox->setChecked(false);
+        checkbox->blockSignals(false);
+      }
+    }
+  } else {
+    this->modelsTCMImgID.clear();
+    for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+    {
+      QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (checkbox)
+      {
+        checkbox->blockSignals(true);
+        checkbox->setChecked(true);
+        checkbox->blockSignals(false);
+        this->modelsTCMImgID.push_back(checkbox->text().toStdString());
+      }
+    }
+  }
+  d->ModelsCheckContentsTCMImg->blockSignals(false);
+  this->enableFITTCMImgbutton();
+
 }
 
 

@@ -31,6 +31,7 @@
 
 // for linear regression
 #include <Eigen/Dense>
+#include <QThread>
 
 // define M_PI in case of Win
 #ifdef _WIN32
@@ -125,7 +126,9 @@ void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
                                     std::vector<QString> segmentsID,
                                     std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs,
                                     std::map<std::string, std::string>& segmentTACsnames,
-                                    QProgressBar* ProgressBar
+                                    QProgressBar* ProgressBar,
+                                    QPushButton* stopButton,
+                                    std::atomic<bool>& stopRequested
                                   )
 {
   vtkMRMLScene* scene = this->GetMRMLScene();
@@ -199,7 +202,7 @@ void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
   }
 
   // Get TAC
-  this->TAC(sequencePETNode, segSequenceNode, segmentsID, segmentTACs, segmentTACsnames, ProgressBar);
+  this->TAC(sequencePETNode, segSequenceNode, segmentsID, segmentTACs, segmentTACsnames, ProgressBar, stopButton, stopRequested);
 
 
   // Fetch segments
@@ -310,7 +313,9 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
                              std::vector<QString> segmentsID,
                              std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs,
                              std::map<std::string, std::string>& segmentTACsnames,
-                             QProgressBar* ProgressBar
+                             QProgressBar* ProgressBar,
+                             QPushButton* stopButton,
+                             std::atomic<bool>& stopRequested
                          )
 {
 
@@ -345,10 +350,21 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       continue;
     }
     segmentTACsnames[segmentID] = segment->GetName();
-    segmentTACs[segmentID] = std::vector<VoxelStatistics>();
-    segmentTACs[segmentID].reserve(numberOfTimepoints);
+
+    segmentTACs[segmentID].clear();
+    segmentTACs[segmentID].resize(numberOfTimepoints);
   }
 
+  if (ProgressBar) {
+    ProgressBar->setFormat("Computing TAC (%p%)");
+    ProgressBar->setVisible(true);
+    ProgressBar->setMinimum(0);
+    ProgressBar->setMaximum(100);
+    ProgressBar->setValue(0);
+    stopButton->setVisible(true);
+    stopButton->show();
+    qApp->processEvents();
+  }
   for (int i = 0; i < numberOfTimepoints; ++i)
   {
     std::string indexValue = sequencePETNode->GetNthIndexValue(i);
@@ -362,8 +378,14 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       continue;
     }
 
+    #ifdef HAVE_OPENMP
+    int max_hw_threads = omp_get_num_procs();
+    omp_set_num_threads(max_hw_threads);
+    #pragma omp parallel for
+    #endif
     for (size_t s = 0; s < segmentsID.size(); ++s)
     {
+      if (stopRequested) continue;
       const std::string& segmentID = segmentsID[s].toStdString();
       const std::string& segmentName = segmentTACsnames[segmentID];
 
@@ -376,23 +398,32 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
                                                                                    segmentArray,
                                                                                    vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
                                                                                    labelmap);
+      VoxelStatistics stats;
       if (!labelmap)
       {
         std::cerr << "Failed to generate labelmap for segment: " << segmentID << " at timepoint " << i << std::endl;
-        VoxelStatistics stats = VoxelStatistics{};
         stats.keep = false;
-        segmentTACs[segmentName].emplace_back(stats);  // Insert empty stats
-        continue;
+      } else {
+        stats = ComputeVoxelStatistics(PETVolume, labelmap, 1);
       }
-      VoxelStatistics stats = ComputeVoxelStatistics(
-        PETVolume, labelmap, 1);
 
-      segmentTACs[segmentID].emplace_back(stats);
+      segmentTACs[segmentID][i] = stats;
     }
-    ProgressBar->setValue(static_cast<double>(i + 1) / numberOfTimepoints*100.);
+    if (ProgressBar){
+      ProgressBar->setValue(static_cast<double>(i + 1) / numberOfTimepoints*100.);
+      // qApp->processEvents();
+    }
+    if (stopRequested) {
+      stopButton->setVisible(false);
+      segmentTACs.clear();
+      qApp->processEvents();
+      break;
+    }
+  }
+  if (ProgressBar) {
+    stopButton->setVisible(false);
     qApp->processEvents();
   }
-
 }
 
 double vtkSlicerKMAPLogic::computeLogLik(const std::vector<double>& y,
@@ -620,7 +651,6 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
   }
 
   // --- Cleanup ---
-  // delete[] wt;
   // delete[] cumsum;
   // delete[] Cp_interp;
   // delete[] cwb_interp;
@@ -772,11 +802,16 @@ double vtkSlicerKMAPLogic::computeAIC(const std::vector<double>& obs,
     }
 
     int numpar_new = numpar + 1; // intercept term
-    double AIC = numfrm * std::log(ss / static_cast<double>(numfrm))
-                 + 2.0 * numpar_new;
+
+    double mse = (numfrm > 0 ? ss / static_cast<double>(numfrm) : 0.0);
+    if (mse <= 0.0 || !std::isfinite(mse))
+    {
+        mse = std::numeric_limits<double>::min();
+    }
+    double AIC = numfrm * std::log(mse) + 2.0 * numpar_new;
 
     // Apply AICc correction if needed
-    if (aicc && (static_cast<double>(numfrm) / numpar < 40.0))
+    if (aicc && numfrm > (numpar_new + 1) && (static_cast<double>(numfrm) / numpar < 40.0))
     {
         AIC += 2.0 * numpar_new * (numpar_new + 1)
                / (static_cast<double>(numfrm) - numpar_new - 1.0);
@@ -1633,5 +1668,1322 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   else
   {
       params.weights = wgt_adj;  // copy from your pre-filled vector
+  }
+}
+
+void vtkSlicerKMAPLogic::Image2Flatten(
+    vtkIdType petID,
+    std::vector<std::vector<double>>& flatten_voxels_values,
+    int (&dims)[3],
+    int& numberOfTimepoints,
+    QProgressBar* ProgressBar,
+    QPushButton* stopButton,
+    std::atomic<bool>& stopRequested
+)
+{
+  vtkMRMLScene* scene = this->GetMRMLScene();
+  if (scene==nullptr) {
+    return;
+  }
+  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+  if (!shNode) {
+    return;
+  }
+  // Fetch CT
+  // vtkMRMLScalarVolumeNode* ctNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(ctID));
+  // if (!ctNode) {
+  //   return;
+  // }
+
+  // Fetch PET
+  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(petID));
+  if (!petNode) {
+    return;
+  }
+
+  // Find corresponding sequence
+  vtkMRMLSequenceNode* sequencePETNode = nullptr;
+  vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode = nullptr;
+  for (int i = 0; i < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode"); ++i)
+  {
+    vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
+    if (!browser)
+      continue;
+
+    // Check if this browser is using our PET node as a proxy node
+    vtkMRMLSequenceNode* seqNode = browser->GetSequenceNode(petNode);
+    if (seqNode)
+    {
+      sequencePETNode = seqNode;
+      sequenceBrowserPETNode = browser;
+      break;
+    }
+  }
+
+  if (!sequencePETNode)
+  {
+    std::cerr << "Invalid input nodes!" << std::endl;
+    return;
+  }
+
+  numberOfTimepoints = sequencePETNode->GetNumberOfDataNodes();
+
+  // flatten_values.clear();
+  // flatten_values.reserve(numberOfTimepoints * petNode->GetImageData()->GetNumberOfPoints());
+  //
+  // for (int i = 0; i < numberOfTimepoints; ++i)
+  // {
+  //   std::string indexValue = sequencePETNode->GetNthIndexValue(i);
+  //   auto* PETVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+  //     sequencePETNode->GetDataNodeAtValue(indexValue));
+  //   if (!PETVolume)
+  //   {
+  //     std::cerr << "Missing data for timepoint " << i << std::endl;
+  //     continue;
+  //   }
+  //   vtkImageData* petImage = PETVolume->GetImageData();
+  //   petImage->GetDimensions(dims);
+  //   vtkDataArray* petArray = petImage->GetPointData()->GetScalars();
+  //   if (!petArray)
+  //     continue;
+  //
+  //   vtkIdType nVoxels = petArray->GetNumberOfTuples();
+  //   for (vtkIdType v = 0; v < nVoxels; ++v)
+  //   {
+  //     flatten_values.push_back(petArray->GetComponent(v, 0));
+  //   }
+  // }
+
+  auto* firstVol = vtkMRMLScalarVolumeNode::SafeDownCast(
+    sequencePETNode->GetNthDataNode(0));
+  if (!firstVol) return;
+
+  vtkImageData* firstImage = firstVol->GetImageData();
+  firstImage->GetDimensions(dims);
+
+  vtkDataArray* firstArray = firstImage->GetPointData()->GetScalars();
+  if (!firstArray) return;
+
+  vtkIdType nVoxels = firstArray->GetNumberOfTuples();
+
+  flatten_voxels_values.clear();
+  flatten_voxels_values.resize(nVoxels);
+
+  #ifdef HAVE_OPENMP
+  int max_hw_threads = omp_get_num_procs();
+  omp_set_num_threads(max_hw_threads);
+  #pragma omp parallel for
+  #endif
+  for (vtkIdType v = 0; v < nVoxels; ++v)
+  {
+    flatten_voxels_values[v].resize(numberOfTimepoints);
+  }
+
+  if (ProgressBar)
+  {
+      ProgressBar->setFormat("Flattening dPET (%p%)");
+      ProgressBar->setVisible(true);
+      ProgressBar->setMinimum(0);
+      ProgressBar->setMaximum(100);
+      ProgressBar->setValue(0);
+      stopButton->setVisible(true);
+      stopButton->show();
+      qApp->processEvents();
+  }
+  for (int i = 0; i < numberOfTimepoints; ++i)
+  {
+    std::string indexValue = sequencePETNode->GetNthIndexValue(i);
+    auto* PETVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+      sequencePETNode->GetDataNodeAtValue(indexValue));
+    if (!PETVolume)
+    {
+      std::cerr << "Missing data for timepoint " << i << std::endl;
+      continue;
+    }
+
+    vtkImageData* petImage = PETVolume->GetImageData();
+    vtkDataArray* petArray = petImage->GetPointData()->GetScalars();
+    if (!petArray) continue;
+
+    vtkIdType nVoxels = petArray->GetNumberOfTuples();
+
+
+    #ifdef HAVE_OPENMP
+    #pragma omp parallel for
+    #endif
+    for (vtkIdType v = 0; v < nVoxels; ++v)
+    {
+      if (stopRequested) continue;
+      flatten_voxels_values[v][i] = petArray->GetComponent(v, 0);
+    }
+    if (stopRequested) break;
+    if (ProgressBar){
+      ProgressBar->setValue(static_cast<double>(i + 1) / numberOfTimepoints*100.);
+      // qApp->processEvents();
+    }
+  }
+
+  if (ProgressBar)
+  {
+    ProgressBar->setVisible(false);
+    stopButton->setVisible(false);
+    // stopButton->deleteLater();
+    if (stopRequested) {
+      flatten_voxels_values.clear();
+    }
+    qApp->processEvents();
+  }
+}
+
+vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
+    const std::vector<double>& flatten_values,
+    const int dims[3],
+    const std::string& name
+)
+{
+  vtkIdType nVoxels = static_cast<vtkIdType>(dims[0]) * dims[1] * dims[2];
+  if (flatten_values.size() != static_cast<size_t>(nVoxels))
+  {
+    std::cerr << "Flatten2Image: size mismatch! Expected " << nVoxels
+              << " values, got " << flatten_values.size() << std::endl;
+    return nullptr;
+  }
+
+  // Allocate vtkImageData
+  vtkNew<vtkImageData> image;
+  image->SetDimensions(dims);
+  image->AllocateScalars(VTK_DOUBLE, 1);
+
+  vtkDoubleArray* scalars = vtkDoubleArray::SafeDownCast(
+      image->GetPointData()->GetScalars());
+  if (!scalars)
+  {
+    std::cerr << "Flatten2Image: could not allocate double scalars" << std::endl;
+    return nullptr;
+  }
+
+  // Safe copy into the VTK array
+  #ifdef HAVE_OPENMP
+  int max_hw_threads = omp_get_num_procs();
+  omp_set_num_threads(max_hw_threads);
+  #pragma omp parallel for
+  #endif
+  for (vtkIdType i = 0; i < nVoxels; ++i)
+  {
+    scalars->SetValue(i, flatten_values[i]);
+  }
+
+  // Create MRML volume node
+  vtkNew<vtkMRMLScalarVolumeNode> volumeNode;
+  volumeNode->SetName(name.c_str());
+  volumeNode->SetAndObserveImageData(image);
+
+  // Add to scene
+  vtkMRMLScene* scene = this->GetMRMLScene();
+  if (scene)
+  {
+    scene->AddNode(volumeNode);
+  }
+
+  return volumeNode;
+}
+
+
+void vtkSlicerKMAPLogic::Patlak4Img(
+    const std::vector<std::vector<double>>& voxels,
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    const std::vector<double>* wgt_global,
+    double timeOffset,
+    double framingNorm,
+    bool robust,
+    bool standardize,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    std::vector<MTGAParameters>& outputParams,
+    std::atomic<bool>& stopRequested,
+    QProgressBar* progressBar,
+    int numThreads,
+    QPushButton* stopButton
+)
+{
+    #ifdef HAVE_OPENMP
+    int max_hw_threads = omp_get_num_procs();
+    if (numThreads > 0) {
+        int n = std::min(numThreads, max_hw_threads);
+        omp_set_num_threads(n);
+    }
+    #endif
+
+    const double EPS = 1e-12;
+    size_t N = Cp.size();
+    if (framing.size() != N) return;
+    size_t nVoxels = voxels.size();
+    if (nVoxels == 0) return;
+
+    // ---------- 1) Precompute frameScaled, timeAlong, intCp, invCp ----------
+    std::vector<double> frameScaled(N);
+    for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
+
+    std::vector<double> timeAlong(N);
+    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
+
+    std::vector<double> intCp(N, 0.0);
+    double acc = 0.0;
+    for (size_t i = 1; i < N; ++i)
+    {
+        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
+        intCp[i] = acc;
+    }
+
+    std::vector<double> invCp(N);
+    for (size_t i = 0; i < N; ++i) invCp[i] = 1.0 / (Cp[i] + EPS);
+
+    // ---------- 2) Filter frames >= timeOffset ----------
+    std::vector<double> X_all;
+    std::vector<int> keepIndex;
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (timeAlong[i] >= timeOffset)
+        {
+            X_all.push_back(intCp[i] * invCp[i]);
+            keepIndex.push_back(static_cast<int>(i));
+        }
+    }
+    size_t n = X_all.size();
+    if (n < 2) return;
+
+    // ---------- 3) Build design matrix A ----------
+    Eigen::MatrixXd A(n, 2);
+    A.col(0) = Eigen::VectorXd::Ones(n);
+    for (size_t i = 0; i < n; ++i) A(i,1) = X_all[i];
+
+    double meanX = 0.0, stdX = 1.0;
+    if (standardize)
+    {
+        meanX = std::accumulate(X_all.begin(), X_all.end(), 0.0) / double(n);
+        double sq = 0.0;
+        for (size_t i = 0; i < n; ++i) sq += X_all[i] * X_all[i];
+        stdX = std::sqrt(sq / double(n) - meanX * meanX);
+        if (stdX < EPS) stdX = 1.0;
+        for (size_t i = 0; i < n; ++i) A(i,1) = (X_all[i] - meanX) / stdX;
+    }
+
+    // Precompute pseudoinverse for unweighted OLS
+    Eigen::Matrix2d AtA = A.transpose() * A;
+    Eigen::Matrix2d AtA_inv = AtA.ldlt().solve(Eigen::Matrix2d::Identity());
+    Eigen::MatrixXd pinv = AtA_inv * A.transpose(); // 2 x n
+
+    // ---------- 4) Initialize output and progress ----------
+    outputParams.clear();
+    outputParams.resize(nVoxels);
+
+
+    if (progressBar)
+    {
+        progressBar->setFormat("Fitting Patlak (%p%)");
+        progressBar->setVisible(true);
+        progressBar->setMinimum(0);
+        progressBar->setMaximum(100);
+        progressBar->setValue(0);
+        stopButton->setVisible(true);
+        stopButton->show();
+        qApp->processEvents();
+    }
+
+    std::atomic<size_t> voxProcessed(0);
+
+    // ---------- 5) Parallel voxel-wise processing ----------
+    #ifdef HAVE_OPENMP
+    #pragma omp parallel
+    #endif
+    {
+        std::vector<double> Yvec(n);
+        std::vector<double> fitted(n);
+        std::vector<double> wgt_adj(n);
+        Eigen::Vector2d coeff;
+        Eigen::VectorXd coeff_vec(2);
+
+        #ifdef HAVE_OPENMP
+        #pragma omp for schedule(dynamic)
+        #endif
+        for (size_t v = 0; v < nVoxels; ++v)
+        {
+            if (stopRequested) continue;
+            MTGAParameters params;
+            const std::vector<double>& tac = voxels[v];
+
+            // Build Y and weights
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                int idx = keepIndex[ii];
+                Yvec[ii] = tac[idx] * invCp[idx];
+                if (wgt_global) wgt_adj[ii] = (*wgt_global)[idx];
+            }
+
+            // Standardize Y if requested
+            double meanY = 0.0, stdY = 1.0;
+            if (standardize)
+            {
+                meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0) / double(n);
+                double sq = 0.0;
+                for (size_t ii = 0; ii < n; ++ii) sq += Yvec[ii] * Yvec[ii];
+                stdY = std::sqrt(sq / double(n) - meanY*meanY);
+                if (stdY < EPS) stdY = 1.0;
+                for (size_t ii = 0; ii < n; ++ii) Yvec[ii] = (Yvec[ii] - meanY) / stdY;
+            }
+
+            Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
+
+            // ---------- Weighted / unweighted OLS ----------
+            if (!robust && wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
+                Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+            }
+            else
+            {
+                coeff_vec = pinv * Yv_map;
+            }
+            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
+
+            // ---------- Robust IRLS ----------
+            if (robust)
+            {
+                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
+                if (wgt_global)
+                {
+                    for (size_t ii = 0; ii < n; ++ii)
+                        wts(ii) = wgt_adj[ii] == 0.0 ? 0.0 : wgt_adj[ii];
+                }
+                Eigen::VectorXd prev_coeff = coeff;
+                for (int iter = 0; iter < max_iter; ++iter)
+                {
+                    Eigen::MatrixXd W = wts.asDiagonal();
+                    Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
+                    prev_coeff = c;
+                    Eigen::VectorXd residuals = Yv_map - A * c;
+                    for (size_t ii = 0; ii < n; ++ii)
+                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
+                    coeff = c;
+                }
+                for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            // ---------- Compute fitted values ----------
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                double xval = (standardize ? ((X_all[ii] - meanX)/stdX) : X_all[ii]);
+                fitted[ii] = coeff(0) + coeff(1) * xval;
+            }
+
+            // ---------- Compute statistics ----------
+            params.AIC = computeAIC(Yvec, fitted, 2, wgt_global ? &wgt_adj : nullptr);
+            params.MASE = MASE(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
+            params.R2 = computeR2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
+            params.chi2 = computeChi2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr)/(n-2);
+
+            // ---------- De-standardize ----------
+            double slope = coeff(1), intercept = coeff(0);
+            if (standardize)
+            {
+                double devyoverdevx = stdY / stdX;
+                slope = slope * devyoverdevx;
+                intercept = meanY - slope * meanX + intercept;
+                for (size_t ii = 0; ii < n; ++ii) fitted[ii] = fitted[ii] * stdY + meanY;
+            }
+
+            // ---------- Fill MTGAParameters ----------
+            params.Ki = slope;
+            params.Intercept = intercept;
+            params.x = X_all;
+            params.y.resize(n);
+            for (size_t ii = 0; ii < n; ++ii) params.y[ii] = voxels[v][keepIndex[ii]] * invCp[keepIndex[ii]];
+            params.fitted = fitted;
+            params.frame.resize(n); for (size_t ii = 0; ii < n; ++ii) params.frame[ii] = keepIndex[ii] + 1;
+            params.dof = 2;
+            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(), wgt_adj.begin()+n) : std::vector<double>(n, 1.0));
+            params.r.resize(n); for (size_t ii = 0; ii < n; ++ii) params.r[ii] = params.y[ii] - params.fitted[ii];
+
+            outputParams[v] = std::move(params);
+
+            // ---------- Update progress bar safely ----------
+            if (progressBar)
+            {
+                size_t done = ++voxProcessed;
+
+                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
+
+                if (done % updateInterval == 0 || done == nVoxels)
+                {
+                    int progress = static_cast<int>(100 * done / nVoxels);
+                    if (QThread::currentThread() == progressBar->thread())
+                    {
+                        progressBar->setValue(progress);
+                        // qApp->processEvents();
+                    }
+                    else
+                    {
+                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
+                    }
+                }
+            }
+
+        }
+    }
+  if (progressBar)
+  {
+    progressBar->setVisible(false);
+    stopButton->setVisible(false);
+    // stopButton->deleteLater();
+    if (stopRequested) {
+      outputParams.clear();
+    }
+    qApp->processEvents();
+  }
+}
+
+void vtkSlicerKMAPLogic::Logan4Img(
+    const std::vector<std::vector<double>>& voxels, // TACs, [nVoxels][N]
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    const std::vector<double>* wgt_global, // nullptr if not used
+    double timeOffset,
+    double framingNorm,
+    bool robust,
+    bool standardize,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    std::vector<MTGAParameters>& outputParams,
+    std::atomic<bool>& stopRequested,
+    QProgressBar* progressBar,
+    int numThreads,
+    QPushButton* stopButton
+)
+{
+    #ifdef HAVE_OPENMP
+    int max_hw_threads = omp_get_num_procs();
+    if (numThreads > 0) {
+        int n = std::min(numThreads, max_hw_threads);
+        omp_set_num_threads(n);
+    }
+    #endif
+
+    const double EPS = 1e-12;
+    size_t N = Cp.size();
+    if (framing.size() != N) return;
+    size_t nVoxels = voxels.size();
+    if (nVoxels == 0) return;
+
+    // ---------- 1) Precompute frameScaled, timeAlong, intCp ----------
+    std::vector<double> frameScaled(N);
+    for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
+
+    std::vector<double> timeAlong(N);
+    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
+
+    std::vector<double> intCp(N, 0.0);
+    double acc = 0.0;
+    for (size_t i = 1; i < N; ++i)
+    {
+        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
+        intCp[i] = acc;
+    }
+
+    // ---------- 2) Determine frames >= timeOffset ----------
+    std::vector<int> keepIndex;
+    for (size_t i = 0; i < N; ++i)
+    {
+        if (timeAlong[i] >= timeOffset)
+            keepIndex.push_back(static_cast<int>(i));
+    }
+    size_t n = keepIndex.size();
+    if (n < 2) return;
+
+    // ---------- 3) Prepare output ----------
+    outputParams.clear();
+    outputParams.resize(nVoxels);
+
+    if (progressBar)
+    {
+        progressBar->setFormat("Fitting Logan (%p%)");
+        progressBar->setVisible(true);
+        progressBar->setMinimum(0);
+        progressBar->setMaximum(100);
+        progressBar->setValue(0);
+        stopButton->setVisible(true);
+        stopButton->show();
+        qApp->processEvents();
+    }
+
+    std::atomic<size_t> voxProcessed(0);
+
+    // ---------- 4) Parallel voxel-wise processing ----------
+    #ifdef HAVE_OPENMP
+    #pragma omp parallel
+    #endif
+    {
+        std::vector<double> Xvec(n), Yvec(n), fitted(n), wgt_adj(n);
+        Eigen::Vector2d coeff;
+        Eigen::VectorXd coeff_vec(2);
+
+        #ifdef HAVE_OPENMP
+        #pragma omp for schedule(dynamic)
+        #endif
+        for (size_t v = 0; v < nVoxels; ++v)
+        {
+            if (stopRequested) continue;
+            MTGAParameters params;
+            const std::vector<double>& tac = voxels[v];
+
+            // ---------- Build X, Y ----------
+            std::vector<double> intCt(N, 0.0);
+            double accCt = 0.0;
+            for (size_t i = 1; i < N; ++i)
+            {
+                accCt += 0.5 * (tac[i] + tac[i-1]) * frameScaled[i];
+                intCt[i] = accCt;
+            }
+
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                int idx = keepIndex[ii];
+                double denom = tac[idx] + EPS;
+                Xvec[ii] = intCp[idx] / denom;
+                Yvec[ii] = intCt[idx] / denom;
+                if (wgt_global) wgt_adj[ii] = (*wgt_global)[idx];
+            }
+
+            // ---------- Standardization ----------
+            double meanX=0.0, meanY=0.0, stdX=1.0, stdY=1.0;
+            if (standardize)
+            {
+                meanX = std::accumulate(Xvec.begin(), Xvec.end(), 0.0) / double(n);
+                meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0) / double(n);
+                double sqX=0.0, sqY=0.0;
+                for (size_t ii=0; ii<n; ++ii){sqX += Xvec[ii]*Xvec[ii]; sqY += Yvec[ii]*Yvec[ii];}
+                stdX = std::sqrt(sqX/double(n) - meanX*meanX);
+                stdY = std::sqrt(sqY/double(n) - meanY*meanY);
+                if (stdX < EPS) stdX = 1.0;
+                if (stdY < EPS) stdY = 1.0;
+                for (size_t ii=0; ii<n; ++ii){Xvec[ii] = (Xvec[ii]-meanX)/stdX; Yvec[ii] = (Yvec[ii]-meanY)/stdY;}
+            }
+
+
+            // ---------- Weighted / unweighted OLS ----------
+            Eigen::MatrixXd A(n, 2);
+            A.col(0) = Eigen::VectorXd::Ones(n);
+            for (size_t i = 0; i < n; ++i) A(i,1) = Xvec[i];
+
+            Eigen::Matrix2d AtA = A.transpose() * A;
+            Eigen::Matrix2d AtA_inv = AtA.ldlt().solve(Eigen::Matrix2d::Identity());
+            Eigen::MatrixXd pinv = AtA_inv * A.transpose(); // 2 x n
+
+            Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
+            if (!robust && wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
+                Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+            }
+            else
+            {
+                coeff_vec = pinv * Yv_map;
+            }
+            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
+
+
+            if (robust)
+            {
+                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
+                if (wgt_global)
+                {
+                    for (size_t ii=0; ii<n; ++ii) wts(ii) = (wgt_adj[ii]==0.0 ? 0.0 : wgt_adj[ii]);
+                }
+                Eigen::VectorXd prev_coeff = coeff;
+                for (int iter = 0; iter < max_iter; ++iter)
+                {
+                    Eigen::MatrixXd W = wts.asDiagonal();
+                    Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
+                    prev_coeff = c;
+                    Eigen::VectorXd residuals = Yv_map - A * c;
+                    for (size_t ii = 0; ii < n; ++ii)
+                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
+                    coeff = c;
+                }
+                for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            // ---------- Compute fitted values ----------
+            for (size_t ii=0; ii<n; ++ii) fitted[ii] = coeff(0) + coeff(1)*Xvec[ii];
+
+            // ---------- Statistics ----------
+            params.AIC = computeAIC(Yvec, fitted, 2, wgt_global ? &wgt_adj : nullptr);
+            params.MASE = MASE(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
+            params.R2 = computeR2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
+            params.chi2 = computeChi2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr)/(n-2);
+
+            // ---------- De-standardize ----------
+            double slope = coeff(1), intercept = coeff(0);
+            if (standardize)
+            {
+                double devyoverdevx = stdY / stdX;
+                slope = slope * devyoverdevx;
+                intercept = meanY - slope * meanX + intercept;
+                for (size_t ii=0; ii<n; ++ii)
+                {
+                    fitted[ii] = fitted[ii]*stdY + meanY;
+                    Xvec[ii] = Xvec[ii]*stdX + meanX;
+                    Yvec[ii] = Yvec[ii]*stdY + meanY;
+                }
+            }
+
+            // ---------- Fill MTGAParameters ----------
+            params.DV = slope;
+            params.Intercept = intercept;
+            params.x.resize(n); for (size_t ii=0; ii<n; ++ii) params.x[ii] = Xvec[ii];
+            params.y.resize(n); for (size_t ii=0; ii<n; ++ii) params.y[ii] = Yvec[ii];
+            params.fitted = fitted;
+            params.frame.resize(n); for (size_t ii=0; ii<n; ++ii) params.frame[ii] = keepIndex[ii]+1;
+            params.dof = 2;
+            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(), wgt_adj.begin()+n) : std::vector<double>(n,1.0));
+            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = params.y[ii]-params.fitted[ii];
+
+            outputParams[v] = std::move(params);
+
+            // ---------- Progress bar ----------
+            if (progressBar)
+            {
+                size_t done = ++voxProcessed;
+
+                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
+
+                if (done % updateInterval == 0 || done == nVoxels)
+                {
+                    int progress = static_cast<int>(100 * done / nVoxels);
+                    if (QThread::currentThread() == progressBar->thread())
+                    {
+                        progressBar->setValue(progress);
+                        // qApp->processEvents();
+                    }
+                    else
+                    {
+                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
+                    }
+                }
+            }
+        }
+    }
+
+    if (progressBar)
+    {
+        progressBar->setVisible(false);
+        stopButton->setVisible(false);
+        if (stopRequested) {
+          outputParams.clear();
+        }
+        qApp->processEvents();
+    }
+}
+
+void vtkSlicerKMAPLogic::RE4Img(
+    const std::vector<std::vector<double>>& voxels, // TACs, [nVoxels][N]
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    const std::vector<double>* wgt_global, // nullptr if not used
+    double timeOffset,
+    double framingNorm,
+    bool robust,
+    bool standardize,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    std::vector<MTGAParameters>& outputParams,
+    std::atomic<bool>& stopRequested,
+    QProgressBar* progressBar,
+    int numThreads,
+    QPushButton* stopButton
+)
+{
+    #ifdef HAVE_OPENMP
+    int max_hw_threads = omp_get_num_procs();
+    if (numThreads > 0) {
+        int n = std::min(numThreads, max_hw_threads);
+        omp_set_num_threads(n);
+    }
+    #endif
+
+    const double EPS = 1e-12;
+    size_t N = Cp.size();
+    if (framing.size() != N) return;
+    size_t nVoxels = voxels.size();
+    if (nVoxels == 0) return;
+
+    // ---------- 1) Precompute frameScaled, timeAlong, intCp ----------
+    std::vector<double> frameScaled(N);
+    for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
+
+    std::vector<double> timeAlong(N);
+    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
+
+    std::vector<double> intCp(N, 0.0);
+    double acc = 0.0;
+    for (size_t i = 1; i < N; ++i)
+    {
+        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
+        intCp[i] = acc;
+    }
+
+    std::vector<double> invCp(N);
+    for (size_t i = 0; i < N; ++i) invCp[i] = 1.0 / (Cp[i] + EPS);
+
+    // ---------- 2) Determine frames >= timeOffset ----------
+    std::vector<double> X_all;
+    std::vector<int> keepIndex;
+    for (size_t i = 0; i < N; ++i)
+    {
+      if (timeAlong[i] >= timeOffset)
+      {
+          X_all.push_back(intCp[i] * invCp[i]);
+          keepIndex.push_back(static_cast<int>(i));
+      }
+    }
+    size_t n = X_all.size();
+    if (n < 2) return;
+
+    // ---------- 3) Build design matrix A ----------
+    Eigen::MatrixXd A(n, 2);
+    A.col(0) = Eigen::VectorXd::Ones(n);
+    for (size_t i = 0; i < n; ++i) A(i,1) = X_all[i];
+
+    double meanX = 0.0, stdX = 1.0;
+    if (standardize)
+    {
+        meanX = std::accumulate(X_all.begin(), X_all.end(), 0.0) / double(n);
+        double sq = 0.0;
+        for (size_t i = 0; i < n; ++i) sq += X_all[i]*X_all[i];
+        stdX = std::sqrt(sq/double(n) - meanX*meanX);
+        if (stdX < EPS) stdX = 1.0;
+        for (size_t i = 0; i < n; ++i) A(i,1) = (X_all[i]-meanX)/stdX;
+    }
+
+    // Precompute pseudoinverse for unweighted OLS
+    Eigen::Matrix2d AtA = A.transpose() * A;
+    Eigen::Matrix2d AtA_inv = AtA.ldlt().solve(Eigen::Matrix2d::Identity());
+    Eigen::MatrixXd pinv = AtA_inv * A.transpose(); // 2 x n
+
+    // ---------- 4) Prepare output ----------
+    outputParams.clear();
+    outputParams.resize(nVoxels);
+
+    if (progressBar)
+    {
+        progressBar->setFormat("Fitting RE (%p%)");
+        progressBar->setVisible(true);
+        progressBar->setMinimum(0);
+        progressBar->setMaximum(100);
+        progressBar->setValue(0);
+        stopButton->setVisible(true);
+        stopButton->show();
+        qApp->processEvents();
+    }
+
+    std::atomic<size_t> voxProcessed(0);
+
+    // ---------- 5) Parallel voxel-wise processing ----------
+    #ifdef HAVE_OPENMP
+    #pragma omp parallel
+    #endif
+    {
+        std::vector<double> Yvec(n);
+        std::vector<double> fitted(n);
+        std::vector<double> wgt_adj(n);
+        Eigen::Vector2d coeff;
+        Eigen::VectorXd coeff_vec(2);
+
+        #ifdef HAVE_OPENMP
+        #pragma omp for schedule(dynamic)
+        #endif
+        for (size_t v = 0; v < nVoxels; ++v)
+        {
+            if (stopRequested) continue;
+            MTGAParameters params;
+            const std::vector<double>& tac = voxels[v];
+
+            // ---------- Compute intCt (voxel-dependent) ----------
+            std::vector<double> intCt(N, 0.0);
+            double accCt = 0.0;
+            for (size_t i = 1; i < N; ++i)
+            {
+                accCt += 0.5*(tac[i]+tac[i-1])*frameScaled[i];
+                intCt[i] = accCt;
+            }
+
+
+            // ---------- Build Yvec and weights ----------
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                int idx = keepIndex[ii];
+                Yvec[ii] = intCt[idx] * invCp[idx];
+                if (wgt_global) wgt_adj[ii] = (*wgt_global)[idx];
+            }
+
+            // ---------- Standardization ----------
+            double meanY=0.0, stdY=1.0;
+            if (standardize)
+            {
+                meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0)/double(n);
+                double sq = 0.0;
+                for (size_t ii=0; ii<n; ++ii) sq += Yvec[ii]*Yvec[ii];
+                stdY = std::sqrt(sq/double(n) - meanY*meanY);
+                if (stdY < EPS) stdY = 1.0;
+                for (size_t ii=0; ii<n; ++ii) Yvec[ii] = (Yvec[ii]-meanY)/stdY;
+            }
+
+            Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
+
+            // ---------- Weighted / unweighted OLS ----------
+            if (!robust && wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
+                Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec = (A.transpose()*W*A).ldlt().solve(A.transpose()*W*Yv_map);
+            }
+            else
+            {
+                coeff_vec = pinv * Yv_map;
+            }
+            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
+
+            // ---------- Robust regression ----------
+            if (robust)
+            {
+                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
+                if (wgt_global)
+                {
+                    for (size_t ii=0; ii<n; ++ii) wts(ii) = (wgt_adj[ii]==0.0 ? 0.0 : wgt_adj[ii]);
+                }
+                Eigen::VectorXd prev_coeff = coeff;
+                for (int iter=0; iter<max_iter; ++iter)
+                {
+                    Eigen::MatrixXd W = wts.asDiagonal();
+                    Eigen::Vector2d c = (A.transpose()*W*A).ldlt().solve(A.transpose()*W*Yv_map);
+                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
+                    prev_coeff = c;
+                    Eigen::VectorXd residuals = Yv_map - A*c;
+                    for (size_t ii=0; ii<n; ++ii)
+                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
+                    coeff = c;
+                }
+                for (size_t ii=0; ii<n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            // ---------- Compute fitted values ----------
+            for (size_t ii=0; ii<n; ++ii)
+            {
+                double xval = standardize ? (X_all[ii]-meanX)/stdX : X_all[ii];
+                fitted[ii] = coeff(0) + coeff(1)*xval;
+            }
+
+            // ---------- Statistics ----------
+            params.AIC = computeAIC(Yvec,fitted,2,wgt_global?&wgt_adj:nullptr);
+            params.MASE = MASE(Yvec,fitted,wgt_global?&wgt_adj:nullptr);
+            params.R2 = computeR2(Yvec,fitted,wgt_global?&wgt_adj:nullptr);
+            params.chi2 = computeChi2(Yvec,fitted,wgt_global?&wgt_adj:nullptr)/(n-2);
+
+            // ---------- De-standardize ----------
+            double slope = coeff(1), intercept = coeff(0);
+            if (standardize)
+            {
+                double devyoverdevx = stdY/stdX;
+                slope *= devyoverdevx;
+                intercept = meanY - slope*meanX + intercept;
+                for (size_t ii=0; ii<n; ++ii)
+                    fitted[ii] = fitted[ii]*stdY + meanY;
+            }
+
+            // ---------- Fill MTGAParameters ----------
+            params.DV = slope;
+            params.Intercept = intercept;
+            params.x = X_all;
+            params.y.resize(n);
+            for (size_t ii=0; ii<n; ++ii) params.y[ii] = intCt[keepIndex[ii]]*invCp[keepIndex[ii]];
+            params.fitted = fitted;
+            params.frame.resize(n); for (size_t ii=0; ii<n; ++ii) params.frame[ii] = keepIndex[ii]+1;
+            params.dof = 2;
+            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(),wgt_adj.begin()+n) : std::vector<double>(n,1.0));
+            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = params.y[ii]-params.fitted[ii];
+
+            outputParams[v] = std::move(params);
+
+            // ---------- Progress bar ----------
+            if (progressBar)
+            {
+                size_t done = ++voxProcessed;
+
+                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
+
+                if (done % updateInterval == 0 || done == nVoxels)
+                {
+                    int progress = static_cast<int>(100 * done / nVoxels);
+                    if (QThread::currentThread() == progressBar->thread())
+                    {
+                        progressBar->setValue(progress);
+                        // qApp->processEvents();
+                    }
+                    else
+                    {
+                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
+                    }
+                }
+            }
+        }
+    }
+
+    if (progressBar)
+    {
+        progressBar->setVisible(false);
+        stopButton->setVisible(false);
+        if (stopRequested) {
+          outputParams.clear();
+        }
+        qApp->processEvents();
+    }
+}
+
+
+std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
+    const std::vector<MTGAParameters>& outputParams,
+    const std::string& field)
+{
+  std::vector<double> values;
+  values.reserve(outputParams.size());
+
+  for (const auto& param : outputParams)
+  {
+    if (field == "Ki") values.push_back(param.Ki);
+    else if (field == "DV") values.push_back(param.DV);
+    else if (field == "Intercept") values.push_back(param.Intercept);
+    else if (field == "AIC") values.push_back(param.AIC);
+    else if (field == "MASE") values.push_back(param.MASE);
+    else if (field == "R2") values.push_back(param.R2);
+    else if (field == "chi2") values.push_back(param.chi2);
+    else values.push_back(0.0); // fallback
+  }
+  return values;
+}
+
+void vtkSlicerKMAPLogic::CreateMTGAParametricImages(
+    const std::vector<MTGAParameters>& outputParams,
+    const int dims[3],
+    const std::vector<std::string>& fields,
+    const std::string& modelID,
+    vtkMRMLScalarVolumeNode* refNode,
+    vtkMRMLSubjectHierarchyNode* refSH,
+    vtkIdType refID
+  )
+{
+
+  for (const auto& field : fields)
+  {
+    std::vector<double> flatten = this->ExtractParameter(outputParams, field);
+    vtkMRMLScalarVolumeNode* node = this->Flatten2Image(flatten, dims, modelID + " - " + field);
+    node->CopyOrientation(refNode);
+    node->SetSpacing(refNode->GetSpacing());
+    node->SetOrigin(refNode->GetOrigin());
+    vtkIdType parentItemID = refSH->GetItemParent(refID);
+    vtkIdType newItemID = refSH->GetItemByDataNode(node);
+    refSH->SetItemParent(newItemID, parentItemID);
+    if (!node)
+    {
+      std :: cerr << "Could not create image for " << modelID + " - " + field << std :: endl;
+      return;
+    }
+  }
+}
+
+
+
+void vtkSlicerKMAPLogic::callTCMImg(
+    const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
+    const std::vector<double>& Cp,                    // [Nframe]
+    const std::vector<double>& framing,               // [Nframe]
+    double* kinit,
+    double* lb,
+    double* ub,
+    const bool* sens,
+    const double dk,
+    const double timestep,
+    const double pbrp[],
+    const int maxiter,
+    const int n_tc,
+    std::vector<TCMParameters>& outputParams,
+    const std::string& modelID,
+    std::atomic<bool>& stopRequested /*= false*/,
+    const std::vector<double>* wgt_global /*= nullptr*/,
+    QProgressBar* progressBar /*= nullptr*/,
+    int numThreads /*= 0 */,
+    QPushButton* stopButton /*= nullptr*/
+)
+{
+    const double EPS = 1e-12;
+    const int Nframe = static_cast<int>(Cp.size());
+    const int Nvox = static_cast<int>(voxels.size());
+    if (Nvox == 0 || framing.size() != Cp.size()) return;
+
+    // ---------- choose threads ----------
+    #ifdef HAVE_OPENMP
+    int max_hw_threads = omp_get_num_procs();
+    if (numThreads > 0) {
+        int n = std::min(numThreads, max_hw_threads);
+        omp_set_num_threads(n);
+    }
+    #endif
+
+
+    // ---------- 1) Weights ----------
+    std::vector<double> wt(Nframe, 1.0);
+    if (wgt_global) wt = *wgt_global;
+    std::vector<bool> keep(Nframe);
+    for (int i = 0; i < Nframe; ++i) keep[i] = (wt[i] != 0.0);
+
+    // ---------- 2) Cumulative frame times ----------
+    std::vector<double> cumsum(Nframe, 0.0);
+    double cum = 0.0;
+    for (int i = 0; i < Nframe; ++i) {
+        cum += framing[i];
+        cumsum[i] = cum;
+    }
+
+    // ---------- 3) Scant and whole blood ----------
+    std::vector<std::array<double,2>> scant(Nframe);
+    std::vector<double> cwb(Nframe);
+    for (int i = 0; i < Nframe; ++i) {
+        scant[i][0] = (i==0)?0.0:cumsum[i-1];
+        scant[i][1] = cumsum[i];
+        double t = 0.5*(scant[i][0]+scant[i][1]);
+        double pbr = pbrp[0]*exp(-pbrp[1]*t/60.0)+pbrp[2];
+        cwb[i] = Cp[i]/pbr;
+    }
+
+    // ---------- 4) Fine-sample ----------
+    long int N_cp = 0;
+    double* Cp_new  = finesample2(scant, Cp,  N_cp, timestep, "linear");
+    double* cwb_new = finesample2(scant, cwb, N_cp, timestep, "linear");
+
+    // ---------- 5) Preallocate output ----------
+    const int num_par = (n_tc == 1) ? 4 : 6;
+    const int dof_fixed = static_cast<int>(std::count(sens, sens + num_par, true));
+    outputParams.clear();
+    outputParams.resize(Nvox);
+
+    // ---------- 6) KMODEL_T ----------
+    double * scant_flatten = new double[Nframe*2];
+    for (int i=0; i<Nframe; ++i) {
+      for (int j=0; j<2; ++j) {
+        scant_flatten[i + j * Nframe] = scant[i][j];
+      }
+    }
+
+    KMODEL_T km_template;
+    km_template.dk = dk;
+    km_template.td = timestep;
+    km_template.cp = Cp_new;
+    km_template.wb = cwb_new;
+    km_template.num_frm = Nframe;
+    km_template.num_vox = 1;  // voxel-wise
+    km_template.scant = scant_flatten;
+    km_template.tacfunc = (n_tc==1)? kconv_1tcm_tac : kconv_2tcm_tac;
+    km_template.jacfunc = (n_tc==1)? kconv_1tcm_jac : kconv_2tcm_jac;
+
+    // ---------- 7) Progress tracking ----------
+    std::atomic<int> voxProcessed(0);
+    const int progressUpdateInterval = std::max(1, Nvox / 200); // ~0.5% updates
+    if (progressBar) {
+        progressBar->setFormat("Fitting " + QString::fromStdString(modelID) + " (%p%)");
+        progressBar->setVisible(true);
+        progressBar->setMinimum(0);
+        progressBar->setMaximum(100);
+        progressBar->setValue(0);
+        stopButton->setVisible(true);
+        stopButton->show();
+        qApp->processEvents();
+    }
+
+    // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
+    #ifdef HAVE_OPENMP
+    #pragma omp parallel
+    #endif
+    {
+        // thread-local scratch buffers (allocated once per thread)
+        std::vector<double> cfit_local(Nframe);
+        std::vector<double> pinit_local(num_par);
+        std::vector<int>    psens_local(num_par);
+        std::vector<double> fitted_local(Nframe);
+        std::vector<double> tac_vec(Nframe);
+        // KMODEL_T km = km_template;
+        // km.scant = scant_flatten; // ensure pointer is correct
+        // km.cp = Cp_new; // ensure pointer is correct
+        // km.wb = cwb_new; // ensure pointer is correct
+
+        #ifdef HAVE_OPENMP
+        #pragma omp for schedule(dynamic)
+        #endif
+        for (int v = 0; v < Nvox; ++v) {
+            if (stopRequested) continue;
+
+            TCMParameters params;
+
+            for (int i = 0; i < Nframe; ++i) cfit_local[i] = voxels[v][i];
+            double* tac_ptr = cfit_local.data();
+
+            for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
+
+            for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
+
+            // ---------- Fit voxel ----------
+            KMODEL_T km = km_template;
+            kmap_levmar(tac_ptr, wt.data(), Nframe,
+                        pinit_local.data(), num_par,
+                        &km, tac_eval, jac_eval,
+                        lb, ub, psens_local.data(), maxiter,
+                        fitted_local.data());
+            //
+            // ---------- Fill TCMParameters ----------
+            if (n_tc==1) {
+                params.vb = pinit_local[0];
+                params.K1 = pinit_local[1];
+                params.k2 = pinit_local[2];
+                params.td = pinit_local[3];
+                params.Ki = params.K1;
+                params.DV = params.K1/(params.k2+EPS);
+            } else if (n_tc==2) {
+                params.vb = pinit_local[0];
+                params.K1 = pinit_local[1];
+                params.k2 = pinit_local[2];
+                params.k3 = pinit_local[3];
+                params.k4 = pinit_local[4];
+                params.td = pinit_local[5];
+                params.Ki = params.K1*params.k3/(params.k2+params.k3+EPS);
+                params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
+            }
+
+            // Residuals
+            params.r.resize(Nframe);
+            for (int i=0;i<Nframe;++i) params.r[i] = voxels[v][i]-fitted_local[i];
+
+            params.weights = wt;
+            params.keep = keep;
+            params.dof = dof_fixed;
+
+            // // Statistics
+            std::copy(voxels[v].begin(), voxels[v].end(), tac_vec.begin());
+            params.AIC  = this->computeAIC(tac_vec, fitted_local, params.dof, &wt);
+            params.BIC  = this->computeBIC(tac_vec, fitted_local, params.dof, &wt);
+            params.MASE = this->MASE(tac_vec, fitted_local, &wt);
+            params.chi2 = this->computeChi2(tac_vec, fitted_local, &wt)/(Nframe-params.dof);
+            params.loglik = this->computeLogLik(tac_vec, fitted_local, &wt);
+            //
+            outputParams[v] = std::move(params);
+
+            // ---------- Progress update ----------
+            if (progressBar)
+            {
+                size_t done = ++voxProcessed;
+
+                size_t updateInterval = std::max(static_cast<size_t>(1),
+                                                 std::min(static_cast<size_t>(Nvox) / 1000, static_cast<size_t>(10000))
+                                                );
+
+                if (done % updateInterval == 0 || done == Nvox)
+                {
+                    int progress = static_cast<int>(100 * done / Nvox);
+                    if (QThread::currentThread() == progressBar->thread())
+                    {
+                        progressBar->setValue(progress);
+                        // qApp->processEvents();
+                    }
+                    else
+                    {
+                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
+                    }
+                }
+            }
+        }
+    }
+
+
+    // ---------- 8) Cleanup ----------
+    if (progressBar)
+    {
+      progressBar->setVisible(false);
+      stopButton->setVisible(false);
+      if (stopRequested) {
+        outputParams.clear();
+      }
+      qApp->processEvents();
+    }
+    delete[] Cp_new;
+    delete[] cwb_new;
+}
+
+std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
+    const std::vector<TCMParameters>& outputParams,
+    const std::string& field)
+{
+  std::vector<double> values;
+  values.reserve(outputParams.size());
+
+  for (const auto& param : outputParams)
+  {
+    if (field == "K1") values.push_back(param.K1);
+    else if (field == "k2") values.push_back(param.k2);
+    else if (field == "k3") values.push_back(param.k3);
+    else if (field == "k4") values.push_back(param.k4);
+    else if (field == "vb") values.push_back(param.vb);
+    else if (field == "td") values.push_back(param.td);
+    else if (field == "Ki") values.push_back(param.Ki);
+    else if (field == "DV") values.push_back(param.DV);
+    else if (field == "AIC") values.push_back(param.AIC);
+    else if (field == "MASE") values.push_back(param.MASE);
+    else if (field == "BIC") values.push_back(param.BIC);
+    else if (field == "chi2") values.push_back(param.chi2);
+    else if (field == "loglik") values.push_back(param.loglik);
+    else values.push_back(0.0); // fallback
+  }
+  return values;
+}
+
+void vtkSlicerKMAPLogic::CreateTCMParametricImages(
+    const std::vector<TCMParameters>& outputParams,
+    const int dims[3],
+    const std::vector<std::string>& fields,
+    const std::string& modelID,
+    vtkMRMLScalarVolumeNode* refNode,
+    vtkMRMLSubjectHierarchyNode* refSH,
+    vtkIdType refID
+  )
+{
+
+  for (const auto& field : fields)
+  {
+    std::vector<double> flatten = this->ExtractParameter(outputParams, field);
+    vtkMRMLScalarVolumeNode* node = this->Flatten2Image(flatten, dims, modelID + " - " + field);
+    node->CopyOrientation(refNode);
+    node->SetSpacing(refNode->GetSpacing());
+    node->SetOrigin(refNode->GetOrigin());
+    vtkIdType parentItemID = refSH->GetItemParent(refID);
+    vtkIdType newItemID = refSH->GetItemByDataNode(node);
+    refSH->SetItemParent(newItemID, parentItemID);
+    if (!node)
+    {
+      std :: cerr << "Could not create image for " << modelID + " - " + field << std :: endl;
+      return;
+    }
   }
 }

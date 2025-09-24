@@ -1611,6 +1611,780 @@
             </item>
           </layout>
         </widget>
+        <widget class="QWidget" name="ImagingWidget">
+          <attribute name="title">
+            <string>Imaging</string>
+          </attribute>
+          <layout class="QVBoxLayout" name="verticalLayoutImg">
+
+            <!-- First section: Input Function -->
+            <item>
+              <layout class="QFormLayout" name="formLayoutIFImg">
+                <item row="0" column="0">
+                 <widget class="QLabel" name="inputstatImg">
+                  <property name="text">
+                   <string>Input stat</string>
+                  </property>
+                 </widget>
+                </item>
+                <item row="0" column="1">
+                 <widget class="QComboBox" name="StatSelectorImg">
+                   <property name="toolTip">
+                    <string>Choose Input statistics.</string>
+                   </property>
+                 </widget>
+                </item>
+                <item row="1" column="0">
+                  <widget class="QLabel" name="IFImg">
+                    <property name="text">
+                      <string>Input Function</string>
+                    </property>
+                  </widget>
+                </item>
+                <item row="1" column="1">
+                  <widget class="QComboBox" name="IFSelectorImg">
+                    <property name="toolTip">
+                      <string>Choose Input Function.</string>
+                    </property>
+                  </widget>
+                </item>
+              </layout>
+            </item>
+
+            <!-- Tabs for MTGA and TCM -->
+            <item>
+              <widget class="QTabWidget" name="ModelsTabWidgetImg">
+
+                <!-- MTGA Tab -->
+                <widget class="QWidget" name="MTGATabImg">
+                  <attribute name="title">
+                    <string>MTGA Models</string>
+                  </attribute>
+                  <layout class="QVBoxLayout" name="mtgaLayoutImg">
+
+                    <!-- Model choices -->
+                    <item>
+                      <layout class="QFormLayout" name="formLayoutMTGA">
+                        <item row="0" column="0">
+                          <widget class="QLabel" name="ModelsMTGALabelImg">
+                            <property name="text">
+                              <string>Models</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="0" column="1">
+                          <widget class="QPushButton" name="ModelsSelectAllMTGAImg">
+                            <property name="text">
+                              <string>All/No Models</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="1" column="0" colspan="2">
+                          <widget class="QScrollArea" name="ModelsScrollAreaMTGAImg">
+                            <property name="widgetResizable">
+                              <bool>true</bool>
+                            </property>
+                            <property name="maximumHeight">
+                              <number>120</number>
+                            </property>
+                            <widget class="QWidget" name="ModelsCheckContentsMTGAImg">
+                              <property name="styleSheet">
+                                <string notr="true">background-color: white;</string>
+                              </property>
+                              <layout class="QVBoxLayout" name="ModelsCheckLayoutMTGAImg"/>
+                            </widget>
+                          </widget>
+                        </item>
+                      </layout>
+                    </item>
+
+                    <!-- Parameters (define later like your TCM section) -->
+                    <item>
+
+                      <widget class="ctkCollapsibleButton" name="MTGACollapsibleButtonImg">
+                        <property name="text">
+                         <string>MTGA Parameters</string>
+                        </property>
+                        <layout class="QGridLayout" name="MTGAFormLayoutImg">
+                          <item row="0" column="0">
+                            <widget class="QLabel" name="timeOffsetLabelImg">
+                              <property name="text">
+                                <string>Time Offset</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="0" column="1">
+                            <widget class="QSlider" name="timeOffsetSliderImg">
+                              <property name="orientation">
+                                <enum>Qt::Horizontal</enum>
+                              </property>
+                              <property name="minimum">
+                                <number>0</number>
+                              </property>
+                              <property name="maximum">
+                                <number>100</number>
+                              </property>
+                              <property name="value">
+                                <number>10</number>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="1">
+                            <widget class="QWidget" name="sliderInfoWidgetImg">
+                              <layout class="QHBoxLayout" name="horizontalLayoutImg">
+
+                                <!-- Frame -->
+                                <item>
+                                  <layout class="QVBoxLayout" name="frameLayoutImg">
+                                    <item>
+                                      <widget class="QLabel" name="frameLabelImg">
+                                        <property name="text">
+                                          <string>#Frame</string>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                    <item>
+                                      <widget class="QLineEdit" name="frameEditImg">
+                                        <property name="readOnly">
+                                          <bool>true</bool>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                        <property name="sizePolicy">
+                                          <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                            <horStretch>0</horStretch>
+                                            <verStretch>0</verStretch>
+                                          </sizepolicy>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                  </layout>
+                                </item>
+
+                                <!-- Time (s) -->
+                                <item>
+                                  <layout class="QVBoxLayout" name="timeSecLayoutImg">
+                                    <item>
+                                      <widget class="QLabel" name="timeSecLabelImg">
+                                        <property name="text">
+                                          <string>Time (s)</string>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                    <item>
+                                      <widget class="QLineEdit" name="timeSecEditImg">
+                                        <property name="readOnly">
+                                          <bool>true</bool>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                        <property name="sizePolicy">
+                                          <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                            <horStretch>0</horStretch>
+                                            <verStretch>0</verStretch>
+                                          </sizepolicy>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                  </layout>
+                                </item>
+
+                                <!-- Time (min) -->
+                                <item>
+                                  <layout class="QVBoxLayout" name="timeMinLayoutImg">
+                                    <item>
+                                      <widget class="QLabel" name="timeMinLabelImg">
+                                        <property name="text">
+                                          <string>Time (min)</string>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                    <item>
+                                      <widget class="QLineEdit" name="timeMinEditImg">
+                                        <property name="readOnly">
+                                          <bool>true</bool>
+                                        </property>
+                                        <property name="alignment">
+                                          <set>Qt::AlignCenter</set>
+                                        </property>
+                                        <property name="sizePolicy">
+                                          <sizepolicy hsizetype="Minimum" vsizetype="Fixed">
+                                            <horStretch>0</horStretch>
+                                            <verStretch>0</verStretch>
+                                          </sizepolicy>
+                                        </property>
+                                      </widget>
+                                    </item>
+                                  </layout>
+                                </item>
+
+                              </layout>
+                            </widget>
+                          </item>
+                          <item row="2" column="0">
+                            <widget class="QLabel" name="framingNormLabelImg">
+                              <property name="text">
+                                <string>Framing Norm (s)</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="1">
+                            <widget class="QLineEdit" name="framingNormEditImg">
+                              <property name="text">
+                                <string>60.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="3" column="0" colspan="2">
+                            <widget class="QCheckBox" name="standardizationCheckBoxImg">
+                              <property name="text">
+                                <string>Standardize Data</string>
+                              </property>
+                              <property name="checked">
+                                <bool>true</bool>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="0">
+                            <widget class="QLabel" name="regressionmodelImg">
+                              <property name="text">
+                                <string>Regression Model:</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="0" colspan="4">
+                            <layout class="QHBoxLayout" name="fitOptionsLayoutImg">
+                              <item>
+                                <widget class="QCheckBox" name="olsFitCheckBoxImg">
+                                  <property name="text">
+                                    <string>OLS</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>true</bool>
+                                  </property>
+                                  <property name="toolTip">
+                                   <string>Ordinary Least Squares.</string>
+                                  </property>
+                                </widget>
+                              </item>
+                              <item>
+                                <widget class="QCheckBox" name="weightedFitCheckBoxImg">
+                                  <property name="text">
+                                    <string>WLS</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>false</bool>
+                                  </property>
+                                  <property name="toolTip">
+                                   <string>Weighted Least Squares (using standard deviation or inter-quantile range as weights).</string>
+                                  </property>
+                                </widget>
+                              </item>
+                              <item>
+                                <widget class="QCheckBox" name="robustFitCheckBoxImg">
+                                  <property name="text">
+                                    <string>RLS</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>false</bool>
+                                  </property>
+                                  <property name="toolTip">
+                                   <string>Robust Least Square (Iteratively Reweighted Least Squares - Huber).</string>
+                                  </property>
+                                </widget>
+                              </item>
+                            </layout>
+                          </item>
+                          <item row="6" column="0">
+                            <widget class="QLabel" name="numThreadsMTGALabel">
+                              <property name="text">
+                                <string>Number of threads</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="6" column="1">
+                            <widget class="QLineEdit" name="numThreadsMTGA">
+                              <property name="text">
+                                <string>1</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="7" column="0" colspan="4">
+                            <widget class="QWidget" name="robustParamsWidgetImg">
+                              <property name="visible">
+                                <bool>false</bool>
+                              </property>
+                              <layout class="QGridLayout" name="robustParamsLayoutImg">
+                                <item row="0" column="0">
+                                  <widget class="QLabel" name="huberTuneLabelImg">
+                                    <property name="text">
+                                      <string>Huber Tune</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                                <item row="0" column="1">
+                                  <widget class="QLineEdit" name="huberTuneEditImg">
+                                    <property name="text">
+                                      <string>1.345</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                                <item row="1" column="0">
+                                  <widget class="QLabel" name="tolLabelImg">
+                                    <property name="text">
+                                      <string>Tolerance</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                                <item row="1" column="1">
+                                  <widget class="QLineEdit" name="tolEditImg">
+                                    <property name="text">
+                                      <string>1e-6</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                                <item row="2" column="0">
+                                  <widget class="QLabel" name="maxIterLabelImg">
+                                    <property name="text">
+                                      <string>Max Iterations</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                                <item row="2" column="1">
+                                  <widget class="QLineEdit" name="maxIterEditImg">
+                                    <property name="text">
+                                      <string>50</string>
+                                    </property>
+                                  </widget>
+                                </item>
+                              </layout>
+                            </widget>
+                          </item>
+                        </layout>
+                      </widget>
+                    </item>
+
+                    <!-- Run button -->
+                    <item>
+                      <widget class="QPushButton" name="FITbuttonMTGAImg">
+                        <property name="toolTip">
+                          <string>Fit MTGA model.</string>
+                        </property>
+                        <property name="text">
+                          <string>Get MTGA imaging</string>
+                        </property>
+                      </widget>
+                    </item>
+
+                  </layout>
+                </widget>
+
+                <!-- TCM Tab -->
+                <widget class="QWidget" name="TCMTabImg">
+                  <attribute name="title">
+                    <string>TCM Models</string>
+                  </attribute>
+                  <layout class="QVBoxLayout" name="tcmLayoutImg">
+
+                    <!-- Model choices -->
+                    <item>
+                      <layout class="QFormLayout" name="formLayoutTCM">
+                        <item row="0" column="0">
+                          <widget class="QLabel" name="ModelsTCMLabelImg">
+                            <property name="text">
+                              <string>Models</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="0" column="1">
+                          <widget class="QPushButton" name="ModelsSelectAllTCMImg">
+                            <property name="text">
+                              <string>All/No Models</string>
+                            </property>
+                          </widget>
+                        </item>
+                        <item row="1" column="0" colspan="2">
+                          <widget class="QScrollArea" name="ModelsScrollAreaTCMImg">
+                            <property name="widgetResizable">
+                              <bool>true</bool>
+                            </property>
+                            <property name="maximumHeight">
+                              <number>120</number>
+                            </property>
+                            <widget class="QWidget" name="ModelsCheckContentsTCMImg">
+                              <property name="styleSheet">
+                                <string notr="true">background-color: white;</string>
+                              </property>
+                              <layout class="QVBoxLayout" name="ModelsCheckLayoutTCMImg"/>
+                            </widget>
+                          </widget>
+                        </item>
+                      </layout>
+                    </item>
+
+                    <!-- Parameters (reuse your existing TCM layout here) -->
+                    <item>
+                      <widget class="ctkCollapsibleButton" name="TCMCollapsibleButtonImg">
+                        <property name="text">
+                          <string>TCM Parameters</string>
+                        </property>
+                        <layout class="QGridLayout" name="TCMFormLayoutImg">
+                          <item row="0" column="1">
+                            <widget class="QLabel" name="initLabelImg">
+                              <property name="text">
+                                <string>Initial</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="0" column="2">
+                            <widget class="QLabel" name="lowerLabelImg">
+                              <property name="text">
+                                <string>Lower Bound</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="0" column="3">
+                            <widget class="QLabel" name="upperLabelImg">
+                              <property name="text">
+                                <string>Upper Bound</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="0">
+                            <widget class="QLabel" name="k1LabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>K&lt;sub&gt;1&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="1">
+                            <widget class="QLineEdit" name="k1InitialImg">
+                              <property name="text">
+                                <string>0.1</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="2">
+                            <widget class="QLineEdit" name="k1LowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="3">
+                            <widget class="QLineEdit" name="k1UpperImg">
+                              <property name="text">
+                                <string>2.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="0">
+                            <widget class="QLabel" name="k2LabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>K&lt;sub&gt;2&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="1">
+                            <widget class="QLineEdit" name="k2InitialImg">
+                              <property name="text">
+                                <string>0.1</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="2">
+                            <widget class="QLineEdit" name="k2LowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="3">
+                            <widget class="QLineEdit" name="k2UpperImg">
+                              <property name="text">
+                                <string>2.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="3" column="0">
+                            <widget class="QLabel" name="k3LabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>K&lt;sub&gt;3&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="3" column="1">
+                            <widget class="QLineEdit" name="k3InitialImg">
+                              <property name="text">
+                                <string>0.1</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="3" column="2">
+                            <widget class="QLineEdit" name="k3LowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="3" column="3">
+                            <widget class="QLineEdit" name="k3UpperImg">
+                              <property name="text">
+                                <string>2.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="0">
+                            <widget class="QLabel" name="k4LabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>K&lt;sub&gt;4&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="1">
+                            <widget class="QLineEdit" name="k4InitialImg">
+                              <property name="text">
+                                <string>0.01</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="2">
+                            <widget class="QLineEdit" name="k4LowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="3">
+                            <widget class="QLineEdit" name="k4UpperImg">
+                              <property name="text">
+                                <string>0.5</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="0">
+                            <widget class="QLabel" name="vbLabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>v&lt;sub&gt;b&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="1">
+                            <widget class="QLineEdit" name="vbInitialImg">
+                              <property name="text">
+                                <string>0.1</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="2">
+                            <widget class="QLineEdit" name="vbLowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="3">
+                            <widget class="QLineEdit" name="vbUpperImg">
+                              <property name="text">
+                                <string>1.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="6" column="0">
+                            <widget class="QLabel" name="tdLabelImg">
+                              <property name="textFormat">
+                                <enum>Qt::RichText</enum>
+                              </property>
+                              <property name="text">
+                                <string>t&lt;sub&gt;d&lt;/sub&gt;</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="6" column="1">
+                            <widget class="QLineEdit" name="tdInitialImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="6" column="2">
+                            <widget class="QLineEdit" name="tdLowerImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="6" column="3">
+                            <widget class="QLineEdit" name="tdUpperImg">
+                              <property name="text">
+                                <string>20.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="7" column="0" colspan="4">
+                            <widget class="QLabel" name="fitTypeLabelImg">
+                              <property name="text">
+                                <string>Fit Type</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="8" column="0" colspan="4">
+                            <layout class="QHBoxLayout" name="fitTypeLayoutImg">
+                              <item>
+                                <widget class="QCheckBox" name="standardFitCheckBoxImg">
+                                  <property name="text">
+                                    <string>Standard Fit</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>true</bool>
+                                  </property>
+                                </widget>
+                              </item>
+                              <item>
+                                <widget class="QCheckBox" name="weightFitCheckBoxImg">
+                                  <property name="text">
+                                    <string>Weighted Fit</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>false</bool>
+                                  </property>
+                                </widget>
+                              </item>
+                            </layout>
+                          </item>
+                          <item row="9" column="0">
+                            <widget class="QLabel" name="decayConstLabelImg">
+                              <property name="text">
+                                <string>Decay Constant</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="9" column="1">
+                            <widget class="QLineEdit" name="decayConstEditImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="10" column="0">
+                            <widget class="QLabel" name="timeStepLabelImg">
+                              <property name="text">
+                                <string>Time Step (s)</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="10" column="1">
+                            <widget class="QLineEdit" name="timeStepEditImg">
+                              <property name="text">
+                                <string>1.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="11" column="0">
+                            <widget class="QLabel" name="pbrpLabelImg">
+                              <property name="text">
+                                <string>Peripheral Blood Params</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="11" column="1">
+                            <widget class="QLineEdit" name="pbrp1EditImg">
+                              <property name="text">
+                                <string>1.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="11" column="2">
+                            <widget class="QLineEdit" name="pbrp2EditImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="11" column="3">
+                            <widget class="QLineEdit" name="pbrp3EditImg">
+                              <property name="text">
+                                <string>0.0</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="12" column="0">
+                            <widget class="QLabel" name="maxIterTCMLabelImg">
+                              <property name="text">
+                                <string>Max Iterations</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="12" column="1">
+                            <widget class="QLineEdit" name="maxIterTCMEditImg">
+                              <property name="text">
+                                <string>100</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="13" column="0">
+                            <widget class="QLabel" name="numThreadsTCMLabel">
+                              <property name="text">
+                                <string>Number of threads</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="13" column="1">
+                            <widget class="QLineEdit" name="numThreadsTCM">
+                              <property name="text">
+                                <string>1</string>
+                              </property>
+                            </widget>
+                          </item>
+                        </layout>
+                      </widget>
+                    </item>
+
+                    <!-- Run button -->
+                    <item>
+                      <widget class="QPushButton" name="FITbuttonTCMImg">
+                        <property name="toolTip">
+                          <string>Fit TCM model.</string>
+                        </property>
+                        <property name="text">
+                          <string>Get TCM imaging</string>
+                        </property>
+                      </widget>
+                    </item>
+
+                  </layout>
+                </widget>
+
+              </widget>
+            </item>
+          </layout>
+        </widget>
       </widget>
     </item>
  </layout>

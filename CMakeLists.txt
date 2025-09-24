@@ -16,6 +16,25 @@ set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})
 
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+set(OPENMP_FOUNDINT ${OPENMP_FOUND} CACHE INTERNAL "OPENMP_FOUND")
+if (OPENMP_FOUND)
+  message(STATUS "OpenMP found")
+  if (OpenMP_CXX_VERSION_MAJOR LESS_EQUAL 4 AND OpenMP_CXX_VERSION_MINOR LESS 5)
+    message(FATAL_ERROR " Your OpenMP is too old. Required OpenMP 4.5. Please upgrade.")
+  endif()
+  message(STATUS "OpenMP found")
+  message(STATUS "C++ openmp flags: ${OpenMP_CXX_FLAGS}")
+  set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  # if (APPLE)
+  #   list(APPEND linked_libs OpenMP::OpenMP_CXX)
+  # endif()
+  set(OPENMP_LIBRARIES OpenMP::OpenMP_CXX CACHE INTERNAL "OPENMP library target")
+  get_target_property(_omp_inc OpenMP::OpenMP_CXX INTERFACE_INCLUDE_DIRECTORIES)
+  set(OPENMP_INCLUDE ${_omp_inc} CACHE INTERNAL "OpenMP include directories")
+  add_definitions("-DHAVE_OPENMP")
+endif()
+
 #-----------------------------------------------------------------------------
 # External library
 add_subdirectory(KMAP-PY)

@@ -53,6 +53,15 @@
 #include <QProgressBar>
 #include <kmodels.h>
 #include <utils.hpp>
+#ifdef HAVE_OPENMP
+// #pragma message("HAVE_OPENMP is defined!")
+#include <omp.h>
+// #else
+// #pragma message("HAVE_OPENMP is NOT defined!")
+#endif
+#include <atomic>
+#include <QMetaObject>
+#include <QPushButton>
 
 struct VoxelStatistics
 {
@@ -118,10 +127,10 @@ public:
   static vtkSlicerKMAPLogic *New();
   vtkTypeMacro(vtkSlicerKMAPLogic, vtkSlicerModuleLogic);
   void PrintSelf(ostream& os, vtkIndent indent) override;
-  void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
+  void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar, QPushButton* stopButton, std::atomic<bool>& stopRequested);
   void setupSeg(vtkMRMLSegmentationNode* segNode);
   VoxelStatistics ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue = 1);
-  void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar);
+  void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar, QPushButton* stopButton, std::atomic<bool>& stopRequested);
   double computeLogLik(const std::vector<double>& y,
                        const std::vector<double>& fitted,
                        const std::vector<double>* weights);
@@ -181,48 +190,166 @@ public:
                        VuongCorrection corr,
                        Tail tail);
   double computeLRTP(const double logLik1, const double logLik2, int df2, int df1);
-  double MASE(const std::vector<double>& Actual,
-              const std::vector<double>& Predicted,
-              const std::vector<double>* wgt = nullptr);
-  void Patlak(const std::vector<double>& tac,
-              const std::vector<double>& Cp,
-              const std::vector<double>& framing,
-              MTGAParameters & params,
-              const std::vector<double>* wgt = nullptr, // nullptr if not using weights
-              const double timeOffset = 0.,
-              const double framingNorm = 60.,
-              bool robust = false,
-              bool std = true,
-              double huber_tune = 1.345,
-              double tol = 1e-6,
-              int max_iter = 50
-            );
-  void Logan(const std::vector<double>& tac,
-             const std::vector<double>& Cp,
-             const std::vector<double>& framing,
-             MTGAParameters & params,
-             const std::vector<double>* wgt = nullptr, // nullptr if not using weights
-             const double timeOffset = 0.,
-             const double framingNorm = 60.,
-             bool robust = false,
-             bool std = true,
-             double huber_tune = 1.345,
-             double tol = 1e-6,
-             int max_iter = 50
-           );
- void RE(const std::vector<double>& tac,
-         const std::vector<double>& Cp,
-         const std::vector<double>& framing,
-         MTGAParameters & params,
-         const std::vector<double>* wgt = nullptr, // nullptr if not using weights
-         const double timeOffset = 0.,
-         const double framingNorm = 60.,
-         bool robust = false,
-         bool std = true,
-         double huber_tune = 1.345,
-         double tol = 1e-6,
-         int max_iter = 50
+  double MASE(
+         const std::vector<double>& Actual,
+         const std::vector<double>& Predicted,
+         const std::vector<double>* wgt = nullptr
+         );
+  void Patlak(
+       const std::vector<double>& tac,
+       const std::vector<double>& Cp,
+       const std::vector<double>& framing,
+       MTGAParameters & params,
+       const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+       const double timeOffset = 0.,
+       const double framingNorm = 60.,
+       bool robust = false,
+       bool std = true,
+       double huber_tune = 1.345,
+       double tol = 1e-6,
+       int max_iter = 50
        );
+  void Logan(
+       const std::vector<double>& tac,
+       const std::vector<double>& Cp,
+       const std::vector<double>& framing,
+       MTGAParameters & params,
+       const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+       const double timeOffset = 0.,
+       const double framingNorm = 60.,
+       bool robust = false,
+       bool std = true,
+       double huber_tune = 1.345,
+       double tol = 1e-6,
+       int max_iter = 50
+       );
+  void RE(
+       const std::vector<double>& tac,
+       const std::vector<double>& Cp,
+       const std::vector<double>& framing,
+       MTGAParameters & params,
+       const std::vector<double>* wgt = nullptr, // nullptr if not using weights
+       const double timeOffset = 0.,
+       const double framingNorm = 60.,
+       bool robust = false,
+       bool std = true,
+       double huber_tune = 1.345,
+       double tol = 1e-6,
+       int max_iter = 50
+       );
+  void Image2Flatten(
+       vtkIdType petID,
+       std::vector<std::vector<double>>& flatten_voxels_values,
+       int (&dims)[3],
+       int& numberOfTimepoints,
+       QProgressBar* ProgressBar,
+       QPushButton* stopButton,
+       std::atomic<bool>& stopRequested
+      );
+  vtkMRMLScalarVolumeNode* Flatten2Image(
+      const std::vector<double>& flatten_values,
+      const int dims[3],
+      const std::string& name
+  );
+  void Patlak4Img(
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<double>* wgt_global,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huber_tune,
+      double tol,
+      int max_iter,
+      std::vector<MTGAParameters>& outputParams,
+      std::atomic<bool>& stopRequested,
+      QProgressBar* progressBar = nullptr,
+      int numThreads = 1,
+      QPushButton* stopButton = nullptr
+  );
+  void Logan4Img(
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<double>* wgt_global,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huber_tune,
+      double tol,
+      int max_iter,
+      std::vector<MTGAParameters>& outputParams,
+      std::atomic<bool>& stopRequested,
+      QProgressBar* progressBar = nullptr,
+      int numThreads = 1,
+      QPushButton* stopButton = nullptr
+  );
+  void RE4Img(
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<double>* wgt_global,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huber_tune,
+      double tol,
+      int max_iter,
+      std::vector<MTGAParameters>& outputParams,
+      std::atomic<bool>& stopRequested,
+      QProgressBar* progressBar = nullptr,
+      int numThreads = 1,
+      QPushButton* stopButton = nullptr
+  );
+  std::vector<double> ExtractParameter(
+      const std::vector<MTGAParameters>& outputParams,
+      const std::string& field);
+  void CreateMTGAParametricImages(
+      const std::vector<MTGAParameters>& outputParams,
+      const int dims[3],
+      const std::vector<std::string>& fields,
+      const std::string& modelID,
+      vtkMRMLScalarVolumeNode* refNode,
+      vtkMRMLSubjectHierarchyNode* refSH,
+      vtkIdType refID
+    );
+  void callTCMImg(
+      const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
+      const std::vector<double>& Cp,                    // [Nframe]
+      const std::vector<double>& framing,               // [Nframe]
+      double* kinit,
+      double* lb,
+      double* ub,
+      const bool* sens,
+      const double dk,
+      const double timestep,
+      const double pbrp[],
+      const int maxiter,
+      const int n_tc,
+      std::vector<TCMParameters>& outputParams,
+      const std::string& modelID,
+      std::atomic<bool>& stopRequested,
+      const std::vector<double>* wgt_global = nullptr,
+      QProgressBar* progressBar = nullptr,
+      int numThreads = 1,
+      QPushButton* stopButton = nullptr
+  );
+  std::vector<double> ExtractParameter(
+      const std::vector<TCMParameters>& outputParams,
+      const std::string& field);
+  void CreateTCMParametricImages(
+      const std::vector<TCMParameters>& outputParams,
+      const int dims[3],
+      const std::vector<std::string>& fields,
+      const std::string& modelID,
+      vtkMRMLScalarVolumeNode* refNode,
+      vtkMRMLSubjectHierarchyNode* refSH,
+      vtkIdType refID
+    );
 protected:
   vtkSlicerKMAPLogic();
   ~vtkSlicerKMAPLogic() override;

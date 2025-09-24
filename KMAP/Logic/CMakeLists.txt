@@ -4,23 +4,41 @@ set(KIT ${PROJECT_NAME})
 
 set(${KIT}_EXPORT_DIRECTIVE "VTK_SLICER_${MODULE_NAME_UPPER}_MODULE_LOGIC_EXPORT")
 
-set(${KIT}_INCLUDE_DIRECTORIES
-  PRIVATE
-  ${EIGEN3_INCLUDE_DIRS}
-  )
+
+if (${OPENMP_FOUNDINT})
+  set(${KIT}_INCLUDE_DIRECTORIES
+    PRIVATE
+    ${EIGEN3_INCLUDE_DIRS}
+    ${OPENMP_INCLUDE}
+    )
+  set(${KIT}_TARGET_LIBRARIES
+    ${ITK_LIBRARIES}
+    ${EIGEN3_LIBRARIES}
+    ${OPENMP_LIBRARIES}
+    vtkSlicerSegmentationsModuleLogic
+    vtkSlicerSequencesModuleMRML
+    kmap
+    )
+    add_definitions("-DHAVE_OPENMP")
+else()
+  set(${KIT}_INCLUDE_DIRECTORIES
+    PRIVATE
+    ${EIGEN3_INCLUDE_DIRS}
+    )
+  set(${KIT}_TARGET_LIBRARIES
+    ${ITK_LIBRARIES}
+    ${EIGEN3_LIBRARIES}
+    vtkSlicerSegmentationsModuleLogic
+    vtkSlicerSequencesModuleMRML
+    kmap
+    )
+endif()
 
 set(${KIT}_SRCS
   vtkSlicer${MODULE_NAME}Logic.cxx
   vtkSlicer${MODULE_NAME}Logic.h
   )
 
-set(${KIT}_TARGET_LIBRARIES
-  ${ITK_LIBRARIES}
-  ${EIGEN3_LIBRARIES}
-  vtkSlicerSegmentationsModuleLogic
-  vtkSlicerSequencesModuleMRML
-  kmap
-  )
 
 #-----------------------------------------------------------------------------
 SlicerMacroBuildModuleLogic(

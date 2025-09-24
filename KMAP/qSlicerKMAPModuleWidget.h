@@ -92,6 +92,8 @@ public:
   void enableTACbutton();
   void enableFITbutton();
   void enableFITMTGAbutton();
+  void enableFITMTGAImgbutton();
+  void enableFITTCMImgbutton();
   void runVuong(std::string sel1, std::string sel2, std::string segmentID);
   void runTCMstat(std::string sel1, std::string sel2, std::string segmentID);
   QVariantMap TACtoPythonDict();
@@ -127,28 +129,41 @@ public slots:
   void onPlotbutton();
   void onIFSelectionChanged(int index);
   void onIFMTGASelectionChanged(int index);
+  void onIFImgSelectionChanged(int index);
   void onVOISelectAllbutton();
   void onVOIMTGASelectAllbutton();
   void onFITbutton();
   void onResetbutton();
   void onFITMTGAbutton();
+  void onFITMTGAImgbutton();
+  void onFITTCMImgbutton();
   void onVOISegmentsChanged();
   void onVOIMTGASegmentsChanged();
   void onModelsChanged();
   void onModelsMTGAChanged();
+  void onModelsMTGAImgChanged();
+  void onModelsTCMImgChanged();
   void onModelsAllbutton();
   void onModelsMTGAAllbutton();
   void onVOISelectionChanged(int index);
   void onVOIMTGASelectionChanged(int index);
   void onModelsTCMSelectAllbutton();
+  void onModelsSelectAllMTGAImgbutton();
+  void onModelsSelectAllTCMImgbutton();
   void onPlotTCMbutton();
   void onPlotMTGAbutton();
   void onOLSclicked();
+  void onOLSImgclicked();
   void onWLSclicked();
+  void onWLSImgclicked();
   void onRLSclicked();
+  void onRLSImgclicked();
   void onSliderChanged(int index);
+  void onSliderImgChanged(int index);
   void onStdFitclicked();
+  void onStdFitImgclicked();
   void onWFitclicked();
+  void onWFitImgclicked();
   void onMTGAModelBox(int index);
   void onTCMModelBox(int index);
   void onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol);
@@ -167,7 +182,9 @@ private:
   std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
+  vtkMRMLScalarVolumeNode* petNode;
 
+  int PETdims[3];
   int numberOfTimepoints;
   std::vector<QString> segmentIDs;
   std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
@@ -177,17 +194,23 @@ private:
   std::map<std::string, std::vector<std::vector<double>>> segmentTAC4TCMfits;
   std::map<std::string, std::vector<bool>> segmentkeep4TCMfits;
   std::map<std::string, std::map<std::string, double*>> segmentTCMfits;
+  std::map<std::string, std::vector<MTGAParameters>> MTGAImgOutcomes;
+  std::map<std::string, std::vector<TCMParameters>> TCMImgOutcomes;
+
   QProgressBar* ProgressBar;
+  QPushButton* stopButton;
+  std::atomic<bool> stopRequested;
   std::vector<double> timePoints, durations;
   QStringList checkboxNames, ModelsNamesTCM, ModelsNamesMTGA, StatsNames;
   std :: string IFID, plotTCMVOI, plotMTGAVOI, plotMTGAModel;
-  std :: vector < std :: string > VOIsegmentIDs, VOIMTGAsegmentIDs, modelsID, modelsMTGAID;
+  std :: vector < std :: string > VOIsegmentIDs, VOIMTGAsegmentIDs, modelsID, modelsMTGAID, modelsMTGAImgID, modelsTCMImgID;
   int PlotSelectedFrame;
   std :: string PlotSelectedVOI;
   KeyPressWatcher* keyWatcher{nullptr};
   QSet<QPair<QString, vtkIdType>> lastSelection;
   std::unordered_map<std::string, std::string> ColNameToSegmentID;
   QMap<QString, vtkPlot*> MapPlotSeriesNodeIDToPlot;
+  std::vector<std::vector<double>> PET_flatten_values;
 };
 
 #endif

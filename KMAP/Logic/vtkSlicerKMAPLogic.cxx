@@ -2722,9 +2722,9 @@ void vtkSlicerKMAPLogic::callTCMImg(
     const std::string& modelID,
     std::atomic<bool>& stopRequested /*= false*/,
     const std::vector<double>* wgt_global /*= nullptr*/,
-    QProgressBar* progressBar /*= nullptr*/,
     int numThreads /*= 0 */,
-    QPushButton* stopButton /*= nullptr*/
+    std::function<void(int)> progressCallback, /*= nullptr*/
+    std::function<bool()> stopCallback /*= nullptr*/
 )
 {
     const double EPS = 1e-12;
@@ -2803,16 +2803,6 @@ void vtkSlicerKMAPLogic::callTCMImg(
     // ---------- 7) Progress tracking ----------
     std::atomic<int> voxProcessed(0);
     const int progressUpdateInterval = std::max(1, Nvox / 200); // ~0.5% updates
-    if (progressBar) {
-        progressBar->setFormat("Fitting " + QString::fromStdString(modelID) + " (%p%)");
-        progressBar->setVisible(true);
-        progressBar->setMinimum(0);
-        progressBar->setMaximum(100);
-        progressBar->setValue(0);
-        stopButton->setVisible(true);
-        stopButton->show();
-        qApp->processEvents();
-    }
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
     #ifdef HAVE_OPENMP
@@ -2824,17 +2814,15 @@ void vtkSlicerKMAPLogic::callTCMImg(
         std::vector<double> pinit_local(num_par);
         std::vector<int>    psens_local(num_par);
         std::vector<double> fitted_local(Nframe);
-        std::vector<double> tac_vec(Nframe);
-        // KMODEL_T km = km_template;
-        // km.scant = scant_flatten; // ensure pointer is correct
-        // km.cp = Cp_new; // ensure pointer is correct
-        // km.wb = cwb_new; // ensure pointer is correct
 
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
         for (int v = 0; v < Nvox; ++v) {
-            if (stopRequested) continue;
+            if ((stopCallback && stopCallback()) || stopRequested) {
+              v = Nvox;
+              continue;
+            }
 
             TCMParameters params;
 
@@ -2852,7 +2840,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
                         &km, tac_eval, jac_eval,
                         lb, ub, psens_local.data(), maxiter,
                         fitted_local.data());
-            //
+
             // ---------- Fill TCMParameters ----------
             if (n_tc==1) {
                 params.vb = pinit_local[0];
@@ -2874,58 +2862,38 @@ void vtkSlicerKMAPLogic::callTCMImg(
 
             // Residuals
             params.r.resize(Nframe);
-            for (int i=0;i<Nframe;++i) params.r[i] = voxels[v][i]-fitted_local[i];
+            for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
 
             params.weights = wt;
             params.keep = keep;
             params.dof = dof_fixed;
-
-            // // Statistics
-            std::copy(voxels[v].begin(), voxels[v].end(), tac_vec.begin());
-            params.AIC  = this->computeAIC(tac_vec, fitted_local, params.dof, &wt);
-            params.BIC  = this->computeBIC(tac_vec, fitted_local, params.dof, &wt);
-            params.MASE = this->MASE(tac_vec, fitted_local, &wt);
-            params.chi2 = this->computeChi2(tac_vec, fitted_local, &wt)/(Nframe-params.dof);
-            params.loglik = this->computeLogLik(tac_vec, fitted_local, &wt);
             //
+            // // // Statistics
+            params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
+            params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
+            params.MASE = this->MASE(cfit_local, fitted_local, &wt);
+            params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
+            params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
+
             outputParams[v] = std::move(params);
 
             // ---------- Progress update ----------
-            if (progressBar)
-            {
+            if (progressCallback) {
                 int done = ++voxProcessed;
+                int updateInterval = std::max(
+                    static_cast<size_t>(1),
+                    std::min(static_cast<size_t>(Nvox) / 1000,
+                             static_cast<size_t>(10000))
+                );
 
-                int updateInterval = std::max(static_cast<size_t>(1),
-                                                 std::min(static_cast<size_t>(Nvox) / 1000, static_cast<size_t>(10000))
-                                                );
-
-                if (done % updateInterval == 0 || done == Nvox)
-                {
+                if (done % updateInterval == 0 || done == Nvox) {
                     int progress = static_cast<int>(100 * done / Nvox);
-                    if (QThread::currentThread() == progressBar->thread())
-                    {
-                        progressBar->setValue(progress);
-                        // qApp->processEvents();
-                    } else
-                    {
-                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
-                    }
+                    progressCallback(progress);
                 }
             }
         }
     }
 
-
-    // ---------- 8) Cleanup ----------
-    if (progressBar)
-    {
-      progressBar->setVisible(false);
-      stopButton->setVisible(false);
-      if (stopRequested) {
-        outputParams.clear();
-      }
-      qApp->processEvents();
-    }
     delete[] Cp_new;
     delete[] cwb_new;
 }

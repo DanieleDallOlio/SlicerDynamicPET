@@ -1,5 +1,5 @@
-#ifndef KeyPressWatcher_h
-#define KeyPressWatcher_h
+#ifndef __KeyPressWatcher_h
+#define __KeyPressWatcher_h
 
 #include <QObject>
 #include <QEvent>

@@ -1,5 +1,5 @@
-#ifndef SegmentationChangeWatcher_h
-#define SegmentationChangeWatcher_h
+#ifndef __SegmentationChangeWatcher_h
+#define __SegmentationChangeWatcher_h
 
 #include <vtkCallbackCommand.h>
 #include <vtkSegmentation.h>

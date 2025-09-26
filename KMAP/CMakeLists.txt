@@ -49,6 +49,7 @@ set(MODULE_SRCS
   SegmentationChangeWatcher.h
   KeyPressWatcher.cxx
   KeyPressWatcher.h
+  KMAPWidgetWorkers.h
   )
 
 set(MODULE_MOC_SRCS
@@ -56,6 +57,7 @@ set(MODULE_MOC_SRCS
   qSlicer${MODULE_NAME}ModuleWidget.h
   SegmentationChangeWatcher.h
   KeyPressWatcher.h
+  KMAPWidgetWorkers.h
   )
 
 set(MODULE_UI_SRCS

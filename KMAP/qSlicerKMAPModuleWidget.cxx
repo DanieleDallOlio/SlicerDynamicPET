@@ -1869,6 +1869,7 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->PETdims[0] = 0;
   this->PETdims[1] = 0;
   this->PETdims[2] = 0;
+  qRegisterMetaType<std::vector<TCMParameters>>("std::vector<TCMParameters>");
   d->init();
 }
 
@@ -4349,290 +4350,143 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
 
   this->stopRequested = false;
   for (const std::string& modelID : modelsTCMImgID) {
+    bool sens[6] = {false, false, false, false, false, false};
+    double lb[6] = {0.0}, ub[6] = {0.0}, init[6] = {0.0};
+    int num_tc = 0;
+    std::vector<std::string> modelfields;
+    // --- configure based on modelID ---
     if (modelID == "1TCM") {
-      bool sens[] = {true, true, true, false};
-      double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, 0.};
-      double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, 0.};
-      double init_1tcm[] = {vbInit,  k1Init,  k2Init,  0.};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_1tcm,
-          lb_1tcm,
-          ub_1tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          1,
-          this->TCMImgOutcomes[modelID],
-          "1TCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 1;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = false;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init;
+        modelfields = {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "1TdCM") {
-      bool sens[] = {true, true, true, true};
-      double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, tdLower};
-      double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, tdUpper};
-      double init_1tcm[] = {vbInit,  k1Init,  k2Init,  tdInit};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_1tcm,
-          lb_1tcm,
-          ub_1tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          1,
-          this->TCMImgOutcomes[modelID],
-          "1TdCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 1;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = tdLower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = tdUpper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = tdInit;
+        modelfields = {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "1TiCM") {
-      bool sens[] = {true, true, false, false};
-      double lb_1tcm[]   = {vbLower, k1Lower, 0., 0.};
-      double ub_1tcm[]   = {vbUpper, k1Upper, 0., 0.};
-      double init_1tcm[] = {vbInit,  k1Init,  0.,  0.};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_1tcm,
-          lb_1tcm,
-          ub_1tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          1,
-          this->TCMImgOutcomes[modelID],
-          "1TiCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 1;
+        sens[0] = true; sens[1] = true;
+        lb[0] = vbLower; lb[1] = k1Lower;
+        ub[0] = vbUpper; ub[1] = k1Upper;
+        init[0] = vbInit; init[1] = k1Init;
+        modelfields = {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "1TidCM") {
-      bool sens[] = {true, true, false, true};
-      double lb_1tcm[]   = {vbLower, k1Lower, 0., tdLower};
-      double ub_1tcm[]   = {vbUpper, k1Upper, 0., tdUpper};
-      double init_1tcm[] = {vbInit,  k1Init,  0.,  tdInit};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_1tcm,
-          lb_1tcm,
-          ub_1tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          1,
-          this->TCMImgOutcomes[modelID],
-          "1TidCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 1;
+        sens[0] = true; sens[1] = true; sens[3] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[3] = tdLower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[3] = tdUpper;
+        init[0] = vbInit; init[1] = k1Init; init[3] = tdInit;
+        modelfields = {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "2TCM") {
-      bool sens[] = {true, true, true, true, true, false};
-      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, 0.};
-      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, 0.};
-      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  0.};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_2tcm,
-          lb_2tcm,
-          ub_2tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          2,
-          this->TCMImgOutcomes[modelID],
-          "2TCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 2;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[4] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[4] = k4Lower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[4] = k4Upper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[4] = k4Init;
+        modelfields = {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "2dTCM") {
-      bool sens[] = {true, true, true, true, true, true};
-      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
-      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
-      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  tdInit};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_2tcm,
-          lb_2tcm,
-          ub_2tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          2,
-          this->TCMImgOutcomes[modelID],
-          "2dTCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 2;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[4] = true; sens[5] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[4] = k4Lower; lb[5] = tdLower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[4] = k4Upper; ub[5] = tdUpper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[4] = k4Init; init[5] = tdInit;
+        modelfields = {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "2TiCM") {
-      bool sens[] = {true, true, true, true, false, false};
-      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., 0.};
-      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., 0.};
-      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0., 0.};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_2tcm,
-          lb_2tcm,
-          ub_2tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          2,
-          this->TCMImgOutcomes[modelID],
-          "2TiCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
+        num_tc = 2;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init;
+        modelfields = {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
     }
     else if (modelID == "2TidCM") {
-      bool sens[] = {true, true, true, true, false, true};
-      double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., tdLower};
-      double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., tdUpper};
-      double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0.,  tdInit};
-      logic->callTCMImg(this->PET_flatten_values,
-          Cp_flatten,
-          framing_flatten,
-          init_2tcm,
-          lb_2tcm,
-          ub_2tcm,
-          sens,
-          dk,
-          timestep,
-          pbrp,
-          maxiter,
-          2,
-          this->TCMImgOutcomes[modelID],
-          "2TidCM",
-          this->stopRequested,
-          wgt,
-          this->ProgressBar,
-          numThreads,
-          this->stopButton
-          );
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID],
-          this->PETdims,
-          {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"},
-          modelID,
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
+        num_tc = 2;
+        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[5] = true;
+        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[5] = tdLower;
+        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[5] = tdUpper;
+        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[5] = tdInit;
+        modelfields = {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
+    }
+    else {
+        std::cerr << "Unknown model ID: " << modelID << std::endl;
+        return;
+    }
+    TCMWorker* worker = new TCMWorker(
+        logic,
+        this->PET_flatten_values,
+        Cp_flatten,
+        framing_flatten,
+        init,
+        lb,
+        ub,
+        sens,
+        dk,
+        timestep,
+        pbrp,
+        maxiter,
+        num_tc,
+        QString::fromStdString(modelID),
+        this->stopRequested,
+        wgt,
+        numThreads
+    );
+    this->ProgressBar->setFormat("Fitting " + QString::fromStdString(modelID) + " (%p%)");
+    this->ProgressBar->setVisible(true);
+    this->ProgressBar->setMinimum(0);
+    this->ProgressBar->setMaximum(100);
+    this->ProgressBar->setValue(0);
+
+    this->stopButton->setVisible(true);
+    this->stopButton->show();
+
+    QObject::connect(worker, &TCMWorker::progressChanged, this, [=](int value){
+        this->ProgressBar->setValue(value);
+    });
+
+    QObject::connect(worker, &TCMWorker::canceled, this, [=](const QString& modelID){
+        this->ProgressBar->setVisible(false);
+        this->stopButton->setVisible(false);
+        worker->deleteLater();
+    });
+
+    QObject::connect(worker, &TCMWorker::finishedProcessing,
+      this, [=](const QString& modelID, const std::vector<TCMParameters>& results) {
+        this->TCMImgOutcomes[modelID.toStdString()] = results;
+
+        this->ProgressBar->setVisible(false);
+        this->stopButton->setVisible(false);
+
+        logic->CreateTCMParametricImages(
+            this->TCMImgOutcomes[modelID.toStdString()],
+            this->PETdims,
+            modelfields,
+            modelID.toStdString(),
+            this->petNode,
+            this->SubjectHierarchyNode,
+            this->petID
         );
 
-    } else {
-      std::cerr << "Unknown model ID: " << modelID << std::endl;
-      return;
-    }
+        worker->deleteLater();
+    });
+
+    connect(this->stopButton, &QPushButton::clicked, this, [=](){
+        this->stopRequested = true;
+    });
+
+    worker->start();
+
     if (this->stopRequested) {
       break;
     }

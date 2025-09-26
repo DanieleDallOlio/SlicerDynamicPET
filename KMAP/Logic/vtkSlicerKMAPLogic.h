@@ -334,9 +334,11 @@ public:
       const std::string& modelID,
       std::atomic<bool>& stopRequested,
       const std::vector<double>* wgt_global = nullptr,
-      QProgressBar* progressBar = nullptr,
+      // QProgressBar* progressBar = nullptr,
       int numThreads = 1,
-      QPushButton* stopButton = nullptr
+      // QPushButton* stopButton = nullptr,
+      std::function<void(int)> progressCallback = nullptr,
+      std::function<bool()> stopCallback = nullptr
   );
   std::vector<double> ExtractParameter(
       const std::vector<TCMParameters>& outputParams,

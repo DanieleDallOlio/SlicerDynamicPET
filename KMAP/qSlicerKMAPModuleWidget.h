@@ -67,7 +67,6 @@
 #include <QMetaType>
 #include "KMAPWidgetWorkers.h"
 
-Q_DECLARE_METATYPE(std::vector<TCMParameters>)
 
 class qSlicerKMAPModuleWidgetPrivate;
 class vtkMRMLNode;

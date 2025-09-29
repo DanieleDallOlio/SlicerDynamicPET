@@ -1869,7 +1869,7 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   this->PETdims[0] = 0;
   this->PETdims[1] = 0;
   this->PETdims[2] = 0;
-  qRegisterMetaType<std::vector<TCMParameters>>("std::vector<TCMParameters>");
+  // qRegisterMetaType<std::vector<TCMParameters>>("std::vector<TCMParameters>");
   d->init();
 }
 
@@ -4349,148 +4349,97 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
   std::vector<double> framing_flatten = extractColumn(framing);
 
   this->stopRequested = false;
-  for (const std::string& modelID : modelsTCMImgID) {
-    bool sens[6] = {false, false, false, false, false, false};
-    double lb[6] = {0.0}, ub[6] = {0.0}, init[6] = {0.0};
-    int num_tc = 0;
-    std::vector<std::string> modelfields;
-    // --- configure based on modelID ---
-    if (modelID == "1TCM") {
-        num_tc = 1;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = false;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init;
-        modelfields = {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "1TdCM") {
-        num_tc = 1;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = tdLower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = tdUpper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = tdInit;
-        modelfields = {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "1TiCM") {
-        num_tc = 1;
-        sens[0] = true; sens[1] = true;
-        lb[0] = vbLower; lb[1] = k1Lower;
-        ub[0] = vbUpper; ub[1] = k1Upper;
-        init[0] = vbInit; init[1] = k1Init;
-        modelfields = {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "1TidCM") {
-        num_tc = 1;
-        sens[0] = true; sens[1] = true; sens[3] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[3] = tdLower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[3] = tdUpper;
-        init[0] = vbInit; init[1] = k1Init; init[3] = tdInit;
-        modelfields = {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "2TCM") {
-        num_tc = 2;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[4] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[4] = k4Lower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[4] = k4Upper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[4] = k4Init;
-        modelfields = {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "2dTCM") {
-        num_tc = 2;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[4] = true; sens[5] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[4] = k4Lower; lb[5] = tdLower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[4] = k4Upper; ub[5] = tdUpper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[4] = k4Init; init[5] = tdInit;
-        modelfields = {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "2TiCM") {
-        num_tc = 2;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init;
-        modelfields = {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else if (modelID == "2TidCM") {
-        num_tc = 2;
-        sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[5] = true;
-        lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[5] = tdLower;
-        ub[0] = vbUpper; ub[1] = k1Upper; ub[2] = k2Upper; ub[3] = k3Upper; ub[5] = tdUpper;
-        init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[5] = tdInit;
-        modelfields = {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
-    }
-    else {
-        std::cerr << "Unknown model ID: " << modelID << std::endl;
-        return;
-    }
-    TCMWorker* worker = new TCMWorker(
-        logic,
-        this->PET_flatten_values,
-        Cp_flatten,
-        framing_flatten,
-        init,
-        lb,
-        ub,
-        sens,
-        dk,
-        timestep,
-        pbrp,
-        maxiter,
-        num_tc,
-        QString::fromStdString(modelID),
-        this->stopRequested,
-        wgt,
-        numThreads
-    );
-    this->ProgressBar->setFormat("Fitting " + QString::fromStdString(modelID) + " (%p%)");
-    this->ProgressBar->setVisible(true);
-    this->ProgressBar->setMinimum(0);
-    this->ProgressBar->setMaximum(100);
-    this->ProgressBar->setValue(0);
+  TCMWorker* worker = new TCMWorker(
+    logic,
+    this->PET_flatten_values,  // voxels
+    Cp_flatten,
+    framing_flatten,
+    modelsTCMImgID,            // vector<string> of model IDs
+    vbInit, vbLower, vbUpper,
+    k1Init, k1Lower, k1Upper,
+    k2Init, k2Lower, k2Upper,
+    k3Init, k3Lower, k3Upper,
+    k4Init, k4Lower, k4Upper,
+    tdInit, tdLower, tdUpper,
+    dk,
+    timestep,
+    pbrp,
+    maxiter,
+    this->stopRequested,
+    wgt,
+    numThreads
+  );
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(100);
+  this->ProgressBar->setValue(0);
 
-    this->stopButton->setVisible(true);
-    this->stopButton->show();
+  QObject::connect(worker, &TCMWorker::modelStarted, this, [this](const QString& modelID){
+      this->ProgressBar->setFormat("Fitting " + modelID + " (%p%)");
+      this->ProgressBar->setVisible(true);
+      this->ProgressBar->setValue(0);
+      this->stopButton->setVisible(true);
+      this->stopButton->show();
+  });
 
-    QObject::connect(worker, &TCMWorker::progressChanged, this, [=](int value){
-        this->ProgressBar->setValue(value);
-    });
+  QObject::connect(worker, &TCMWorker::progressChanged, this, [this](int value){
+      this->ProgressBar->setValue(value);
+  });
 
-    QObject::connect(worker, &TCMWorker::canceled, this, [=](const QString& modelID){
-        this->ProgressBar->setVisible(false);
-        this->stopButton->setVisible(false);
-        worker->deleteLater();
-    });
+  QObject::connect(worker, &TCMWorker::canceled, this, [this, worker](const QString& modelID){
+      this->ProgressBar->setVisible(false);
+      this->stopButton->setVisible(false);
+  });
 
-    QObject::connect(worker, &TCMWorker::finishedProcessing,
-      this, [=](const QString& modelID, const std::vector<TCMParameters>& results) {
-        this->TCMImgOutcomes[modelID.toStdString()] = results;
+  QObject::connect(worker, &TCMWorker::finishedProcessing,
+    this, [this, logic, worker](const QString& modelID){//, const std::vector<TCMParameters>& results) {
+      this->TCMImgOutcomes[modelID.toStdString()] = std::move(worker->results);
 
-        this->ProgressBar->setVisible(false);
-        this->stopButton->setVisible(false);
+      auto getModelfields = [](const std::string& modelID) -> std::vector<std::string> {
+          if (modelID == "1TCM")
+              return {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "1TdCM")
+              return {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "1TiCM")
+              return {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "1TidCM")
+              return {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "2TCM")
+              return {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "2dTCM")
+              return {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "2TiCM")
+              return {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
+          else if (modelID == "2TidCM")
+              return {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
+          else
+              return {}; // unknown model
+      };
 
-        logic->CreateTCMParametricImages(
-            this->TCMImgOutcomes[modelID.toStdString()],
-            this->PETdims,
-            modelfields,
-            modelID.toStdString(),
-            this->petNode,
-            this->SubjectHierarchyNode,
-            this->petID
-        );
+      auto modelfields = getModelfields(modelID.toStdString());
 
-        worker->deleteLater();
-    });
+      logic->CreateTCMParametricImages(
+          this->TCMImgOutcomes[modelID.toStdString()],
+          this->PETdims,
+          modelfields,
+          modelID.toStdString(),
+          this->petNode,
+          this->SubjectHierarchyNode,
+          this->petID
+      );
+  });
 
-    connect(this->stopButton, &QPushButton::clicked, this, [=](){
-        this->stopRequested = true;
-    });
+  connect(this->stopButton, &QPushButton::clicked, this, [this](){
+      this->stopRequested = true;
+  });
 
-    worker->start();
+  QObject::connect(worker, &TCMWorker::finishedAll, this, [this, worker](){
+      this->ProgressBar->setVisible(false);
+      this->stopButton->setVisible(false);
+      worker->deleteLater();
+  });
 
-    if (this->stopRequested) {
-      break;
-    }
-  }
+  worker->start();
+
 }
 
 void qSlicerKMAPModuleWidget::onFITMTGAbutton()

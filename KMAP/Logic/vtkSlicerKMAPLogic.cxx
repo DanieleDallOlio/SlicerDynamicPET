@@ -2742,6 +2742,25 @@ void vtkSlicerKMAPLogic::callTCMImg(
     #endif
 
 
+    int N = 10000000;
+    std::vector<double> a(N, 1.234567);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    #pragma omp parallel for schedule(static)
+    for(int i=0;i<N;++i){
+        double x = a[i];
+        // heavy-ish FP work to force vectorization
+        for (int k=0;k<100;++k) {
+            x = x*1.0000001 + 0.1234567;
+            x = x / 1.0000003 + x*0.000001;
+        }
+        a[i] = x;
+    }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double sec = std::chrono::duration<double>(t1-t0).count();
+    std::cout << "threads="<<numThreads<<" time="<<sec<<" s\n";
+
+
+
     // ---------- 1) Weights ----------
     std::vector<double> wt(Nframe, 1.0);
     if (wgt_global) wt = *wgt_global;
@@ -2820,7 +2839,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
         #endif
         for (int v = 0; v < Nvox; ++v) {
             if ((stopCallback && stopCallback()) || stopRequested) {
-              v = Nvox;
+              // v = Nvox;
               continue;
             }
 

@@ -492,8 +492,9 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     this->ModelsMTGACheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsMTGAChanged()));
-    this->ModelsCheckLayoutMTGAImg->addWidget(cb);
-    QObject::connect(cb, SIGNAL(stateChanged(int)),
+    QCheckBox* cb2 = new QCheckBox(name, this->ModelsMTGACheckContents);
+    this->ModelsCheckLayoutMTGAImg->addWidget(cb2);
+    QObject::connect(cb2, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsMTGAImgChanged()));
   }
 
@@ -503,8 +504,9 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     this->ModelsCheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsChanged()));
-    this->ModelsCheckLayoutTCMImg->addWidget(cb);
-    QObject::connect(cb, SIGNAL(stateChanged(int)),
+    QCheckBox* cb2 = new QCheckBox(name, this->ModelsCheckContents);
+    this->ModelsCheckLayoutTCMImg->addWidget(cb2);
+    QObject::connect(cb2, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsTCMImgChanged()));
   }
 

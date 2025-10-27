@@ -297,29 +297,29 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   #endif
 
   // TCM params
-  this->setDoubleField(this->k1Initial, 0.0, 5.0, 6);
-  this->setDoubleField(this->k1Lower,   0.0, 5.0, 6);
-  this->setDoubleField(this->k1Upper,   0.0, 5.0, 6);
+  this->setDoubleField(this->k1Initial, 0.0, 10.0, 6);
+  this->setDoubleField(this->k1Lower,   0.0, 10.0, 6);
+  this->setDoubleField(this->k1Upper,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k2Initial, 0.0, 2.0, 6);
-  this->setDoubleField(this->k2Lower,   0.0, 2.0, 6);
-  this->setDoubleField(this->k2Upper,   0.0, 2.0, 6);
+  this->setDoubleField(this->k2Initial, 0.0, 10.0, 6);
+  this->setDoubleField(this->k2Lower,   0.0, 10.0, 6);
+  this->setDoubleField(this->k2Upper,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k3Initial, 0.0, 2.0, 6);
-  this->setDoubleField(this->k3Lower,   0.0, 2.0, 6);
-  this->setDoubleField(this->k3Upper,   0.0, 2.0, 6);
+  this->setDoubleField(this->k3Initial, 0.0, 10.0, 6);
+  this->setDoubleField(this->k3Lower,   0.0, 10.0, 6);
+  this->setDoubleField(this->k3Upper,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k4Initial, 0.0, 1.0, 6);
-  this->setDoubleField(this->k4Lower,   0.0, 1.0, 6);
-  this->setDoubleField(this->k4Upper,   0.0, 1.0, 6);
+  this->setDoubleField(this->k4Initial, 0.0, 10.0, 6);
+  this->setDoubleField(this->k4Lower,   0.0, 10.0, 6);
+  this->setDoubleField(this->k4Upper,   0.0, 10.0, 6);
 
   this->setDoubleField(this->vbInitial, 0.0, 1.0, 6);
   this->setDoubleField(this->vbLower,   0.0, 1.0, 6);
   this->setDoubleField(this->vbUpper,   0.0, 1.0, 6);
 
-  this->setDoubleField(this->tdInitial, -10.0, 120.0, 3);
-  this->setDoubleField(this->tdLower,   -10.0, 120.0, 3);
-  this->setDoubleField(this->tdUpper,   -10.0, 120.0, 3);
+  this->setDoubleField(this->tdInitial, -10.0, 600., 3);
+  this->setDoubleField(this->tdLower,   -10.0, 600., 3);
+  this->setDoubleField(this->tdUpper,   -10.0, 600., 3);
 
   this->setDoubleField(this->decayConstEdit, 1e-6, 10.0, 10);
   this->setDoubleField(this->timeStepEdit,   0.001, 60.0, 6);
@@ -331,29 +331,29 @@ void qSlicerKMAPModuleWidgetPrivate::init()
   this->setIntField(this->maxIterTCMEdit, 1, 100000);
 
   // TCM imaging params
-  this->setDoubleField(this->k1InitialImg, 0.0, 5.0, 6);
-  this->setDoubleField(this->k1LowerImg,   0.0, 5.0, 6);
-  this->setDoubleField(this->k1UpperImg,   0.0, 5.0, 6);
+  this->setDoubleField(this->k1InitialImg, 0.0, 10.0, 6);
+  this->setDoubleField(this->k1LowerImg,   0.0, 10.0, 6);
+  this->setDoubleField(this->k1UpperImg,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k2InitialImg, 0.0, 2.0, 6);
-  this->setDoubleField(this->k2LowerImg,   0.0, 2.0, 6);
-  this->setDoubleField(this->k2UpperImg,   0.0, 2.0, 6);
+  this->setDoubleField(this->k2InitialImg, 0.0, 10.0, 6);
+  this->setDoubleField(this->k2LowerImg,   0.0, 10.0, 6);
+  this->setDoubleField(this->k2UpperImg,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k3InitialImg, 0.0, 2.0, 6);
-  this->setDoubleField(this->k3LowerImg,   0.0, 2.0, 6);
-  this->setDoubleField(this->k3UpperImg,   0.0, 2.0, 6);
+  this->setDoubleField(this->k3InitialImg, 0.0, 10.0, 6);
+  this->setDoubleField(this->k3LowerImg,   0.0, 10.0, 6);
+  this->setDoubleField(this->k3UpperImg,   0.0, 10.0, 6);
 
-  this->setDoubleField(this->k4InitialImg, 0.0, 1.0, 6);
-  this->setDoubleField(this->k4LowerImg,   0.0, 1.0, 6);
-  this->setDoubleField(this->k4UpperImg,   0.0, 1.0, 6);
+  this->setDoubleField(this->k4InitialImg, 0.0, 10.0, 6);
+  this->setDoubleField(this->k4LowerImg,   0.0, 10.0, 6);
+  this->setDoubleField(this->k4UpperImg,   0.0, 10.0, 6);
 
   this->setDoubleField(this->vbInitialImg, 0.0, 1.0, 6);
   this->setDoubleField(this->vbLowerImg,   0.0, 1.0, 6);
   this->setDoubleField(this->vbUpperImg,   0.0, 1.0, 6);
 
-  this->setDoubleField(this->tdInitialImg, -10.0, 120.0, 3);
-  this->setDoubleField(this->tdLowerImg,   -10.0, 120.0, 3);
-  this->setDoubleField(this->tdUpperImg,   -10.0, 120.0, 3);
+  this->setDoubleField(this->tdInitialImg, -10.0, 600.0, 3);
+  this->setDoubleField(this->tdLowerImg,   -10.0, 600.0, 3);
+  this->setDoubleField(this->tdUpperImg,   -10.0, 600.0, 3);
 
   this->setDoubleField(this->decayConstEditImg, 1e-6, 10.0, 10);
   this->setDoubleField(this->timeStepEditImg,   0.001, 60.0, 6);

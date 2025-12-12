@@ -32,7 +32,7 @@ if (MSVC)
 
   set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${EXTRA_OPT_FLAGS}")
 
-elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
   # Base optimization flags for GCC/Clang
   set(EXTRA_OPT_FLAGS "-O3 -march=native -ffast-math -funroll-loops -flto")
 

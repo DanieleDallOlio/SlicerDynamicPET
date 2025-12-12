@@ -24,11 +24,15 @@ public:
   static SegmentationChangeWatcher* New();
   vtkTypeMacro(SegmentationChangeWatcher, vtkObject);
 
+  SegmentationChangeWatcher();
+  ~SegmentationChangeWatcher() override;
+
+  void Clear(); 
+
   // Attach to one segmentation node
   void ObserveSegmentationNode(vtkMRMLSegmentationNode* segNode);
 
 protected:
-  SegmentationChangeWatcher();
 
   // Called when a segment geometry is modified
   static void OnSegmentationChanged(vtkObject* caller,

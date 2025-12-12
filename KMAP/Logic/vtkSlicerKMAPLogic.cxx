@@ -186,19 +186,8 @@ void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
   vtkMRMLSequenceNode* segSequenceNode = sequenceBrowserPETNode->GetSequenceNode(segNode);
   if (!segSequenceNode)
   {
-    segSequenceNode = vtkMRMLSequenceNode::New();
-    segSequenceNode->SetName(shNode->GetItemName(segID).c_str());
-    scene->AddNode(segSequenceNode);
-    sequenceBrowserPETNode->AddProxyNode(segNode, segSequenceNode, false);
-  }
-  std::string indexValue;
-  sequenceBrowserPETNode->SetSaveChanges(segSequenceNode, true);
-  for (int i = 0; i < numberOfTimepoints; ++i) {
-    indexValue = sequencePETNode->GetNthIndexValue(i);
-    if (!segSequenceNode->GetDataNodeAtValue(indexValue))
-    {
-      segSequenceNode->SetDataNodeAtValue(segNode, indexValue);
-    }
+    std::cerr << "Could not find sequence for the segmentation PET." << std::endl;
+    return;
   }
 
   // Get TAC

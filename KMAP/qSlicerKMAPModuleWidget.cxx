@@ -1996,41 +1996,6 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->SegWatcher->RunPlot = [this]() { this->onPlotbutton(); };
   this->SegWatcher->GetCurrentSegID = [this]() { return this->SubjectHierarchyNode->GetItemName(this->segID); };
 
-  // Observe all existing segmentation nodes
-  // int n_segnodes = this->mrmlScene()->GetNumberOfNodesByClass("vtkMRMLSegmentationNode");
-  // for (int i=0; i < n_segnodes; ++i)
-  // {
-  //   auto* segNode = vtkMRMLSegmentationNode::SafeDownCast(
-  //       this->mrmlScene()->GetNthNodeByClass(i, "vtkMRMLSegmentationNode"));
-  //   if (!segNode) {
-  //     continue;
-  //   }
-  //   this->SegWatcher->ObserveSegmentationNode(segNode);
-  // }
-
-  // // Also watch future nodes
-  // vtkSmartPointer<vtkCallbackCommand> sceneAddObserver = vtkSmartPointer<vtkCallbackCommand>::New();
-  // sceneAddObserver->SetClientData(this);
-  // sceneAddObserver->SetCallback([](vtkObject* caller,
-  //                                  unsigned long eid,
-  //                                  void* clientData,
-  //                                  void* callData)
-  // {
-  //   auto* self = reinterpret_cast<qSlicerKMAPModuleWidget*>(clientData);
-  //   vtkMRMLScene* scene = vtkMRMLScene::SafeDownCast(caller);
-  //   vtkMRMLNode* node = reinterpret_cast<vtkMRMLNode*>(callData);
-  //
-  //   if (scene && node)
-  //   {
-  //     if (auto* segNode = vtkMRMLSegmentationNode::SafeDownCast(node))
-  //     {
-  //       self->SegWatcher->ObserveSegmentationNode(segNode);
-  //     }
-  //   }
-  // });
-  //
-  // this->mrmlScene()->AddObserver(vtkMRMLScene::NodeAddedEvent, sceneAddObserver);
-
 }
 
 void qSlicerKMAPModuleWidget::getDurations()
@@ -2059,7 +2024,25 @@ void qSlicerKMAPModuleWidget::getDurations()
   this->petNode = petNode;
 
   ctkDICOMDatabase* db = qSlicerApplication::application()->dicomDatabase();
-  QString instanceUID = petNode->GetAttribute("DICOM.instanceUIDs");
+
+  vtkIdType shItemID = shNode->GetItemByDataNode(petNode);
+  if (shItemID == vtkMRMLSubjectHierarchyNode::GetInvalidItemID())
+  {
+    qWarning() << "No SH item for PET node\n!";
+  }
+  std::string uidListString = shNode->GetItemUID(
+    shItemID,
+    vtkMRMLSubjectHierarchyConstants::GetDICOMInstanceUIDName()
+  );
+  std::vector<std::string> uidVector;
+  vtkMRMLSubjectHierarchyNode::DeserializeUIDList(uidListString, uidVector);
+  if (uidVector.empty())
+  {
+      qWarning() << "No DICOMInstanceUID found for PET node!";
+      return;
+  }
+  QString instanceUID = QString::fromStdString(uidVector[0]);
+
   QString seriesUID = db->seriesForFile(db->fileForInstance(instanceUID));
   QStringList fileList = db->filesForSeries(seriesUID);
 
@@ -2193,6 +2176,8 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
 
 void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
+  this->durations.clear();
+  this->timePoints.clear();
   this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
 
   this->sequencePETNode = nullptr;
@@ -2359,25 +2344,30 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   }
   logic->setupSeg(segNode);
 
-  // Setup the right sequence for the segmentation
-  this->segSequenceNode = this->sequenceBrowserPETNode->GetSequenceNode(segNode);
-  if (!segSequenceNode)
+
+  vtkMRMLSequenceNode* seqNode =
+    this->sequenceBrowserPETNode->GetSequenceNode(segNode);
+  if (!seqNode)
   {
-    this->segSequenceNode = vtkMRMLSequenceNode::New();
-    this->segSequenceNode->SetName(shNode->GetItemName(segID).c_str());
-    scene->AddNode(this->segSequenceNode);
-    this->sequenceBrowserPETNode->AddProxyNode(segNode, this->segSequenceNode, false);
+    vtkSmartPointer<vtkMRMLSequenceNode> newSeqNode =
+      vtkSmartPointer<vtkMRMLSequenceNode>::New();
+    newSeqNode->SetName(shNode->GetItemName(segID).c_str());
+    scene->AddNode(newSeqNode);
+    this->sequenceBrowserPETNode->AddProxyNode(segNode, newSeqNode, false);
+    this->sequenceBrowserPETNode->SetSaveChanges(newSeqNode, true);
     std::string indexValue;
-    this->sequenceBrowserPETNode->SetSaveChanges(this->segSequenceNode, true);
-    for (int i = 0; i < this->numberOfTimepoints; ++i) {
+    for (int i = 0; i < this->numberOfTimepoints; ++i)
+    {
       indexValue = this->sequencePETNode->GetNthIndexValue(i);
-      if (!this->segSequenceNode->GetDataNodeAtValue(indexValue))
+      if (!newSeqNode->GetDataNodeAtValue(indexValue))
       {
-        this->segSequenceNode->SetDataNodeAtValue(segNode, indexValue);
+        newSeqNode->SetDataNodeAtValue(segNode, indexValue);
       }
     }
     this->SegWatcher->ObserveSegmentationNode(segNode);
+    seqNode = newSeqNode;
   }
+  this->segSequenceNode = seqNode;
 
   d->populateSegmentCheckboxes(this->segID);
   this->enableTACbutton();
@@ -2404,6 +2394,7 @@ void qSlicerKMAPModuleWidget::onSegmentsChanged()
 
 void qSlicerKMAPModuleWidget::clearTACdata() {
   Q_D(qSlicerKMAPModuleWidget);
+  this->RemoveExistingPlotChartAndTable();
   this->segmentTACs.clear();
   this->segmentTACsnames.clear();
   d->populatePlotSegmentCheckboxes();
@@ -2422,7 +2413,6 @@ void qSlicerKMAPModuleWidget::clearTACdata() {
   }
   d->direxcel->setCurrentPath(QString::fromStdString(""));
   d->saveExcelButton->setEnabled(false);
-  this->RemoveExistingPlotChartAndTable();
   return;
 }
 
@@ -2500,25 +2490,47 @@ vtkMRMLPlotChartNode* qSlicerKMAPModuleWidget::GetOrCreatePlotChart()
 
 void qSlicerKMAPModuleWidget::RemoveExistingPlotChartAndTable()
 {
-  vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
-    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
-  if (tableNode)
-    this->mrmlScene()->RemoveNode(tableNode);
+  this->MapPlotSeriesNodeIDToPlot.clear();
+  this->ColNameToSegmentID.clear();
+  this->PlotSelectedFrame = -1;
+  this->PlotSelectedVOI.clear();
+  this->lastSelection.clear();
 
   vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
     this->mrmlScene()->GetFirstNodeByName("KMAP.PlotChart"));
   if (chartNode)
   {
+    vtkCollection* viewNodes = this->mrmlScene()->GetNodesByClass("vtkMRMLPlotViewNode");
+    if (viewNodes)
+    {
+      for (int i = 0; i < viewNodes->GetNumberOfItems(); ++i)
+      {
+        vtkMRMLPlotViewNode* viewNode = vtkMRMLPlotViewNode::SafeDownCast(
+          viewNodes->GetItemAsObject(i));
+        if (viewNode && viewNode->GetPlotChartNodeID() &&
+            std::string(viewNode->GetPlotChartNodeID()) == chartNode->GetID())
+        {
+          viewNode->SetPlotChartNodeID(nullptr);
+        }
+      }
+      viewNodes->Delete();
+    }
+
     std::vector<std::string> seriesIDs;
     chartNode->GetPlotSeriesNodeIDs(seriesIDs);
+    this->mrmlScene()->RemoveNode(chartNode);
     for (const std::string& id : seriesIDs)
     {
       vtkMRMLNode* node = this->mrmlScene()->GetNodeByID(id);
       if (node)
         this->mrmlScene()->RemoveNode(node);
     }
-    this->mrmlScene()->RemoveNode(chartNode);
   }
+
+  vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
+    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
+  if (tableNode)
+    this->mrmlScene()->RemoveNode(tableNode);
 }
 
 void qSlicerKMAPModuleWidget::onTACbutton()

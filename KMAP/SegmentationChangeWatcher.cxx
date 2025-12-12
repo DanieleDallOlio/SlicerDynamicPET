@@ -7,6 +7,39 @@
 
 vtkStandardNewMacro(SegmentationChangeWatcher);
 
+SegmentationChangeWatcher::~SegmentationChangeWatcher()
+{
+  this->Clear();
+}
+
+void SegmentationChangeWatcher::Clear()
+{
+  // Remove segmentation-level observers
+  for (auto& kv : this->SegTags)
+  {
+    vtkSegmentation* seg = kv.first;
+    unsigned long tag = kv.second;
+    if (seg)
+    {
+      seg->RemoveObserver(tag);
+    }
+  }
+  this->SegTags.clear();
+
+  // Remove SegmentationNode-level observers
+  for (auto* node : this->ObservedNodes)
+  {
+    if (node)
+    {
+      node->RemoveObserver(this->Callback);
+    }
+  }
+  this->ObservedNodes.clear();
+
+  // Clear lookup map
+  this->SegToNode.clear();
+}
+
 SegmentationChangeWatcher::SegmentationChangeWatcher()
 {
   this->Callback = vtkSmartPointer<vtkCallbackCommand>::New();
@@ -59,7 +92,20 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
   auto* segmentation = vtkSegmentation::SafeDownCast(caller);
   if (segmentation)
   {
-      segNode = self->SegToNode[segmentation];
+      auto it = self->SegToNode.find(segmentation);
+      if (it == self->SegToNode.end())
+      {
+        // We don't know this segmentation → nothing to do
+        return;
+      }
+      vtkMRMLSegmentationNode* segNodeCandidate = it->second.GetPointer();
+      if (!segNodeCandidate)
+      {
+        // Owning node was deleted
+        return;
+      }
+
+      segNode = segNodeCandidate;
       if (callData)
           segmentId = static_cast<const char*>(callData);
   }
@@ -70,11 +116,13 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
       return;
   }
 
+  if (!segNode || segmentId.empty())
+  {
+    return;
+  }
+
   if (self->GetCurrentSegID() != segNode->GetName())
     return;
-
-  if (!segNode || segmentId.empty())
-      return;
 
   // Get the current frame index in the sequence
   int frameIndex = -1;

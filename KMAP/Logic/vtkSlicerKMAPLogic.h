@@ -82,13 +82,13 @@ struct VoxelStatistics
 
 struct MTGAParameters
 {
-  double Ki = 0.;
-  double Intercept = 0.;
-  double DV = 0;
-  double AIC = 0;
-  double MASE = 0;
-  double R2 = 0;
-  double chi2 = 0.;
+  double Ki = std::numeric_limits<double>::quiet_NaN();
+  double Intercept = std::numeric_limits<double>::quiet_NaN();
+  double DV = std::numeric_limits<double>::quiet_NaN();
+  double AIC = std::numeric_limits<double>::quiet_NaN();
+  double MASE = std::numeric_limits<double>::quiet_NaN();
+  double R2 = std::numeric_limits<double>::quiet_NaN();
+  double chi2 = std::numeric_limits<double>::quiet_NaN();
   int dof = 0;
   std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
@@ -97,19 +97,19 @@ struct MTGAParameters
 
 struct TCMParameters
 {
-  double K1 = 0.;
-  double k2 = 0.;
-  double k3 = 0.;
-  double k4 = 0.;
-  double vb = 0.;
-  double td = 0.;
-  double Ki = 0.;
-  double DV = 0.;
-  double AIC = 0.;
-  double MASE = 0.;
-  double BIC = 0.;
-  double chi2 = 0.;
-  double loglik = 0;
+  double K1 = std::numeric_limits<double>::quiet_NaN();
+  double k2 = std::numeric_limits<double>::quiet_NaN();
+  double k3 = std::numeric_limits<double>::quiet_NaN();
+  double k4 = std::numeric_limits<double>::quiet_NaN();
+  double vb = std::numeric_limits<double>::quiet_NaN();
+  double td = std::numeric_limits<double>::quiet_NaN();
+  double Ki = std::numeric_limits<double>::quiet_NaN();
+  double DV = std::numeric_limits<double>::quiet_NaN();
+  double AIC = std::numeric_limits<double>::quiet_NaN();
+  double MASE = std::numeric_limits<double>::quiet_NaN();
+  double BIC = std::numeric_limits<double>::quiet_NaN();
+  double chi2 = std::numeric_limits<double>::quiet_NaN();
+  double loglik = std::numeric_limits<double>::quiet_NaN();
   int dof = 0;
   std::vector<double> weights, r;
   std::vector<bool> keep;

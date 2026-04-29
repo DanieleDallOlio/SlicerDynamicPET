@@ -89,7 +89,6 @@ public:
   void enter() override;
   void exit() override;
   void setMRMLScene(vtkMRMLScene* scene) override;
-  void getDurations();
   void clearTACdata();
   void clearFITdata();
   void clearFITMTGAdata();
@@ -115,6 +114,7 @@ public slots:
   void onPatChanged(int index);
   void onStuChanged(int index);
   void onCTChanged(int index);
+  void resetPETSelection();
   void onPETChanged(int index);
   void onSegChanged(int index);
   void onSegmentsChanged();
@@ -204,12 +204,12 @@ private:
   QProgressBar* ProgressBar;
   QPushButton* stopButton;
   std::atomic<bool> stopRequested;
-  std::vector<double> timePoints, durations;
+  std::vector<double> timePoints, durations, suvFactors;
   QStringList checkboxNames, ModelsNamesTCM, ModelsNamesMTGA, StatsNames;
   std :: string IFID, plotTCMVOI, plotMTGAVOI, plotMTGAModel;
   std :: vector < std :: string > VOIsegmentIDs, VOIMTGAsegmentIDs, modelsID, modelsMTGAID, modelsMTGAImgID, modelsTCMImgID;
   int PlotSelectedFrame;
-  std :: string PlotSelectedVOI;
+  std :: string PlotSelectedVOI, dPETvalueType;
   KeyPressWatcher* keyWatcher{nullptr};
   QSet<QPair<QString, vtkIdType>> lastSelection;
   std::unordered_map<std::string, std::string> ColNameToSegmentID;

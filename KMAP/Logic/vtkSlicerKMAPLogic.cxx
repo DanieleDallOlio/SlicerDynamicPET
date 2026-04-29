@@ -40,6 +40,25 @@
     #endif
 #endif
 
+static double median(std::vector<double> v){
+    size_t n=v.size();
+    std::nth_element(v.begin(), v.begin()+n/2, v.end());
+    double m=v[n/2];
+    if(n%2==0){
+        auto it=std::max_element(v.begin(), v.begin()+n/2);
+        m=0.5*(m+*it);
+    }
+    return m;
+}
+
+static bool check_if_constant(const std::vector<double>& x, const double thres = 0.001){
+    if(x.size()<2) return true;
+    double c = median(x);              // robust center
+    double maxdev = 0.0;
+    for(double v: x) maxdev = std::max(maxdev, std::abs(v - c));
+    return maxdev < thres;
+}
+
 static double norm_cdf(double x)
 {
     return 0.5 * std::erfc(-x / std::sqrt(2.0));
@@ -568,10 +587,10 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
                       fitted_params,
                       fitted_curve
                       );
-    params.vb = fitted_params[0];
-    params.K1 = fitted_params[1];
-    params.k2 = fitted_params[2];
-    params.td = fitted_params[3];
+    params.vb = sens[0] ? fitted_params[0] : std::numeric_limits<double>::quiet_NaN();
+    params.K1 = sens[1] ? fitted_params[1] : std::numeric_limits<double>::quiet_NaN();
+    params.k2 = sens[2] ? fitted_params[2] : std::numeric_limits<double>::quiet_NaN();
+    params.td = sens[3] ? fitted_params[3] : std::numeric_limits<double>::quiet_NaN();
     params.Ki = params.K1;
     params.DV = params.K1/(params.k2 + 1e-16);
     params.weights.assign(wt, wt + Nframe);
@@ -612,12 +631,12 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
                       fitted_params,
                       fitted_curve
                       );
-    params.vb = fitted_params[0];
-    params.K1 = fitted_params[1];
-    params.k2 = fitted_params[2];
-    params.k3 = fitted_params[3];
-    params.k4 = fitted_params[4];
-    params.td = fitted_params[5];
+    params.vb = sens[0] ? fitted_params[0] : std::numeric_limits<double>::quiet_NaN();
+    params.K1 = sens[1] ? fitted_params[1] : std::numeric_limits<double>::quiet_NaN();
+    params.k2 = sens[2] ? fitted_params[2] : std::numeric_limits<double>::quiet_NaN();
+    params.k3 = sens[3] ? fitted_params[3] : std::numeric_limits<double>::quiet_NaN();
+    params.k4 = sens[4] ? fitted_params[4] : std::numeric_limits<double>::quiet_NaN();
+    params.td = sens[5] ? fitted_params[5] : std::numeric_limits<double>::quiet_NaN();
     params.Ki = params.K1 * params.k3 / (params.k2 + params.k3);
     params.DV = params.K1/(params.k2 + 1e-16) * (1 + params.k3/(params.k4 + 1e-16));
     params.weights.assign(wt, wt + Nframe);
@@ -2693,6 +2712,29 @@ void vtkSlicerKMAPLogic::CreateMTGAParametricImages(
 }
 
 
+static volatile double sink = 0.0;
+
+void bench_exp_strict()
+{
+  const int N = 20'000'000;
+  double x = -0.001;
+
+  auto t0 = std::chrono::high_resolution_clock::now();
+
+  double acc = 0.0;
+  for (int i = 0; i < N; ++i) {
+    // vary input to prevent constant folding and SIMD tricks
+    x += 1e-9 * (i & 1023);
+    double y = std::exp(x);
+    acc += y;
+  }
+
+  auto t1 = std::chrono::high_resolution_clock::now();
+  sink = acc; // force side-effect
+
+  double sec = std::chrono::duration<double>(t1 - t0).count();
+  std::cout << "exp() strict throughput: " << (N / sec) << " calls/sec, sink=" << sink << "\n";
+}
 
 void vtkSlicerKMAPLogic::callTCMImg(
     const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
@@ -2716,6 +2758,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
     std::function<bool()> stopCallback /*= nullptr*/
 )
 {
+    bench_exp_strict();
     const double EPS = 1e-12;
     const int Nframe = static_cast<int>(Cp.size());
     const int Nvox = static_cast<int>(voxels.size());
@@ -2775,12 +2818,16 @@ void vtkSlicerKMAPLogic::callTCMImg(
         scant[i][1] = cumsum[i];
         double t = 0.5*(scant[i][0]+scant[i][1]);
         double pbr = pbrp[0]*exp(-pbrp[1]*t/60.0)+pbrp[2];
+        // std :: cout << "Cp[i] = " << Cp[i] << std :: endl;
         cwb[i] = Cp[i]/pbr;
     }
 
     // ---------- 4) Fine-sample ----------
     long int N_cp = 0;
     double* Cp_new  = finesample2(scant, Cp,  N_cp, timestep, "linear");
+    // for (int i = 0; i < N_cp; ++i) {
+    //   std :: cout << "Cp_new[i] = " << Cp_new[i] << std :: endl;
+    // }
     double* cwb_new = finesample2(scant, cwb, N_cp, timestep, "linear");
 
     // ---------- 5) Preallocate output ----------
@@ -2813,6 +2860,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
     const int progressUpdateInterval = std::max(1, Nvox / 200); // ~0.5% updates
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
+    t0 = std::chrono::high_resolution_clock::now();
     #ifdef HAVE_OPENMP
     #pragma omp parallel
     #endif
@@ -2822,69 +2870,119 @@ void vtkSlicerKMAPLogic::callTCMImg(
         std::vector<double> pinit_local(num_par);
         std::vector<int>    psens_local(num_par);
         std::vector<double> fitted_local(Nframe);
-
+        LevmarStats stx;
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
         for (int v = 0; v < Nvox; ++v) {
-            if ((stopCallback && stopCallback()) || stopRequested) {
-              // v = Nvox;
-              continue;
-            }
+            // if ((stopCallback && stopCallback()) || stopRequested) {
+            //   // v = Nvox;
+            //   continue;
+            // }
 
             TCMParameters params;
 
             for (int i = 0; i < Nframe; ++i) cfit_local[i] = voxels[v][i];
-            double* tac_ptr = cfit_local.data();
+            if (check_if_constant(cfit_local)) {
+              // std :: cout << "Constant" << std :: endl;
+              if (n_tc==1) {
+                  params.vb = -1;
+                  params.K1 = -1;
+                  params.k2 = -1;
+                  params.td = -1;
+                  params.Ki = -1;
+                  params.DV = -1;
+              } else if (n_tc==2) {
+                  params.vb = -1;
+                  params.K1 = -1;
+                  params.k2 = -1;
+                  params.k3 = -1;
+                  params.k4 = -1;
+                  params.td = -1;
+                  params.Ki = -1;
+                  params.DV = -1;
+              }
 
-            for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
+              params.r.clear();
+              params.weights = wt;
+              params.keep = keep;
+              params.dof = dof_fixed;
+              //
+              // // // Statistics
+              params.AIC  = std::numeric_limits<double>::quiet_NaN();
+              params.BIC  = std::numeric_limits<double>::quiet_NaN();
+              params.MASE = std::numeric_limits<double>::quiet_NaN();
+              params.chi2 = std::numeric_limits<double>::quiet_NaN();
+              params.loglik = std::numeric_limits<double>::quiet_NaN();
 
-            for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
+              outputParams[v] = std::move(params);
+            } else {
+              double* tac_ptr = cfit_local.data();
 
-            // ---------- Fit voxel ----------
-            KMODEL_T km = km_template;
-            kmap_levmar(tac_ptr, wt.data(), Nframe,
-                        pinit_local.data(), num_par,
-                        &km, tac_eval, jac_eval,
-                        lb, ub, psens_local.data(), maxiter,
-                        fitted_local.data());
+              for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
 
-            // ---------- Fill TCMParameters ----------
-            if (n_tc==1) {
-                params.vb = pinit_local[0];
-                params.K1 = pinit_local[1];
-                params.k2 = pinit_local[2];
-                params.td = pinit_local[3];
-                params.Ki = params.K1;
-                params.DV = params.K1/(params.k2+EPS);
-            } else if (n_tc==2) {
-                params.vb = pinit_local[0];
-                params.K1 = pinit_local[1];
-                params.k2 = pinit_local[2];
-                params.k3 = pinit_local[3];
-                params.k4 = pinit_local[4];
-                params.td = pinit_local[5];
-                params.Ki = params.K1*params.k3/(params.k2+params.k3+EPS);
-                params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
+              for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
+
+              // ---------- Fit voxel ----------
+              KMODEL_T km = km_template;
+              kmap_levmar_stats(
+                  tac_ptr, wt.data(), Nframe,
+                  pinit_local.data(), num_par,
+                  &km, tac_eval, jac_eval,
+                  lb, ub, psens_local.data(), maxiter,
+                  fitted_local.data(),
+                  &stx
+              );
+
+              if (v == 0 || v == 99 || v == 999 || v == 9999) {
+                std::cout
+                  << "v=" << v
+                  << " loops=" << stx.n_loops
+                  << " acc=" << stx.it_accept
+                  << " rej=" << stx.it_reject
+                  << " guard=" << stx.hit_guard
+                  << " nan_ct=" << stx.nan_ct
+                  << " nan_st=" << stx.nan_st
+                  << " last_rho=" << stx.last_rho
+                  << " last_mu=" << stx.last_mu
+                  << "\n";
+              }
+              // ---------- Fill TCMParameters ----------
+              if (n_tc==1) {
+                  params.vb = pinit_local[0];
+                  params.K1 = pinit_local[1];
+                  params.k2 = pinit_local[2];
+                  params.td = pinit_local[3];
+                  params.Ki = params.K1;
+                  params.DV = params.K1/(params.k2+EPS);
+              } else if (n_tc==2) {
+                  params.vb = pinit_local[0];
+                  params.K1 = pinit_local[1];
+                  params.k2 = pinit_local[2];
+                  params.k3 = pinit_local[3];
+                  params.k4 = pinit_local[4];
+                  params.td = pinit_local[5];
+                  params.Ki = params.K1*params.k3/(params.k2+params.k3+EPS);
+                  params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
+              }
+
+              // Residuals
+              params.r.resize(Nframe);
+              for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
+
+              params.weights = wt;
+              params.keep = keep;
+              params.dof = dof_fixed;
+              //
+              // // // Statistics
+              params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
+              params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
+              params.MASE = this->MASE(cfit_local, fitted_local, &wt);
+              params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
+              params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
+
+              outputParams[v] = std::move(params);
             }
-
-            // Residuals
-            params.r.resize(Nframe);
-            for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
-
-            params.weights = wt;
-            params.keep = keep;
-            params.dof = dof_fixed;
-            //
-            // // // Statistics
-            params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
-            params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
-            params.MASE = this->MASE(cfit_local, fitted_local, &wt);
-            params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
-            params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
-
-            outputParams[v] = std::move(params);
-
             // ---------- Progress update ----------
             if (progressCallback) {
                 int done = ++voxProcessed;
@@ -2899,8 +2997,13 @@ void vtkSlicerKMAPLogic::callTCMImg(
                     progressCallback(progress);
                 }
             }
+
         }
     }
+    t1 = std::chrono::high_resolution_clock::now();
+
+    sec = std::chrono::duration<double>(t1-t0).count();
+    std::cout << "elapsed time per call "<<sec/10000<<" s\n";
 
     delete[] Cp_new;
     delete[] cwb_new;

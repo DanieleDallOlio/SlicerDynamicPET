@@ -1998,127 +1998,6 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
 
 }
 
-void qSlicerKMAPModuleWidget::getDurations()
-{
-  if (!this->durations.empty() || !this->timePoints.empty()) {
-    return;
-  }
-
-  Q_D(qSlicerKMAPModuleWidget);
-  vtkMRMLScene* scene = this->mrmlScene();
-  if (!scene) {
-    return;
-  }
-  vtkMRMLSubjectHierarchyNode* shNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
-  if (!shNode)
-  {
-    return;
-  }
-
-  vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(this->petID));
-  if (!petNode) {
-    this->durations.clear();
-    this->timePoints.clear();
-    return;
-  }
-  this->petNode = petNode;
-
-  ctkDICOMDatabase* db = qSlicerApplication::application()->dicomDatabase();
-
-  vtkIdType shItemID = shNode->GetItemByDataNode(petNode);
-  if (shItemID == vtkMRMLSubjectHierarchyNode::GetInvalidItemID())
-  {
-    qWarning() << "No SH item for PET node\n!";
-  }
-  std::string uidListString = shNode->GetItemUID(
-    shItemID,
-    vtkMRMLSubjectHierarchyConstants::GetDICOMInstanceUIDName()
-  );
-  std::vector<std::string> uidVector;
-  vtkMRMLSubjectHierarchyNode::DeserializeUIDList(uidListString, uidVector);
-  if (uidVector.empty())
-  {
-      qWarning() << "No DICOMInstanceUID found for PET node!";
-      return;
-  }
-  QString instanceUID = QString::fromStdString(uidVector[0]);
-
-  QString seriesUID = db->seriesForFile(db->fileForInstance(instanceUID));
-  QStringList fileList = db->filesForSeries(seriesUID);
-
-  if (fileList.empty())
-    throw std::runtime_error(
-        "No files found for " + seriesUID.toStdString()
-    );
-
-  std::map<double, double> timeSorteddurations;
-  for (const QString& file : fileList)
-  {
-    DcmFileFormat fileformat;
-    OFCondition status = fileformat.loadFile(file.toStdString().c_str(), EXS_Unknown, EGL_noChange, DCM_MaxReadLength, ERM_autoDetect);
-
-    if (!status.good())
-    {
-      std::cerr << "Cannot read file: " << file.toStdString() << std::endl;
-      continue;
-    }
-
-    DcmDataset* dataset = fileformat.getDataset();
-
-    // 1. Get acquisition datetime
-    OFString acqTimeStr;
-    if (dataset->findAndGetOFString(DCM_AcquisitionDateTime, acqTimeStr).bad())
-    {
-      std::cerr << "Missing AcquisitionDateTime" << std::endl;
-      continue;
-    }
-
-    // Convert to sortable float seconds since start
-    struct tm tmTime = {};
-    const char* dateTimeCStr = acqTimeStr.c_str();
-    if (!strptime(dateTimeCStr, "%Y%m%d%H%M%S", &tmTime))
-    {
-      std::cerr << "Failed to parse time: " << dateTimeCStr << std::endl;
-      continue;
-    }
-    time_t epochTime = mktime(&tmTime);
-    double timeInSeconds = static_cast<double>(epochTime);
-
-    // 2. Get frame duration
-    double durationSec = -1.0;
-
-    Float64 durVal;
-    if (dataset->findAndGetFloat64(DcmTagKey(0x0018, 0x1242), durVal).good())
-    {
-      durationSec = durVal / 1000.0;
-    }
-    else if (dataset->findAndGetFloat64(DcmTagKey(0x0067, 0x1004), durVal).good())
-    {
-      durationSec = durVal;  // already in seconds
-    }
-    else
-    {
-      std::cerr << "No known duration tag in: " << file.toStdString() << std::endl;
-      continue;
-    }
-
-    timeSorteddurations[timeInSeconds] = durationSec;
-  }
-
-  this->durations.clear();
-  this->timePoints.clear();
-  this->durations.reserve(timeSorteddurations.size());
-  this->timePoints.reserve(timeSorteddurations.size());
-
-  double timealong = 0.0;
-  for (const auto& pair : timeSorteddurations)
-  {
-    timealong += pair.second;
-    this->durations.push_back(pair.second);
-    this->timePoints.push_back(timealong);
-  }
-
-}
 
 
 
@@ -2173,11 +2052,37 @@ void qSlicerKMAPModuleWidget::onCTChanged (int index) {
   this->enableTACbutton();
 }
 
+void qSlicerKMAPModuleWidget::resetPETSelection()
+{
+  Q_D(qSlicerKMAPModuleWidget);
+  this->sequencePETNode = nullptr;
+  this->sequenceBrowserPETNode = nullptr;
+  this->SegWatcher->browser = nullptr;
+
+  this->durations.clear();
+  this->timePoints.clear();
+  this->suvFactors.clear();
+
+  int noneIndex = d->PETSelector->findData(
+    QVariant::fromValue(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID));
+
+  if (noneIndex >= 0)
+  {
+    d->PETSelector->blockSignals(true);
+    d->PETSelector->setCurrentIndex(noneIndex);
+    d->PETSelector->blockSignals(false);
+  }
+
+  this->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  d->populateNodeComboBox(d->SegSelector,
+                          this->stuID,
+                          "vtkMRMLSegmentationNode",
+                          ""
+                          );
+}
 
 void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerKMAPModuleWidget);
-  this->durations.clear();
-  this->timePoints.clear();
   this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
 
   this->sequencePETNode = nullptr;
@@ -2194,48 +2099,146 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   }
   // Fetch PET
   if (this->petID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
-    d->populateNodeComboBox(d->SegSelector,
-                            this->stuID,
-                            "vtkMRMLSegmentationNode",
-                            ""
-                            );
+    this->resetPETSelection();
     return;
   }
   vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(this->petID));
   if (!petNode) {
-    d->populateNodeComboBox(d->SegSelector,
-                            this->stuID,
-                            "vtkMRMLSegmentationNode",
-                            ""
-                            );
+    this->resetPETSelection();
     return;
   }
 
+  const char* loadedBy = petNode->GetAttribute("dPETImporter.LoadedBy");
+  bool proxyIsValid = (loadedBy && std::string(loadedBy) == "dPETImporterPlugin");
+
   // Collect the sequence for the dynamic PET
+  vtkMRMLSequenceNode* foundSeqNode = nullptr;
+  vtkMRMLSequenceBrowserNode* foundBrowser = nullptr;
+
   for (int i = 0; i < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode"); ++i)
   {
-    vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
+    vtkMRMLSequenceBrowserNode* browser =
+      vtkMRMLSequenceBrowserNode::SafeDownCast(
+        scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
+
     if (!browser)
       continue;
 
-    // Check if this browser is using our PET node as a proxy node
     vtkMRMLSequenceNode* seqNode = browser->GetSequenceNode(petNode);
     if (seqNode)
     {
-      this->sequencePETNode = seqNode;
-      this->sequenceBrowserPETNode = browser;
-      this->SegWatcher->browser = browser;
+      foundSeqNode = seqNode;
+      foundBrowser = browser;
+
+      // If proxy was not valid, check sequence
+      if (!proxyIsValid)
+      {
+        const char* seqLoadedBy =
+          seqNode->GetAttribute("dPETImporter.LoadedBy");
+
+        if (!(seqLoadedBy && std::string(seqLoadedBy) == "dPETImporterPlugin"))
+        {
+          QMessageBox::warning(nullptr,
+                               tr("Invalid PET"),
+                               tr("Selected PET was not loaded using dPETImporter."));
+          this->resetPETSelection();
+          return;
+        }
+      }
+
       break;
     }
   }
-  if (!this->sequencePETNode || !this->sequenceBrowserPETNode)
+
+  // If no sequence found → invalid
+  if (!foundSeqNode || !foundBrowser)
   {
     QMessageBox::warning(nullptr,
                          tr("Missing node"),
                          tr("Could not find sequence or browser node for PET."));
+    this->resetPETSelection();
     return;
   }
+
+  // Assign AFTER validation
+  this->sequencePETNode = foundSeqNode;
+  this->sequenceBrowserPETNode = foundBrowser;
+  this->SegWatcher->browser = foundBrowser;
   this->numberOfTimepoints = this->sequencePETNode->GetNumberOfDataNodes();
+
+
+  this->durations.clear();
+  this->timePoints.clear();
+  this->suvFactors.clear();
+
+  double cumulativeTime = 0.0;
+  std::vector<std::string> valueTypes;
+
+  this->durations.reserve(this->numberOfTimepoints);
+  this->timePoints.reserve(this->numberOfTimepoints);
+  this->suvFactors.reserve(this->numberOfTimepoints);
+  valueTypes.reserve(this->numberOfTimepoints);
+
+  for (int i = 0; i < this->numberOfTimepoints; ++i)
+  {
+    vtkMRMLNode* frameNode = this->sequencePETNode->GetNthDataNode(i);
+    vtkMRMLScalarVolumeNode* volNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(frameNode);
+
+    if (!volNode)
+    {
+      QMessageBox::critical(nullptr,
+                            tr("Invalid PET"),
+                            tr("Invalid frame node at index %1").arg(i));
+      this->resetPETSelection();
+      return;
+    }
+
+    const char* durStr = volNode->GetAttribute("dPET.Duration");
+    const char* suvStr = volNode->GetAttribute("dPET.SUVbwFactor");
+    const char* typeStr = volNode->GetAttribute("dPET.ValueType");
+
+    if (!durStr)
+    {
+      QMessageBox::critical(nullptr,
+                            tr("Invalid PET"),
+                            tr("Missing dPET.Duration on frame %1").arg(i));
+      this->resetPETSelection();
+      return;
+    }
+
+    double duration = QString(durStr).toDouble();
+
+    cumulativeTime += duration;
+
+    this->durations.push_back(duration);
+    this->timePoints.push_back(cumulativeTime);
+
+    // SUV
+    this->suvFactors.push_back(suvStr ? QString(suvStr).toDouble() : 0.0);
+
+    // ValueType (safe)
+    if (typeStr)
+      valueTypes.emplace_back(typeStr);
+    else
+    {
+      QMessageBox::critical(nullptr,
+                            tr("Invalid PET"),
+                            tr("Missing dPET.ValueType on frame %1").arg(i));
+      this->resetPETSelection();
+      return;
+    }
+  }
+  std::set<std::string> uniqueTypes(valueTypes.begin(), valueTypes.end());
+  if (uniqueTypes.size() != 1)
+  {
+    QMessageBox::critical(nullptr,
+                          tr("Invalid PET"),
+                          tr("Inconsistent dPET.ValueType across frames."));
+    this->resetPETSelection();
+    return;
+  }
+  this->dPETvalueType = *uniqueTypes.begin();
 
   d->populateNodeComboBox(d->SegSelector,
                           this->stuID,
@@ -2243,7 +2246,6 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
                           ""
                           );
 
-  this->getDurations();
   this->enableTACbutton();
 
   // Get proxy node for current time/frame

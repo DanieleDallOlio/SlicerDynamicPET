@@ -76,6 +76,7 @@ struct VoxelStatistics
   double iqr = 0.0;
   double volume_mm3 = 0.0;
   double volume_cm3 = 0.0;
+  double peak = 0.0;
   bool keep = true;
   bool empty = false;
 };
@@ -113,6 +114,14 @@ struct TCMParameters
   int dof = 0;
   std::vector<double> weights, r;
   std::vector<bool> keep;
+};
+
+
+struct ModelComparisonResult
+{
+  std::string type;
+  // double statistic = std::numeric_limits<double>::quiet_NaN();
+  double p_value = std::numeric_limits<double>::quiet_NaN();
 };
 
 enum class VuongCorrection { None, AIC, BIC };
@@ -189,6 +198,13 @@ public:
                        int k1, int k2,
                        VuongCorrection corr,
                        Tail tail);
+  double boundaryLRTPvalue(double LR, int r_b, int r_i);
+  ModelComparisonResult compareModels(
+      const std::string& modelA,
+      const std::string& modelB,
+      const TCMParameters& m1,
+      const TCMParameters& m2
+  );
   double computeLRTP(const double logLik1, const double logLik2, int df2, int df1);
   double MASE(
          const std::vector<double>& Actual,

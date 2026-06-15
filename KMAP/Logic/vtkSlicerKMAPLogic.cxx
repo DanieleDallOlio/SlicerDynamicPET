@@ -40,6 +40,42 @@
     #endif
 #endif
 
+
+static const std::map<std::string, std::set<std::string>> MODEL_PARAMS = {
+  {"1TiCM",  {"K1", "vb"}},
+  {"1TCM",   {"K1", "k2", "vb"}},
+  {"1TidCM", {"K1", "d", "vb"}},
+  {"1TdCM",  {"K1", "k2", "d", "vb"}},
+  {"2TiCM",  {"K1", "k2", "k3", "vb"}},
+  {"2TCM",   {"K1", "k2", "k3", "k4", "vb"}},
+  {"2TidCM", {"K1", "k2", "k3", "d", "vb"}},
+  {"2TdCM",  {"K1", "k2", "k3", "k4", "d", "vb"}}
+};
+
+static bool isSubset(const std::set<std::string>& a,
+                     const std::set<std::string>& b)
+{
+  return std::includes(b.begin(), b.end(), a.begin(), a.end());
+}
+
+static void countConstraints(const std::set<std::string>& restricted,
+                             const std::set<std::string>& full,
+                             int& r_b,
+                             int& r_i)
+{
+  r_b = 0;
+  r_i = 0;
+
+  for (const auto& p : full)
+  {
+    if (restricted.count(p)) continue;
+
+    if (p == "d") r_i++;
+    else if (!p.empty() && p[0] == 'k') r_b++;
+  }
+}
+
+
 static double median(std::vector<double> v){
     size_t n=v.size();
     std::nth_element(v.begin(), v.begin()+n/2, v.end());
@@ -272,6 +308,8 @@ VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNo
   vtkDataArray* petArray = petImage->GetPointData()->GetScalars();
   vtkDataArray* labelArray = labelmap->GetPointData()->GetScalars();
 
+  int max_ijk[3] = {0,0,0};
+
   for (int z = 0; z < dims[2]; ++z)
   {
     for (int y = 0; y < dims[1]; ++y)
@@ -287,7 +325,12 @@ VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNo
           stats.count++;
           stats.mean += val;
           stats.min = std::min(stats.min, val);
-          stats.max = std::max(stats.max, val);
+          if (val > stats.max) {
+            stats.max = val;
+            max_ijk[0] = x;
+            max_ijk[1] = y;
+            max_ijk[2] = z;
+          }
           values.push_back(val);
         }
       }
@@ -313,7 +356,156 @@ VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNo
     stats.iqr = stats.q3 - stats.q1;
   }
 
+  // ================= SUVPEAK =================
+  // --- 1) Sphere radius (1cc) ---
+  double V_mm3 = 1000.0;
+  double radius_mm = std::cbrt((3.0 * V_mm3) / (4.0 * M_PI));
+
+  int rx = std::ceil(radius_mm / spacing[0]);
+  int ry = std::ceil(radius_mm / spacing[1]);
+  int rz = std::ceil(radius_mm / spacing[2]);
+
+  // --- 2) Compute mean inside sphere ---
+  double sumPeak = 0.0;
+  int countPeak = 0;
+  for (int z = max_ijk[2] - rz; z <= max_ijk[2] + rz; ++z)
+  for (int y = max_ijk[1] - ry; y <= max_ijk[1] + ry; ++y)
+  for (int x = max_ijk[0] - rx; x <= max_ijk[0] + rx; ++x)
+  {
+    if (x < 0 || y < 0 || z < 0 ||
+        x >= dims[0] || y >= dims[1] || z >= dims[2])
+      continue;
+    double dx = (x - max_ijk[0]) * spacing[0];
+    double dy = (y - max_ijk[1]) * spacing[1];
+    double dz = (z - max_ijk[2]) * spacing[2];
+
+    double dist2 = dx*dx + dy*dy + dz*dz;
+    if (dist2 > radius_mm * radius_mm)
+      continue;
+
+    int ijk[3] = {x,y,z};
+    vtkIdType idx = petImage->ComputePointId(ijk);
+
+    int label = static_cast<int>(labelArray->GetComponent(idx, 0));
+    if (label != labelValue)
+      continue;
+
+    double val = petArray->GetComponent(idx, 0);
+
+    sumPeak += val;
+    countPeak++;
+  }
+
+  if (countPeak > 0)
+    stats.peak = sumPeak / countPeak;
+  else
+    stats.peak = std::numeric_limits<double>::quiet_NaN();
+
   return stats;
+}
+
+double vtkSlicerKMAPLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
+{
+  double p = 0.0;
+
+  for (int j = 0; j <= r_b; ++j)
+  {
+    double weight = std::pow(0.5, r_b) * std::tgamma(r_b + 1) /
+                    (std::tgamma(j + 1) * std::tgamma(r_b - j + 1));
+
+    int df = r_i + j;
+
+    double tail = (df == 0)
+        ? (LR <= 0.0 ? 1.0 : 0.0)
+        : (1.0 - chi2_cdf(LR, df));
+
+    p += weight * tail;
+  }
+
+  return std::max(0.0, std::min(1.0, p));
+}
+
+ModelComparisonResult vtkSlicerKMAPLogic::compareModels(
+    const std::string& modelA,
+    const std::string& modelB,
+    const TCMParameters& m1,
+    const TCMParameters& m2
+)
+{
+  ModelComparisonResult res;
+
+  const auto& paramsA = MODEL_PARAMS.at(modelA);
+  const auto& paramsB = MODEL_PARAMS.at(modelB);
+
+  bool A_in_B = isSubset(paramsA, paramsB);
+  bool B_in_A = isSubset(paramsB, paramsA);
+
+  // =====================
+  // CASE 1: NESTED
+  // =====================
+  if (A_in_B || B_in_A)
+  {
+    const std::set<std::string>* restricted;
+    const std::set<std::string>* full;
+
+    double LL_r, LL_f;
+
+    if (A_in_B)
+    {
+      restricted = &paramsA;
+      full = &paramsB;
+      LL_r = m1.loglik;
+      LL_f = m2.loglik;
+    }
+    else
+    {
+      restricted = &paramsB;
+      full = &paramsA;
+      LL_r = m2.loglik;
+      LL_f = m1.loglik;
+    }
+
+    double LR = 2.0 * (LL_f - LL_r);
+    if (LR < 0.0) LR = 0.0;
+
+    int r_b = 0, r_i = 0;
+    countConstraints(*restricted, *full, r_b, r_i);
+
+    res.type = "LRT";
+    res.statistic = LR;
+    res.p_value = this->boundaryLRTPvalue(LR, r_b, r_i);
+
+    return res;
+  }
+
+  // =====================
+  // CASE 2: NON-NESTED
+  // =====================
+  else
+  {
+    // average weights (your current logic)
+    std::vector<double> wgt(m1.weights.size());
+    for (size_t i = 0; i < wgt.size(); ++i)
+      wgt[i] = 0.5 * (m1.weights[i] + m2.weights[i]);
+
+    const std::vector<double>* wgt_ptr = &wgt;
+
+    double p = this->computeVuongP(
+        m1.r,
+        m2.r,
+        wgt_ptr,
+        m1.dof,
+        m2.dof,
+        VuongCorrection::BIC,
+        Tail::TwoSided
+    );
+
+    res.type = "Vuong";
+    res.statistic = std::numeric_limits<double>::quiet_NaN(); // optional
+    res.p_value = p;
+
+    return res;
+  }
 }
 
 void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,

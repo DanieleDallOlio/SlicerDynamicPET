@@ -412,7 +412,7 @@ def DPE_save_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Time(s)", "Duration", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
+            df = pd.DataFrame(data)[["Time(s)", "Duration", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "Peak", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
@@ -1844,7 +1844,7 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
   });
 
   this->checkboxNames = QStringList{
-    "Mean", "Median", "Min", "Max"//, "VoxelCount", "Volume(cc)"
+    "Mean", "Median", "Peak", "Min", "Max"//, "VoxelCount", "Volume(cc)"
   };
   this->ModelsNamesMTGA = QStringList{
     "Patlak", "Logan", "RE"
@@ -1853,7 +1853,7 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
     "1TCM", "1TdCM", "1TiCM", "1TidCM", "2TCM", "2dTCM", "2TiCM", "2TidCM"
   };
   this->StatsNames = QStringList{
-    "Mean", "Median"
+    "Mean", "Median", "Peak"
   };
   this->PlotSelectedFrame = -1;
   this->PlotSelectedVOI = "";
@@ -2692,6 +2692,7 @@ QVariantMap qSlicerKMAPModuleWidget::TACtoPythonDict()
         vsMap["Q1"] = vs.q1;
         vsMap["Q3"] = vs.q3;
         vsMap["IQR"] = vs.iqr;
+        vsMap["Peak"] = vs.peak;
         vsMap["Volume(mm3)"] = vs.volume_mm3;
         vsMap["Volume(cm3)"] = vs.volume_cm3;
 
@@ -3141,6 +3142,12 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
             // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
             //   statErrArray->InsertNextValue(vs.iqr);
           }
+          else if (statName == "Peak")
+          {
+            value = vs.peak;
+            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+            //   statErrArray->InsertNextValue(vs.iqr);
+          }
           else if (statName == "VoxelCount") value = vs.count;
           else if (statName == "Min")        value = vs.min;
           else if (statName == "Max")        value = vs.max;
@@ -3162,6 +3169,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
                 x1 = this->timePoints[next_ivs];
                 if (statName == "Mean") nextValue = vsNext.mean;
                 else if (statName == "Median") nextValue = vsNext.median;
+                else if (statName == "Peak") nextValue = vsNext.peak;
                 else if (statName == "VoxelCount") nextValue = vsNext.count;
                 else if (statName == "Min") nextValue = vsNext.min;
                 else if (statName == "Max") nextValue = vsNext.max;
@@ -3182,6 +3190,7 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
                 x0 = this->timePoints[prev_ivs];
                 if (statName == "Mean") prevValue = vsPrev.mean;
                 else if (statName == "Median") prevValue = vsPrev.median;
+                else if (statName == "Peak") prevValue = vsPrev.peak;
                 else if (statName == "VoxelCount") prevValue = vsPrev.count;
                 else if (statName == "Min") prevValue = vsPrev.min;
                 else if (statName == "Max") prevValue = vsPrev.max;
@@ -3691,21 +3700,21 @@ void qSlicerKMAPModuleWidget::runTCMstat(std::string sel1,
       wgt_avg[i] = 0.5 * (w1[i] + w2[i]);
   }
   const std::vector<double>* wgt = &wgt_avg;
-  double p = logic->computeLRTP(modelsForSegment[sel1].loglik,
-                                modelsForSegment[sel2].loglik,
-                                modelsForSegment[sel1].dof,
-                                modelsForSegment[sel2].dof
-                                );
-  d->TCMLRTP->setText(QString::number(p, 'g', 4));
-  double pvuong = logic->computeVuongP(modelsForSegment[sel1].r,
-                                       modelsForSegment[sel2].r,
-                                       wgt,
-                                       modelsForSegment[sel1].dof,
-                                       modelsForSegment[sel2].dof,
-                                       VuongCorrection::BIC,
-                                       Tail::TwoSided
-                                     );
-  d->TCMVuongP->setText(QString::number(pvuong, 'g', 4));
+  // double p = logic->computeLRTP(modelsForSegment[sel1].loglik,
+  //                               modelsForSegment[sel2].loglik,
+  //                               modelsForSegment[sel1].dof,
+  //                               modelsForSegment[sel2].dof
+  //                               );
+  // d->TCMLRTP->setText(QString::number(p, 'g', 4));
+  // double pvuong = logic->computeVuongP(modelsForSegment[sel1].r,
+  //                                      modelsForSegment[sel2].r,
+  //                                      wgt,
+  //                                      modelsForSegment[sel1].dof,
+  //                                      modelsForSegment[sel2].dof,
+  //                                      VuongCorrection::BIC,
+  //                                      Tail::TwoSided
+  //                                    );
+  // d->TCMVuongP->setText(QString::number(pvuong, 'g', 4));
   return;
 }
 
@@ -4031,6 +4040,14 @@ void qSlicerKMAPModuleWidget::onFITbutton()
           wgtVec[segmentName].push_back(1.);
         }
       }
+      else if (currentSelectedStatID == "Peak") {
+        value = vs.peak;
+        if (d->weightFitCheckBox->isChecked()) {
+          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
+        }
+      }
       else
       {
         vtkGenericWarningMacro("Unknown stat: " << currentSelectedStatID);
@@ -4339,6 +4356,14 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
         wgtVec[segmentName].push_back(1.);
       }
     }
+    else if (currentSelectedStatID == "Peak") {
+      value = vs.peak;
+      if (d->weightFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    }
     else
     {
       vtkGenericWarningMacro("Unknown stat: " << currentSelectedStatID);
@@ -4544,6 +4569,14 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
         } else {
           wgtVec[segmentName].push_back(1.);
         }
+      }
+      else if (currentSelectedStatID == "Peak") {
+        value = vs.peak;
+        if (d->weightedFitCheckBox->isChecked()) {
+          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+        } else {
+          wgtVec[segmentName].push_back(1.);
+        }
       } else {
         std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
         return;
@@ -4737,6 +4770,14 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
     }
     else if (currentSelectedStatID == "Median") {
       value = vs.median;
+      if (d->weightedFitCheckBox->isChecked()) {
+        wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+      } else {
+        wgtVec[segmentName].push_back(1.);
+      }
+    }
+    else if (currentSelectedStatID == "Peak") {
+      value = vs.peak;
       if (d->weightedFitCheckBox->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
       } else {

@@ -472,7 +472,7 @@ ModelComparisonResult vtkSlicerKMAPLogic::compareModels(
     countConstraints(*restricted, *full, r_b, r_i);
 
     res.type = "LRT";
-    res.statistic = LR;
+    // res.statistic = LR;
     res.p_value = this->boundaryLRTPvalue(LR, r_b, r_i);
 
     return res;
@@ -501,7 +501,7 @@ ModelComparisonResult vtkSlicerKMAPLogic::compareModels(
     );
 
     res.type = "Vuong";
-    res.statistic = std::numeric_limits<double>::quiet_NaN(); // optional
+    // res.statistic = std::numeric_limits<double>::quiet_NaN(); // optional
     res.p_value = p;
 
     return res;

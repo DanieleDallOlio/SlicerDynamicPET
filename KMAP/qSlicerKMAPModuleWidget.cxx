@@ -3643,78 +3643,67 @@ void qSlicerKMAPModuleWidget::runTCMstat(std::string sel1,
     return;
   }
 
-  if (segmentID.empty()) {
+  auto clearStats = [&]()
+  {
     d->TCMModel1->clear();
     d->TCMModel2->clear();
     d->TCMLRTP->setText("");
     d->TCMVuongP->setText("");
+  };
+
+  if (segmentID.empty()) {
+    clearStats();
     return;
   }
 
   auto it = this->segmentTCM.find(segmentID);
   if (it == this->segmentTCM.end()) {
-    d->TCMModel1->clear();
-    d->TCMModel2->clear();
-    d->TCMLRTP->setText("");
-    d->TCMVuongP->setText("");
+    clearStats();
     return;
   }
   auto& modelsForSegment = it->second;
 
-  auto itTac = this->segmentTAC4TCMfits.find(segmentID);
-  if (itTac == this->segmentTAC4TCMfits.end()) {
-    d->TCMModel1->clear();
-    d->TCMModel2->clear();
+  if (!modelsForSegment.count(sel1) || !modelsForSegment.count(sel2))
+  {
     d->TCMLRTP->setText("");
     d->TCMVuongP->setText("");
     return;
   }
 
-  auto itFits = this->segmentTCMfits.find(segmentID);
-  if (itFits == this->segmentTCMfits.end()) {
-    d->TCMModel1->clear();
-    d->TCMModel2->clear();
-    d->TCMLRTP->setText("");
-    d->TCMVuongP->setText("");
-    return;
-  }
+  const TCMParameters& m1 = modelsForSegment.at(sel1);
+  const TCMParameters& m2 = modelsForSegment.at(sel2);
 
-
-  const int N1 = modelsForSegment[sel1].weights.size();
-  const int N2 = modelsForSegment[sel2].weights.size();
-  if (N1 != N2) {
+  if (m1.weights.size() != m2.weights.size())
+  {
     throw std::runtime_error(
-        sel1 + " has not been fitted with the same number of datapoints (" + std::to_string(N1) +
-        ") of " + sel2 + " (" + std::to_string(N2) + ")."
+        sel1 + " has not been fitted with the same number of datapoints (" +
+        std::to_string(m1.weights.size()) + ") of " + sel2 + " (" +
+        std::to_string(m2.weights.size()) + ")."
     );
   }
-  std::vector<double> w1 = modelsForSegment[sel1].weights;
-  std::vector<double> w2 = modelsForSegment[sel2].weights;
-  // Check they are the same length
-  if (w1.size() != w2.size()) {
-      throw std::invalid_argument("Weight vectors must have the same length");
+
+  if (m1.r.size() != m2.r.size())
+  {
+    throw std::runtime_error(
+        sel1 + " and " + sel2 + " have different residual vector sizes."
+    );
   }
-  // Compute average weights
-  std::vector<double> wgt_avg(w1.size());
-  for (size_t i = 0; i < w1.size(); ++i) {
-      wgt_avg[i] = 0.5 * (w1[i] + w2[i]);
+
+  ModelComparisonResult res =
+      logic->compareModels(sel1, sel2, m1, m2);
+
+  d->TCMLRTP->setText("");
+  d->TCMVuongP->setText("");
+
+  if (res.type == "LRT")
+  {
+    d->TCMLRTP->setText(QString::number(res.p_value, 'g', 4));
   }
-  const std::vector<double>* wgt = &wgt_avg;
-  // double p = logic->computeLRTP(modelsForSegment[sel1].loglik,
-  //                               modelsForSegment[sel2].loglik,
-  //                               modelsForSegment[sel1].dof,
-  //                               modelsForSegment[sel2].dof
-  //                               );
-  // d->TCMLRTP->setText(QString::number(p, 'g', 4));
-  // double pvuong = logic->computeVuongP(modelsForSegment[sel1].r,
-  //                                      modelsForSegment[sel2].r,
-  //                                      wgt,
-  //                                      modelsForSegment[sel1].dof,
-  //                                      modelsForSegment[sel2].dof,
-  //                                      VuongCorrection::BIC,
-  //                                      Tail::TwoSided
-  //                                    );
-  // d->TCMVuongP->setText(QString::number(pvuong, 'g', 4));
+  else if (res.type == "Vuong")
+  {
+    d->TCMVuongP->setText(QString::number(res.p_value, 'g', 4));
+  }
+
   return;
 }
 

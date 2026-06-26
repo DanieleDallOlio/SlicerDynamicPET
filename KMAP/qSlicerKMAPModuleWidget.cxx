@@ -2396,6 +2396,7 @@ void qSlicerKMAPModuleWidget::onSegmentsChanged()
 
 void qSlicerKMAPModuleWidget::clearTACdata() {
   Q_D(qSlicerKMAPModuleWidget);
+  this->PET_flatten_values.clear();
   this->RemoveExistingPlotChartAndTable();
   this->segmentTACs.clear();
   this->segmentTACsnames.clear();

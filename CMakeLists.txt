@@ -46,11 +46,49 @@ endif()
 
 # -----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_CONTRIBUTORS "Daniele Dall'Olio (University of Bologna)")
-set(EXTENSION_DESCRIPTION "Tools to work with dynamic PET imaging")
-set(EXTENSION_ICONURL "https://raw.githubusercontent.com/DanieleDallOlio/SlicerDynamicPET/main/SlicerDynamicPET.png")
-set(EXTENSION_SCREENSHOTURLS "")
-set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
+# -----------------------------------------------------------------------------
+# Extension meta-information
+# -----------------------------------------------------------------------------
+
+set(
+  EXTENSION_HOMEPAGE
+  "https://github.com/DanieleDallOlio/SlicerDynamicPET"
+)
+
+set(
+  EXTENSION_CATEGORY
+  "Quantification"
+)
+
+set(
+  EXTENSION_CONTRIBUTORS
+  "Daniele Dall'Olio (University of Bologna)"
+)
+
+set(
+  EXTENSION_DESCRIPTION
+  "Dynamic PET analysis for 3D Slicer, including DICOM import as volume sequences, time-activity curve extraction, kinetic modeling, and voxel-wise parametric imaging."
+)
+
+set(
+  EXTENSION_ICONURL
+  "https://raw.githubusercontent.com/DanieleDallOlio/SlicerDynamicPET/main/SlicerDynamicPET.png"
+)
+
+set(
+  EXTENSION_SCREENSHOTURLS
+  "https://raw.githubusercontent.com/DanieleDallOlio/SlicerDynamicPET/main/Screenshots/DynamicPET-main.png"
+)
+
+set(
+  EXTENSION_DEPENDS
+  "NA"
+)
+
+set(
+  EXTENSION_STATUS
+  "Beta"
+)
 
 # -----------------------------------------------------------------------------
 # Extension dependencies

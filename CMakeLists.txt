@@ -48,7 +48,7 @@ endif()
 # Extension meta-information
 set(EXTENSION_CONTRIBUTORS "Daniele Dall'Olio (University of Bologna)")
 set(EXTENSION_DESCRIPTION "Tools to work with dynamic PET imaging")
-set(EXTENSION_ICONURL "https://github.com/DanieleDallOlio/SlicerDynamicPET/blob/main/SlicerDynamicPET.png")
+set(EXTENSION_ICONURL "https://raw.githubusercontent.com/DanieleDallOlio/SlicerDynamicPET/main/SlicerDynamicPET.png")
 set(EXTENSION_SCREENSHOTURLS "")
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
@@ -57,37 +57,140 @@ set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 find_package(Slicer REQUIRED)
 include(${Slicer_USE_FILE})
 
-find_package(OpenMP REQUIRED COMPONENTS CXX)
-set(OPENMP_FOUNDINT ${OPENMP_FOUND} CACHE INTERNAL "OPENMP_FOUND")
-if (OPENMP_FOUND)
-  message(STATUS "OpenMP found")
-  if (OpenMP_CXX_VERSION_MAJOR LESS_EQUAL 2 AND OpenMP_CXX_VERSION_MINOR LESS 0)
-    message(FATAL_ERROR "Your OpenMP is too old. Required OpenMP 2.0. Please upgrade.")
+# -----------------------------------------------------------------------------
+# Optional OpenMP support
+# -----------------------------------------------------------------------------
+
+option(
+  SLICERDYNAMICPET_ENABLE_OPENMP
+  "Enable OpenMP acceleration when available"
+  ON
+)
+
+set(SLICERDYNAMICPET_HAVE_OPENMP OFF)
+
+if(SLICERDYNAMICPET_ENABLE_OPENMP)
+
+  find_package(OpenMP QUIET COMPONENTS CXX)
+
+  if(OpenMP_CXX_FOUND)
+
+    set(SLICERDYNAMICPET_HAVE_OPENMP ON)
+
+    message(STATUS "OpenMP found")
+    message(STATUS "OpenMP version: ${OpenMP_CXX_VERSION}")
+    message(STATUS "C++ OpenMP flags: ${OpenMP_CXX_FLAGS}")
+
+    set(
+      OPENMP_FOUNDINT
+      TRUE
+      CACHE INTERNAL "OPENMP_FOUND"
+      FORCE
+    )
+
+    set(
+      OPENMP_LIBRARIES
+      OpenMP::OpenMP_CXX
+      CACHE INTERNAL "OpenMP library target"
+      FORCE
+    )
+
+    if(APPLE)
+      get_target_property(
+        _omp_inc
+        OpenMP::OpenMP_CXX
+        INTERFACE_INCLUDE_DIRECTORIES
+      )
+
+      set(
+        OPENMP_INCLUDE
+        ${_omp_inc}
+        CACHE INTERNAL "OpenMP include directories"
+        FORCE
+      )
+    endif()
+
+    add_definitions(-DHAVE_OPENMP)
+
+  else()
+
+    message(
+      STATUS
+      "OpenMP not found - building SlicerDynamicPET without OpenMP acceleration"
+    )
+
   endif()
-  message(STATUS "C++ openmp flags: ${OpenMP_CXX_FLAGS}")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-  set(OPENMP_LIBRARIES OpenMP::OpenMP_CXX CACHE INTERNAL "OPENMP library target")
-  if (APPLE)
-    get_target_property(_omp_inc OpenMP::OpenMP_CXX INTERFACE_INCLUDE_DIRECTORIES)
-    set(OPENMP_INCLUDE ${_omp_inc} CACHE INTERNAL "OpenMP include directories")
-  endif()
-  add_definitions("-DHAVE_OPENMP")
+
+else()
+
+  message(
+    STATUS
+    "OpenMP explicitly disabled - building without OpenMP acceleration"
+  )
+
 endif()
 
 # -----------------------------------------------------------------------------
-# External library
-add_subdirectory(KMAP-PY)
-if(NOT APPLE)
-  set_target_properties(kmap PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:qSlicerDynamicPETModuleWidgets>
+# KMAP-CPP backend
+# -----------------------------------------------------------------------------
+
+set(
+  KMAP_BUILD_EXAMPLES
+  OFF
+  CACHE BOOL
+  "Build KMAP-CPP examples"
+  FORCE
+)
+
+set(
+  KMAP_INSTALL
+  OFF
+  CACHE BOOL
+  "Install standalone KMAP-CPP package"
+  FORCE
+)
+
+# KMAP-CPP should use OpenMP only if it was successfully found above.
+set(
+  OMP
+  ${SLICERDYNAMICPET_HAVE_OPENMP}
+  CACHE BOOL
+  "Enable OpenMP in KMAP-CPP"
+  FORCE
+)
+
+add_subdirectory(KMAP-CPP)
+if(WIN32)
+
+  set_target_properties(
+    kmap
+    PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY
+        $<TARGET_FILE_DIR:qSlicerDynamicPETModuleWidgets>
   )
-  install(TARGETS kmap
-    RUNTIME DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_BIN_DIR}
-    LIBRARY DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
-    ARCHIVE DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
-  )
+
 endif()
 
+
+install(
+  TARGETS kmap
+  EXPORT KMAPTargets
+
+  RUNTIME DESTINATION
+    ${Slicer_INSTALL_QTLOADABLEMODULES_BIN_DIR}
+
+  LIBRARY DESTINATION
+    ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
+
+  ARCHIVE DESTINATION
+    ${Slicer_INSTALL_QTLOADABLEMODULES_LIB_DIR}
+)
+
+export(
+  EXPORT KMAPTargets
+  FILE "${CMAKE_CURRENT_BINARY_DIR}/KMAPTargets.cmake"
+  NAMESPACE KMAP::
+)
 
 #################################################################
 #                          SUMMARY                              #

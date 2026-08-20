@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# KMAP::kmap publicly depends on OpenMP when KMAP was built with OMP=ON.
+if("@OMP@" STREQUAL "ON")
+  find_dependency(OpenMP REQUIRED COMPONENTS CXX)
+endif()
+
+include(
+  "${CMAKE_CURRENT_LIST_DIR}/KMAPTargets.cmake"
+)
+
+check_required_components(KMAP)

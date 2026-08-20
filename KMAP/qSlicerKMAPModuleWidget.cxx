@@ -22,7 +22,6 @@
 
 
 // Qt includes
-#include <QDebug>
 
 // Slicer includes
 #include "qSlicerKMAPModuleWidget.h"
@@ -32,6 +31,8 @@
 #ifdef _WIN32
 #include <sstream>
 #include <iomanip>
+#include <QEventLoop>
+#include <vtkWeakPointer.h>
 
 // strptime replacement for Windows
 inline char* strptime(const char* s, const char* f, struct tm* tm) {
@@ -42,6 +43,52 @@ inline char* strptime(const char* s, const char* f, struct tm* tm) {
 }
 #endif
 
+namespace
+{
+
+bool segmentNameLessCaseInsensitive(
+    const std::string& a,
+    const std::string& b)
+{
+  const QString qa = QString::fromStdString(a);
+  const QString qb = QString::fromStdString(b);
+
+  const int result =
+    QString::compare(qa, qb, Qt::CaseInsensitive);
+
+  if (result != 0)
+    return result < 0;
+
+  return QString::compare(
+           qa, qb, Qt::CaseSensitive) < 0;
+}
+
+
+std::vector<std::string> sortedSegmentIDs(
+    const std::map<std::string, std::string>& segmentNames)
+{
+  std::vector<std::string> ids;
+  ids.reserve(segmentNames.size());
+
+  for (const auto& [segmentID, displayName] : segmentNames)
+  {
+    ids.push_back(segmentID);
+  }
+
+  std::sort(
+    ids.begin(),
+    ids.end(),
+    [&](const std::string& a, const std::string& b)
+    {
+      return segmentNameLessCaseInsensitive(
+        segmentNames.at(a),
+        segmentNames.at(b));
+    });
+
+  return ids;
+}
+
+}
 
 
 //-----------------------------------------------------------------------------
@@ -54,6 +101,7 @@ protected:
   void setDoubleField(QLineEdit* le, double lo, double hi, int decimals);
   void setIntField(QLineEdit* le, int lo, int hi);
 public:
+  std::vector<std::string> segmentDisplayOrder;
   qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModuleWidget& object);
   ~qSlicerKMAPModuleWidgetPrivate()=default;
   void init();
@@ -965,7 +1013,27 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
 
   q->segmentIDs.clear();
   std :: vector<std :: string> segmentIDs = segmentation->GetSegmentIDs();
-  for (vtkIdType i = 0; i < segmentIDs.size(); ++i)
+
+  std::sort(
+    segmentIDs.begin(),
+    segmentIDs.end(),
+    [&](const std::string& a, const std::string& b)
+    {
+      vtkSegment* segmentA = segmentation->GetSegment(a);
+      vtkSegment* segmentB = segmentation->GetSegment(b);
+
+      if (!segmentA)
+        return segmentB != nullptr;
+
+      if (!segmentB)
+        return false;
+
+      return segmentNameLessCaseInsensitive(
+        segmentA->GetName(),
+        segmentB->GetName());
+    });
+  this->segmentDisplayOrder = segmentIDs;
+  for (vtkIdType i = 0; i < static_cast<vtkIdType>(segmentIDs.size()); ++i)
   {
     std::string segmentID = segmentIDs[i];
     vtkSegment* vtksegment = segmentation->GetSegment(segmentID);
@@ -1020,14 +1088,18 @@ void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
     this->TACCollapsibleButton->setEnabled(false);
     this->SegmentCheckContents->blockSignals(false);
     return;
-  } else {
-    this->TACCollapsibleButton->setEnabled(true);
   }
+  this->TACCollapsibleButton->setEnabled(true);
 
-  for (auto it = q->segmentTACsnames.begin(); it!=q->segmentTACsnames.end(); ++it)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
-    std::string segmentID = it->first;
-    std::string segmentName = it->second;
+    auto nameIt = q->segmentTACsnames.find(segmentID);
+
+    // TAC may not have been computed for every segment
+    if (nameIt == q->segmentTACsnames.end())
+      continue;
+
+    const std::string& segmentName = nameIt->second;
 
     QCheckBox* checkbox = new QCheckBox(QString::fromStdString(segmentName));
     checkbox->setProperty("SegmentID", QString::fromStdString(segmentID));
@@ -1040,7 +1112,7 @@ void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
   }
 
   this->PlotsegmentCheckLayout->addStretch();
-  this->SegmentCheckContents->blockSignals(false);
+  this->PlotSegmentCheckContents->blockSignals(false);
 }
 
 void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGA() {
@@ -1101,8 +1173,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateIF()
   this->TCMWidget->setEnabled(true);
 
   int restoredIndex = 0;
-  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
+    auto it = q->segmentTACsnames.find(segmentID);
+    if (it == q->segmentTACsnames.end())
+      continue;
+
+    const std::string& displayName = it->second;
     this->IFSelector->addItem(QString::fromStdString(displayName), QString::fromStdString(segmentID));
     if (segmentID==currentSelectedID) {
       restoredIndex = this->IFSelector->count() - 1;
@@ -1149,8 +1226,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateIFMTGA()
   this->MTGAWidget->setEnabled(true);
 
   int restoredIndex = 0;
-  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
+    auto it = q->segmentTACsnames.find(segmentID);
+    if (it == q->segmentTACsnames.end())
+      continue;
+
+    const std::string& displayName = it->second;
     this->IFSelectorMTGA->addItem(QString::fromStdString(displayName), QString::fromStdString(segmentID));
     if (segmentID==currentSelectedID) {
       restoredIndex = this->IFSelectorMTGA->count() - 1;
@@ -1197,8 +1279,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateIFImg()
   this->ImagingWidget->setEnabled(true);
 
   int restoredIndex = 0;
-  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
+    auto it = q->segmentTACsnames.find(segmentID);
+    if (it == q->segmentTACsnames.end())
+      continue;
+
+    const std::string& displayName = it->second;
     this->IFSelectorImg->addItem(QString::fromStdString(displayName), QString::fromStdString(segmentID));
     if (segmentID==currentSelectedID) {
       restoredIndex = this->IFSelectorImg->count() - 1;
@@ -1258,10 +1345,15 @@ void qSlicerKMAPModuleWidgetPrivate::populateVOI(std :: string ifID)
   q->VOIsegmentIDs.clear();
 
   // Add checkboxes for all other segments
-  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
     if (segmentID == ifID)
       continue;
+    auto it = q->segmentTACsnames.find(segmentID);
+    if (it == q->segmentTACsnames.end())
+      continue;
+
+    const std::string& displayName = it->second;
 
     QCheckBox* cb = new QCheckBox(QString::fromStdString(displayName));
     cb->setProperty("SegmentID", QString::fromStdString(segmentID));
@@ -1322,11 +1414,15 @@ void qSlicerKMAPModuleWidgetPrivate::populateVOIMTGA(std :: string ifID)
   q->VOIMTGAsegmentIDs.clear();
 
   // Add checkboxes for all other segments
-  for (const auto& [segmentID, displayName] : q->segmentTACsnames)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
     if (segmentID == ifID)
       continue;
+    auto it = q->segmentTACsnames.find(segmentID);
+    if (it == q->segmentTACsnames.end())
+      continue;
 
+    const std::string& displayName = it->second;
     QCheckBox* cb = new QCheckBox(QString::fromStdString(displayName));
     cb->setProperty("SegmentID", QString::fromStdString(segmentID));
     bool wasSelected = previouslySelectedIDs.contains(QString::fromStdString(segmentID));
@@ -1370,9 +1466,14 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsVOI()
   this->TCMResultsButton->setEnabled(true);
 
   int restoredIndex = 0;
-  for (const auto& [segmentID, _] : q->segmentTCM)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
-    this->VOISelector->addItem(QString::fromStdString(q->segmentTACsnames[segmentID]), QString::fromStdString(segmentID));
+    if (q->segmentTCM.find(segmentID) == q->segmentTCM.end())
+      continue;
+    auto nameIt = q->segmentTACsnames.find(segmentID);
+    if (nameIt == q->segmentTACsnames.end())
+      continue;
+    this->VOISelector->addItem(QString::fromStdString(nameIt->second), QString::fromStdString(segmentID));
     if (segmentID==currentSelectedID) {
       restoredIndex = this->VOISelector->count() - 1;
     }
@@ -1416,9 +1517,16 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsVOIMTGA()
   this->MTGAResultsButton->setEnabled(true);
 
   int restoredIndex = 0;
-  for (const auto& [segmentID, _] : q->segmentMTGA)
+  for (const std::string& segmentID : this->segmentDisplayOrder)
   {
-    this->VOISelectorMTGA->addItem(QString::fromStdString(q->segmentTACsnames[segmentID]), QString::fromStdString(segmentID));
+    if (q->segmentMTGA.find(segmentID) == q->segmentMTGA.end())
+      continue;
+
+    auto nameIt = q->segmentTACsnames.find(segmentID);
+    if (nameIt == q->segmentTACsnames.end())
+      continue;
+
+    this->VOISelectorMTGA->addItem(QString::fromStdString(nameIt->second), QString::fromStdString(segmentID));
     if (segmentID==currentSelectedID) {
       restoredIndex = this->VOISelectorMTGA->count() - 1;
     }
@@ -2344,35 +2452,108 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
   if (!logic) {
     return;
   }
+
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(100);
+  this->ProgressBar->setValue(0);
+  this->ProgressBar->setFormat("Preparing segmentation...");
+  this->ProgressBar->setVisible(true);
+  this->ProgressBar->show();
+
+  this->stopButton->setVisible(false);
+  qApp->processEvents();
+
+  this->ProgressBar->setValue(5);
+  this->ProgressBar->setFormat(
+    "Preparing segmentation representations...");
+
+  qApp->processEvents();
+
   logic->setupSeg(segNode);
 
+  this->ProgressBar->setValue(80);
+  this->ProgressBar->setFormat(
+    "Preparing frame-by-frame segmentation...");
+
+  qApp->processEvents();
 
   vtkMRMLSequenceNode* seqNode =
-    this->sequenceBrowserPETNode->GetSequenceNode(segNode);
+  this->sequenceBrowserPETNode->GetSequenceNode(segNode);
   if (!seqNode)
   {
     vtkSmartPointer<vtkMRMLSequenceNode> newSeqNode =
       vtkSmartPointer<vtkMRMLSequenceNode>::New();
-    newSeqNode->SetName(shNode->GetItemName(segID).c_str());
+
+    newSeqNode->SetName(
+      shNode->GetItemName(segID).c_str());
+
     scene->AddNode(newSeqNode);
-    this->sequenceBrowserPETNode->AddProxyNode(segNode, newSeqNode, false);
-    this->sequenceBrowserPETNode->SetSaveChanges(newSeqNode, true);
+
+    this->sequenceBrowserPETNode->AddProxyNode(
+      segNode,
+      newSeqNode,
+      false);
+
+    this->sequenceBrowserPETNode->SetSaveChanges(
+      newSeqNode,
+      true);
+
     std::string indexValue;
+
     for (int i = 0; i < this->numberOfTimepoints; ++i)
     {
-      indexValue = this->sequencePETNode->GetNthIndexValue(i);
+      indexValue =
+        this->sequencePETNode->GetNthIndexValue(i);
+
       if (!newSeqNode->GetDataNodeAtValue(indexValue))
       {
-        newSeqNode->SetDataNodeAtValue(segNode, indexValue);
+        newSeqNode->SetDataNodeAtValue(
+          segNode,
+          indexValue);
       }
+
+      // Remaining 20% belongs to sequence creation.
+      const int progress =
+        80 +
+        static_cast<int>(
+          20.0 *
+          static_cast<double>(i + 1) /
+          static_cast<double>(this->numberOfTimepoints));
+
+      this->ProgressBar->setValue(progress);
+
+      this->ProgressBar->setFormat(
+        QString("Preparing segmentation frames %1/%2 (%p%)")
+          .arg(i + 1)
+          .arg(this->numberOfTimepoints));
+
+      // Sequence creation consists of many individual operations,
+      // so here the progress bar can genuinely update.
+      qApp->processEvents();
     }
+
     this->SegWatcher->ObserveSegmentationNode(segNode);
+
     seqNode = newSeqNode;
   }
+
   this->segSequenceNode = seqNode;
 
   d->populateSegmentCheckboxes(this->segID);
   this->enableTACbutton();
+
+  // Finished
+  this->ProgressBar->setValue(100);
+  this->ProgressBar->setFormat("Segmentation ready");
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+
+  // Hide and reset
+  this->ProgressBar->hide();
+  this->ProgressBar->setValue(0);
+  this->ProgressBar->setFormat("%p%");
+
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+
 }
 
 void qSlicerKMAPModuleWidget::onSegmentsChanged()
@@ -3028,13 +3209,10 @@ void qSlicerKMAPModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs,
     }
   }
   if (newSelection.size()==0) {
-    // qDebug() << "No point selected";
     this->PlotSelectedFrame = -1;
     this->PlotSelectedVOI = "";
   } else if (newSelection.size()==1 && lastseriesID!="") {
-    // qDebug() << "Old point selected";
   } else {
-    // qDebug() << "New point selected";
     if (!this->MapPlotSeriesNodeIDToPlot.contains(QString::fromStdString(lastseriesID))) {
         vtkGenericWarningMacro("MapPlotSeriesNodeIDToPlot does not contain seriesID=" << lastseriesID);
     }
@@ -4224,17 +4402,20 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
     QMessageBox::warning(nullptr,
                          tr("Missing PET dimensions"),
                          tr("Something went wrong to determine PET dimensions."));
+    return;
   }
   if (this->numberOfTimepoints<1) {
     QMessageBox::warning(nullptr,
                          tr("Missing dynamic PET"),
                          tr("Dynamic PET has non-positive number of timepoints."));
+    return;
   }
 
   if (this->PET_flatten_values.empty()) {
     QMessageBox::warning(nullptr,
                          tr("Missing dynamic PET values"),
                          tr("Dynamic PET values are empty."));
+    return;
   }
 
   int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
@@ -4242,12 +4423,14 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
     QMessageBox::warning(nullptr,
                          tr("Dynamic PET: mismatch values"),
                          tr("Number of dynamic PET is not as expected."));
+    return;
   }
 
   if (this->PET_flatten_values[0].size()!=this->numberOfTimepoints) {
     QMessageBox::warning(nullptr,
                          tr("Dynamic PET: mismatch values"),
                          tr("Number of timepoints is not as expected."));
+    return;
   }
 
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
@@ -4283,6 +4466,45 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
+  }
+
+  // Get PET reference node from the subject hierarchy item.
+  // This is the same mechanism already used by Image2Flatten() and computeTAC().
+  vtkMRMLScene* scene = logic->GetMRMLScene();
+
+  if (!scene)
+  {
+      std::cerr << "Missing MRML scene!" << std::endl;
+      return;
+  }
+
+  vtkMRMLSubjectHierarchyNode* shNode =
+      vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+
+  if (!shNode)
+  {
+      std::cerr << "Missing subject hierarchy!" << std::endl;
+      return;
+  }
+
+  if (this->petID ==
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+      std::cerr << "Invalid PET subject hierarchy item!" << std::endl;
+      return;
+  }
+
+  vtkMRMLScalarVolumeNode* refPETNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          shNode->GetItemDataNode(this->petID));
+
+  if (!refPETNode)
+  {
+      std::cerr
+          << "Could not retrieve PET scalar volume from petID = "
+          << this->petID
+          << std::endl;
+      return;
   }
 
   // Collect parameters using a lambda for brevity
@@ -4421,8 +4643,33 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
       this->stopButton->setVisible(false);
   });
 
+  vtkWeakPointer<vtkMRMLScalarVolumeNode> refPETNodeWeak =
+      refPETNode;
+
+  vtkWeakPointer<vtkMRMLSubjectHierarchyNode> shNodeWeak =
+      shNode;
+
+  const vtkIdType refPetID = this->petID;
+
   QObject::connect(worker, &TCMWorker::finishedProcessing,
-    this, [this, logic, worker](const QString& modelID){//, const std::vector<TCMParameters>& results) {
+    this, [this, logic, worker, refPETNodeWeak, shNodeWeak, refPetID](const QString& modelID){//, const std::vector<TCMParameters>& results) {
+
+      if (!refPETNodeWeak)
+      {
+          std::cerr
+              << "Reference PET node no longer exists."
+              << std::endl;
+          return;
+      }
+
+      if (!shNodeWeak)
+      {
+          std::cerr
+              << "Subject hierarchy node no longer exists."
+              << std::endl;
+          return;
+      }
+
       this->TCMImgOutcomes[modelID.toStdString()] = std::move(worker->results);
 
       auto getModelfields = [](const std::string& modelID) -> std::vector<std::string> {
@@ -4453,21 +4700,31 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
           this->PETdims,
           modelfields,
           modelID.toStdString(),
-          this->petNode,
-          this->SubjectHierarchyNode,
-          this->petID
+          refPETNodeWeak,
+          shNodeWeak,
+          refPetID
       );
-  });
+  }, Qt::BlockingQueuedConnection);
 
   connect(this->stopButton, &QPushButton::clicked, this, [this](){
       this->stopRequested = true;
   });
 
-  QObject::connect(worker, &TCMWorker::finishedAll, this, [this, worker](){
-      this->ProgressBar->setVisible(false);
-      this->stopButton->setVisible(false);
-      worker->deleteLater();
-  });
+  QObject::connect(
+      worker,
+      &TCMWorker::finishedAll,
+      this,
+      [this]()
+      {
+          this->ProgressBar->setVisible(false);
+          this->stopButton->setVisible(false);
+      });
+
+  QObject::connect(
+      worker,
+      &QThread::finished,
+      worker,
+      &QObject::deleteLater);
 
   worker->start();
 
@@ -4724,6 +4981,45 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
     return;
   }
 
+  // Get PET reference node from the subject hierarchy item.
+  // This is the same mechanism already used by Image2Flatten() and computeTAC().
+  vtkMRMLScene* scene = logic->GetMRMLScene();
+
+  if (!scene)
+  {
+      std::cerr << "Missing MRML scene!" << std::endl;
+      return;
+  }
+
+  vtkMRMLSubjectHierarchyNode* shNode =
+      vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
+
+  if (!shNode)
+  {
+      std::cerr << "Missing subject hierarchy!" << std::endl;
+      return;
+  }
+
+  if (this->petID ==
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+      std::cerr << "Invalid PET subject hierarchy item!" << std::endl;
+      return;
+  }
+
+  vtkMRMLScalarVolumeNode* refPETNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          shNode->GetItemDataNode(this->petID));
+
+  if (!refPETNode)
+  {
+      std::cerr
+          << "Could not retrieve PET scalar volume from petID = "
+          << this->petID
+          << std::endl;
+      return;
+  }
+
   const long Nframe = timePoints.size();
 
   std::vector<std::vector<double>> framing;
@@ -4827,7 +5123,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
           this->PETdims,
           {"Ki", "Intercept", "AIC", "MASE", "R2", "chi2"},
           modelID,
-          this->petNode,
+          refPETNode,
           this->SubjectHierarchyNode,
           this->petID
         );
@@ -4858,7 +5154,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
           this->PETdims,
           {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
           modelID,
-          this->petNode,
+          refPETNode,
           this->SubjectHierarchyNode,
           this->petID
         );
@@ -4889,7 +5185,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
           this->PETdims,
           {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
           modelID,
-          this->petNode,
+          refPETNode,
           this->SubjectHierarchyNode,
           this->petID
         );

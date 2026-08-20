@@ -65,6 +65,7 @@
 #include <vtkPlot.h>
 #include <QtConcurrent/QtConcurrent>
 #include <QMetaType>
+#include <algorithm>
 #include "KMAPWidgetWorkers.h"
 
 
@@ -186,7 +187,6 @@ private:
   std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
-  vtkMRMLScalarVolumeNode* petNode;
 
   int PETdims[3];
   int numberOfTimepoints;

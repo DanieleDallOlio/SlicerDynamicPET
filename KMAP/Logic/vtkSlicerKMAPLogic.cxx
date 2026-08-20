@@ -17,7 +17,7 @@
 
 // KMAP Logic includes
 #include "vtkSlicerKMAPLogic.h"
-
+#include <chrono>
 // MRML includes
 #include <vtkMRMLScene.h>
 
@@ -278,16 +278,31 @@ void vtkSlicerKMAPLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
     return;
   }
 
+   using Clock = std::chrono::steady_clock;
+
   // 1. Make sure "Binary labelmap" is available as a representation
   const std::string labelmapRep = vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
-  segmentation->CreateRepresentation(labelmapRep);
 
   // 2. Set "Binary labelmap" as the master representation (i.e., source)
-  segmentation->SetSourceRepresentationName(labelmapRep);
+  auto start = Clock::now();
+  if (!segmentation->ContainsRepresentation(labelmapRep))
+  {
+    segmentation->CreateRepresentation(labelmapRep);
+  }
+  auto end = Clock::now();
 
+  start = Clock::now();
+  if (segmentation->GetSourceRepresentationName()
+      != labelmapRep)
+  {
+    segmentation->SetSourceRepresentationName(labelmapRep);
+  }
+  end = Clock::now();
+
+  // Do NOT eagerly create Closed surface here.
   // 3. Ensure "Closed surface" representation is present
-  const std::string closedSurfRep = vtkSegmentationConverter::GetSegmentationClosedSurfaceRepresentationName();
-  segmentation->CreateRepresentation(closedSurfRep);
+  // const std::string closedSurfRep = vtkSegmentationConverter::GetSegmentationClosedSurfaceRepresentationName();
+  // segmentation->CreateRepresentation(closedSurfRep);
 
 }
 
@@ -2049,6 +2064,16 @@ vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
     return nullptr;
   }
 
+  vtkMRMLScene* scene = this->GetMRMLScene();
+
+  if (!scene)
+  {
+      std::cerr
+          << "Flatten2Image: MRML scene is null"
+          << std::endl;
+      return nullptr;
+  }
+
   // Allocate vtkImageData
   vtkNew<vtkImageData> image;
   image->SetDimensions(dims);
@@ -2062,28 +2087,41 @@ vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
     return nullptr;
   }
 
+  double* scalarPtr = scalars->GetPointer(0);
+  if (!scalarPtr)
+  {
+      std::cerr
+          << "Flatten2Image: scalar pointer is null."
+          << std::endl;
+      return nullptr;
+  }
+
   // Safe copy into the VTK array
   #ifdef HAVE_OPENMP
-  int max_hw_threads = omp_get_num_procs();
-  omp_set_num_threads(max_hw_threads);
-  #pragma omp parallel for
+  #pragma omp parallel for schedule(static)
   #endif
-  for (int i = 0; i < nVoxels; ++i)
+  for (vtkIdType i = 0; i < nVoxels; ++i)
   {
-    scalars->SetValue(i, flatten_values[i]);
+      scalarPtr[i] =
+          flatten_values[static_cast<size_t>(i)];
   }
 
   // Create MRML volume node
-  vtkNew<vtkMRMLScalarVolumeNode> volumeNode;
-  volumeNode->SetName(name.c_str());
-  volumeNode->SetAndObserveImageData(image);
-
-  // Add to scene
-  vtkMRMLScene* scene = this->GetMRMLScene();
-  if (scene)
+  vtkMRMLScalarVolumeNode* volumeNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->AddNewNodeByClass(
+              "vtkMRMLScalarVolumeNode",
+              name.c_str()));
+  if (!volumeNode)
   {
-    scene->AddNode(volumeNode);
+      std::cerr
+          << "Flatten2Image: could not create MRML volume node"
+          << std::endl;
+      return nullptr;
   }
+
+  volumeNode->SetAndObserveImageData(image);
+  volumeNode->CreateDefaultDisplayNodes();
 
   return volumeNode;
 }
@@ -2925,7 +2963,6 @@ void bench_exp_strict()
   sink = acc; // force side-effect
 
   double sec = std::chrono::duration<double>(t1 - t0).count();
-  std::cout << "exp() strict throughput: " << (N / sec) << " calls/sec, sink=" << sink << "\n";
 }
 
 void vtkSlicerKMAPLogic::callTCMImg(
@@ -3028,6 +3065,73 @@ void vtkSlicerKMAPLogic::callTCMImg(
     outputParams.clear();
     outputParams.resize(Nvox);
 
+    // ---------- 5b) Remove exact-zero TACs from fitting ----------
+    auto markInvalidVoxel = [&](TCMParameters& params)
+    {
+        params.vb = -1.0;
+        params.K1 = -1.0;
+        params.k2 = -1.0;
+
+        if (n_tc == 2)
+        {
+            params.k3 = -1.0;
+            params.k4 = -1.0;
+        }
+
+        params.td = -1.0;
+        params.Ki = -1.0;
+        params.DV = -1.0;
+
+        params.r.clear();
+        params.weights = wt;
+        params.keep = keep;
+        params.dof = dof_fixed;
+
+        params.AIC    = std::numeric_limits<double>::quiet_NaN();
+        params.BIC    = std::numeric_limits<double>::quiet_NaN();
+        params.MASE   = std::numeric_limits<double>::quiet_NaN();
+        params.chi2   = std::numeric_limits<double>::quiet_NaN();
+        params.loglik = std::numeric_limits<double>::quiet_NaN();
+    };
+
+    std::vector<int> fitVoxelIndices;
+    fitVoxelIndices.reserve(Nvox);
+
+    int zeroVoxelCount = 0;
+
+    for (int v = 0; v < Nvox; ++v)
+    {
+        const auto& tac = voxels[v];
+
+        const bool allZero = std::all_of(
+            tac.begin(),
+            tac.end(),
+            [](double value)
+            {
+                return value == 0.0;
+            });
+
+        if (allZero)
+        {
+            markInvalidVoxel(outputParams[v]);
+            ++zeroVoxelCount;
+        }
+        else
+        {
+            fitVoxelIndices.push_back(v);
+        }
+    }
+
+    const int Nfit = static_cast<int>(fitVoxelIndices.size());
+
+    std::cout
+        << "TCM fitting: "
+        << Nfit << " / " << Nvox
+        << " voxels will be fitted; "
+        << zeroVoxelCount << " zero TACs skipped."
+        << std::endl;
+
+
     // ---------- 6) KMODEL_T ----------
     double * scant_flatten = new double[Nframe*2];
     for (int i=0; i<Nframe; ++i) {
@@ -3049,7 +3153,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
 
     // ---------- 7) Progress tracking ----------
     std::atomic<int> voxProcessed(0);
-    const int progressUpdateInterval = std::max(1, Nvox / 200); // ~0.5% updates
+    const int progressUpdateInterval = std::max(1, Nfit / 200);
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
     t0 = std::chrono::high_resolution_clock::now();
@@ -3062,63 +3166,34 @@ void vtkSlicerKMAPLogic::callTCMImg(
         std::vector<double> pinit_local(num_par);
         std::vector<int>    psens_local(num_par);
         std::vector<double> fitted_local(Nframe);
-        LevmarStats stx;
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (int v = 0; v < Nvox; ++v) {
+        for (int fitIndex = 0; fitIndex < Nfit; ++fitIndex) {
             // if ((stopCallback && stopCallback()) || stopRequested) {
             //   // v = Nvox;
             //   continue;
             // }
+            const int v = fitVoxelIndices[fitIndex];
 
             TCMParameters params;
 
             for (int i = 0; i < Nframe; ++i) cfit_local[i] = voxels[v][i];
             if (check_if_constant(cfit_local)) {
               // std :: cout << "Constant" << std :: endl;
-              if (n_tc==1) {
-                  params.vb = -1;
-                  params.K1 = -1;
-                  params.k2 = -1;
-                  params.td = -1;
-                  params.Ki = -1;
-                  params.DV = -1;
-              } else if (n_tc==2) {
-                  params.vb = -1;
-                  params.K1 = -1;
-                  params.k2 = -1;
-                  params.k3 = -1;
-                  params.k4 = -1;
-                  params.td = -1;
-                  params.Ki = -1;
-                  params.DV = -1;
-              }
-
-              params.r.clear();
-              params.weights = wt;
-              params.keep = keep;
-              params.dof = dof_fixed;
-              //
-              // // // Statistics
-              params.AIC  = std::numeric_limits<double>::quiet_NaN();
-              params.BIC  = std::numeric_limits<double>::quiet_NaN();
-              params.MASE = std::numeric_limits<double>::quiet_NaN();
-              params.chi2 = std::numeric_limits<double>::quiet_NaN();
-              params.loglik = std::numeric_limits<double>::quiet_NaN();
-
-              outputParams[v] = std::move(params);
+              markInvalidVoxel(outputParams[v]);
             } else {
-              double* tac_ptr = cfit_local.data();
 
               for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
 
               for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
 
+              LevmarStats stx{};
+
               // ---------- Fit voxel ----------
               KMODEL_T km = km_template;
               kmap_levmar_stats(
-                  tac_ptr, wt.data(), Nframe,
+                  cfit_local.data(), wt.data(), Nframe,
                   pinit_local.data(), num_par,
                   &km, tac_eval, jac_eval,
                   lb, ub, psens_local.data(), maxiter,
@@ -3176,16 +3251,15 @@ void vtkSlicerKMAPLogic::callTCMImg(
               outputParams[v] = std::move(params);
             }
             // ---------- Progress update ----------
-            if (progressCallback) {
+            if (progressCallback)
+            {
                 int done = ++voxProcessed;
-                int updateInterval = std::max(
-                    static_cast<size_t>(1),
-                    std::min(static_cast<size_t>(Nvox) / 1000,
-                             static_cast<size_t>(10000))
-                );
 
-                if (done % updateInterval == 0 || done == Nvox) {
-                    int progress = static_cast<int>(100 * done / Nvox);
+                if (done % progressUpdateInterval == 0 || done == Nfit)
+                {
+                    int progress =
+                        static_cast<int>(100LL * done / Nfit);
+
                     progressCallback(progress);
                 }
             }
@@ -3235,24 +3309,99 @@ void vtkSlicerKMAPLogic::CreateTCMParametricImages(
     const std::string& modelID,
     vtkMRMLScalarVolumeNode* refNode,
     vtkMRMLSubjectHierarchyNode* refSH,
-    vtkIdType refID
-  )
+    vtkIdType refID)
 {
 
-  for (const auto& field : fields)
-  {
-    std::vector<double> flatten = this->ExtractParameter(outputParams, field);
-    vtkMRMLScalarVolumeNode* node = this->Flatten2Image(flatten, dims, modelID + " - " + field);
-    node->CopyOrientation(refNode);
-    node->SetSpacing(refNode->GetSpacing());
-    node->SetOrigin(refNode->GetOrigin());
-    vtkIdType parentItemID = refSH->GetItemParent(refID);
-    vtkIdType newItemID = refSH->GetItemByDataNode(node);
-    refSH->SetItemParent(newItemID, parentItemID);
-    if (!node)
+    const vtkIdType expectedVoxels =
+        static_cast<vtkIdType>(dims[0]) *
+        static_cast<vtkIdType>(dims[1]) *
+        static_cast<vtkIdType>(dims[2]);
+
+    if (outputParams.size() != static_cast<size_t>(expectedVoxels))
     {
-      std :: cerr << "Could not create image for " << modelID + " - " + field << std :: endl;
-      return;
+        std::cerr
+            << "CreateTCMParametricImages: output size mismatch. "
+            << "Expected " << expectedVoxels
+            << ", got " << outputParams.size()
+            << std::endl;
+        return;
     }
-  }
+
+    if (!refNode)
+    {
+        std::cerr << "CreateTCMParametricImages: refNode is null" << std::endl;
+        return;
+    }
+
+    if (!refSH)
+    {
+        std::cerr << "CreateTCMParametricImages: refSH is null" << std::endl;
+        return;
+    }
+
+    vtkMRMLScene* scene = this->GetMRMLScene();
+    if (!scene)
+    {
+        std::cerr << "CreateTCMParametricImages: MRML scene is null" << std::endl;
+        return;
+    }
+
+    vtkIdType refItemID =
+        refSH->GetItemByDataNode(refNode);
+
+    if (refItemID ==
+        vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+        std::cerr
+            << "Reference PET node has no subject hierarchy item."
+            << std::endl;
+        return;
+    }
+
+    vtkIdType parentItemID =
+        refSH->GetItemParent(refItemID);
+
+    for (const auto& field : fields)
+    {
+        std::vector<double> flatten =
+            this->ExtractParameter(outputParams, field);
+
+        vtkMRMLScalarVolumeNode* node =
+            this->Flatten2Image(
+                flatten,
+                dims,
+                modelID + " - " + field);
+
+        if (!node)
+        {
+            std::cerr
+                << "Could not create image for "
+                << modelID << " - " << field
+                << std::endl;
+            return;
+        }
+
+        node->CopyOrientation(refNode);
+
+        node->SetSpacing(refNode->GetSpacing());
+
+        node->SetOrigin(refNode->GetOrigin());
+
+        const vtkIdType newItemID =
+            refSH->GetItemByDataNode(node);
+
+        if (newItemID ==
+            vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            std::cerr
+                << "Could not find subject hierarchy item for "
+                << field << std::endl;
+        }
+        else
+        {
+            refSH->SetItemParent(newItemID, parentItemID);
+        }
+
+    }
+
 }

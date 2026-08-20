@@ -27,7 +27,7 @@ public:
   SegmentationChangeWatcher();
   ~SegmentationChangeWatcher() override;
 
-  void Clear(); 
+  void Clear();
 
   // Attach to one segmentation node
   void ObserveSegmentationNode(vtkMRMLSegmentationNode* segNode);

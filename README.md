@@ -1,1 +1,1 @@
-# DynamicPETExtension
+# SlicerDynamicPET

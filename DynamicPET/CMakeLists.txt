@@ -1,6 +1,6 @@
 
 #-----------------------------------------------------------------------------
-set(MODULE_NAME KMAP)
+set(MODULE_NAME DynamicPET)
 
 string(TOUPPER ${MODULE_NAME} MODULE_NAME_UPPER)
 
@@ -49,7 +49,7 @@ set(MODULE_SRCS
   SegmentationChangeWatcher.h
   KeyPressWatcher.cxx
   KeyPressWatcher.h
-  KMAPWidgetWorkers.h
+  DynamicPETWidgetWorkers.h
   )
 
 set(MODULE_MOC_SRCS
@@ -57,7 +57,7 @@ set(MODULE_MOC_SRCS
   qSlicer${MODULE_NAME}ModuleWidget.h
   SegmentationChangeWatcher.h
   KeyPressWatcher.h
-  KMAPWidgetWorkers.h
+  DynamicPETWidgetWorkers.h
   )
 
 set(MODULE_UI_SRCS

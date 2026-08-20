@@ -15,8 +15,8 @@
 
 ==============================================================================*/
 
-#ifndef __qSlicerKMAPModuleWidget_h
-#define __qSlicerKMAPModuleWidget_h
+#ifndef __qSlicerDynamicPETModuleWidget_h
+#define __qSlicerDynamicPETModuleWidget_h
 
 #ifdef _WIN32
 #define PY_SSIZE_T_CLEAN
@@ -28,7 +28,7 @@
 #include "SegmentationChangeWatcher.h"
 #include "KeyPressWatcher.h"
 
-#include "qSlicerKMAPModuleExport.h"
+#include "qSlicerDynamicPETModuleExport.h"
 #include "qMRMLNodeComboBox.h"
 #include <vtkCollection.h>
 #include <vtkSmartPointer.h>
@@ -41,7 +41,7 @@
 #include <QPointer>
 #include <QCheckBox>
 #include <vtkSegmentation.h>
-#include <vtkSlicerKMAPLogic.h>
+#include <vtkSlicerDynamicPETLogic.h>
 #include <QProgressBar>
 #include <QMessageBox>
 
@@ -66,13 +66,13 @@
 #include <QtConcurrent/QtConcurrent>
 #include <QMetaType>
 #include <algorithm>
-#include "KMAPWidgetWorkers.h"
+#include "DynamicPETWidgetWorkers.h"
 
 
-class qSlicerKMAPModuleWidgetPrivate;
+class qSlicerDynamicPETModuleWidgetPrivate;
 class vtkMRMLNode;
 
-class Q_SLICER_QTMODULES_KMAP_EXPORT qSlicerKMAPModuleWidget :
+class Q_SLICER_QTMODULES_DYNAMICPET_EXPORT qSlicerDynamicPETModuleWidget :
   public qSlicerAbstractModuleWidget
 {
   Q_OBJECT
@@ -80,9 +80,9 @@ class Q_SLICER_QTMODULES_KMAP_EXPORT qSlicerKMAPModuleWidget :
 public:
 
   typedef qSlicerAbstractModuleWidget Superclass;
-  explicit qSlicerKMAPModuleWidget(QWidget* parent = nullptr);
+  explicit qSlicerDynamicPETModuleWidget(QWidget* parent = nullptr);
 
-  ~qSlicerKMAPModuleWidget() override;
+  ~qSlicerDynamicPETModuleWidget() override;
 
   // void setNodeSelectorEnabled(qMRMLNodeComboBox* selector, bool enabled);
   // static std::map<std::string, vtkIdType> GetStudyAndPatientAncestors(vtkMRMLSubjectHierarchyNode* shNode, vtkIdType volumeNodeId);
@@ -108,7 +108,7 @@ public:
   void RemoveExistingPlotChartAndTable();
   vtkMRMLPlotChartNode* GetOrCreatePlotChart();
   vtkMRMLTableNode* GetOrCreatePlotTable();
-  bool checkdisplayedKMAP();
+  bool checkdisplayedDynamicPET();
 
 public slots:
   void onSubjectHierarchyChanged();
@@ -175,15 +175,15 @@ public slots:
   void onDeleteKeyPressed();
 
 protected:
-  QScopedPointer<qSlicerKMAPModuleWidgetPrivate> d_ptr;
+  QScopedPointer<qSlicerDynamicPETModuleWidgetPrivate> d_ptr;
   bool IsActive{false};
   vtkMRMLSequenceNode* sequencePETNode;
   vtkMRMLSequenceNode* segSequenceNode;
   vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode;
   vtkSmartPointer<SegmentationChangeWatcher> SegWatcher;
 private:
-  Q_DECLARE_PRIVATE(qSlicerKMAPModuleWidget);
-  Q_DISABLE_COPY(qSlicerKMAPModuleWidget);
+  Q_DECLARE_PRIVATE(qSlicerDynamicPETModuleWidget);
+  Q_DISABLE_COPY(qSlicerDynamicPETModuleWidget);
   std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;

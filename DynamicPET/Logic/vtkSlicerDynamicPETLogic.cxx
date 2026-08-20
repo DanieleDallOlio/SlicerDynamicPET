@@ -15,8 +15,8 @@
 
 ==============================================================================*/
 
-// KMAP Logic includes
-#include "vtkSlicerKMAPLogic.h"
+// DynamicPET Logic includes
+#include "vtkSlicerDynamicPETLogic.h"
 #include <chrono>
 // MRML includes
 #include <vtkMRMLScene.h>
@@ -122,26 +122,26 @@ static double chi2_cdf(double x, int df)
 }
 
 //----------------------------------------------------------------------------
-vtkStandardNewMacro(vtkSlicerKMAPLogic);
+vtkStandardNewMacro(vtkSlicerDynamicPETLogic);
 
 //----------------------------------------------------------------------------
-vtkSlicerKMAPLogic::vtkSlicerKMAPLogic()
+vtkSlicerDynamicPETLogic::vtkSlicerDynamicPETLogic()
 {
 }
 
 //----------------------------------------------------------------------------
-vtkSlicerKMAPLogic::~vtkSlicerKMAPLogic()
+vtkSlicerDynamicPETLogic::~vtkSlicerDynamicPETLogic()
 {
 }
 
 //----------------------------------------------------------------------------
-void vtkSlicerKMAPLogic::PrintSelf(ostream& os, vtkIndent indent)
+void vtkSlicerDynamicPETLogic::PrintSelf(ostream& os, vtkIndent indent)
 {
   this->Superclass::PrintSelf(os, indent);
 }
 
 //---------------------------------------------------------------------------
-void vtkSlicerKMAPLogic::SetMRMLSceneInternal(vtkMRMLScene * newScene)
+void vtkSlicerDynamicPETLogic::SetMRMLSceneInternal(vtkMRMLScene * newScene)
 {
   vtkNew<vtkIntArray> events;
   events->InsertNextValue(vtkMRMLScene::NodeAddedEvent);
@@ -151,31 +151,31 @@ void vtkSlicerKMAPLogic::SetMRMLSceneInternal(vtkMRMLScene * newScene)
 }
 
 //-----------------------------------------------------------------------------
-void vtkSlicerKMAPLogic::RegisterNodes()
+void vtkSlicerDynamicPETLogic::RegisterNodes()
 {
   assert(this->GetMRMLScene() != 0);
 }
 
 //---------------------------------------------------------------------------
-void vtkSlicerKMAPLogic::UpdateFromMRMLScene()
+void vtkSlicerDynamicPETLogic::UpdateFromMRMLScene()
 {
   assert(this->GetMRMLScene() != 0);
 }
 
 //---------------------------------------------------------------------------
-void vtkSlicerKMAPLogic
+void vtkSlicerDynamicPETLogic
 ::OnMRMLSceneNodeAdded(vtkMRMLNode* vtkNotUsed(node))
 {
 }
 
 //---------------------------------------------------------------------------
-void vtkSlicerKMAPLogic
+void vtkSlicerDynamicPETLogic
 ::OnMRMLSceneNodeRemoved(vtkMRMLNode* vtkNotUsed(node))
 {
 }
 
 
-void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
+void vtkSlicerDynamicPETLogic::computeTAC(vtkIdType ctID,
                                     vtkIdType petID,
                                     vtkIdType segID,
                                     std::vector<QString> segmentsID,
@@ -263,7 +263,7 @@ void vtkSlicerKMAPLogic::computeTAC(vtkIdType ctID,
 
 
 
-void vtkSlicerKMAPLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
+void vtkSlicerDynamicPETLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
 {
   if (!segNode)
   {
@@ -307,7 +307,7 @@ void vtkSlicerKMAPLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
 }
 
 
-VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue)
+VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue)
 {
   vtkImageData* petImage = PETVolume->GetImageData();
   VoxelStatistics stats;
@@ -419,7 +419,7 @@ VoxelStatistics vtkSlicerKMAPLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNo
   return stats;
 }
 
-double vtkSlicerKMAPLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
+double vtkSlicerDynamicPETLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
 {
   double p = 0.0;
 
@@ -440,7 +440,7 @@ double vtkSlicerKMAPLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
   return std::max(0.0, std::min(1.0, p));
 }
 
-ModelComparisonResult vtkSlicerKMAPLogic::compareModels(
+ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
     const std::string& modelA,
     const std::string& modelB,
     const TCMParameters& m1,
@@ -523,7 +523,7 @@ ModelComparisonResult vtkSlicerKMAPLogic::compareModels(
   }
 }
 
-void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
+void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
                              vtkMRMLSequenceNode* segSequenceNode,
                              std::vector<QString> segmentsID,
                              std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs,
@@ -641,7 +641,7 @@ void vtkSlicerKMAPLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
   }
 }
 
-double vtkSlicerKMAPLogic::computeLogLik(const std::vector<double>& y,
+double vtkSlicerDynamicPETLogic::computeLogLik(const std::vector<double>& y,
                                          const std::vector<double>& fitted,
                                          const std::vector<double>* wgt)
 {
@@ -672,7 +672,7 @@ double vtkSlicerKMAPLogic::computeLogLik(const std::vector<double>& y,
 }
 
 
-void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
+void vtkSlicerDynamicPETLogic::callTCM(std :: vector< std :: vector<double> > tac,
                                  std :: vector< std :: vector<double> > Cp,
                                  std :: vector< std :: vector<double> > framing,
                                  long int Nframe,
@@ -879,7 +879,7 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
 
 
 
-// void vtkSlicerKMAPLogic::getFittedTCM(double *& fitted_curve,
+// void vtkSlicerDynamicPETLogic::getFittedTCM(double *& fitted_curve,
 //                                       std :: vector< std :: vector<double> > Cp,
 //                                       std :: vector< std :: vector<double> > framing,
 //                                       long int Nframe,
@@ -983,7 +983,7 @@ void vtkSlicerKMAPLogic::callTCM(std :: vector< std :: vector<double> > tac,
 //   return;
 // }
 
-double vtkSlicerKMAPLogic::computeAIC(const std::vector<double>& obs,
+double vtkSlicerDynamicPETLogic::computeAIC(const std::vector<double>& obs,
                                       const std::vector<double>& est,
                                       int numpar,
                                       const std::vector<double>* wgt,
@@ -1036,7 +1036,7 @@ double vtkSlicerKMAPLogic::computeAIC(const std::vector<double>& obs,
 }
 
 // Compute MASE
-double vtkSlicerKMAPLogic::MASE(const std::vector<double>& Actual,
+double vtkSlicerDynamicPETLogic::MASE(const std::vector<double>& Actual,
                                 const std::vector<double>& Predicted,
                                 const std::vector<double>* wgt)
 {
@@ -1086,7 +1086,7 @@ double vtkSlicerKMAPLogic::MASE(const std::vector<double>& Actual,
     return num / den;
 }
 
-double vtkSlicerKMAPLogic::computeBIC(const std::vector<double>& obs,
+double vtkSlicerDynamicPETLogic::computeBIC(const std::vector<double>& obs,
                                       const std::vector<double>& est,
                                       int numpar,
                                       const std::vector<double>* wgt)
@@ -1119,7 +1119,7 @@ double vtkSlicerKMAPLogic::computeBIC(const std::vector<double>& obs,
     return BIC;
 }
 
-double vtkSlicerKMAPLogic::computeR2(const std::vector<double>& obs,
+double vtkSlicerDynamicPETLogic::computeR2(const std::vector<double>& obs,
                                      const std::vector<double>& est,
                                      const std::vector<double>* wgt)
 {
@@ -1157,7 +1157,7 @@ double vtkSlicerKMAPLogic::computeR2(const std::vector<double>& obs,
     return 1.0 - (sse / sst);
 }
 
-double vtkSlicerKMAPLogic::computeChi2(const std::vector<double>& y,
+double vtkSlicerDynamicPETLogic::computeChi2(const std::vector<double>& y,
                                        const std::vector<double>& fitted,
                                        const std::vector<double>* wgt)
 {
@@ -1184,7 +1184,7 @@ double vtkSlicerKMAPLogic::computeChi2(const std::vector<double>& y,
     return chi2;
 }
 
-double vtkSlicerKMAPLogic::computeVuongP(const std::vector<double>& r1,
+double vtkSlicerDynamicPETLogic::computeVuongP(const std::vector<double>& r1,
                                          const std::vector<double>& r2,
                                          const std::vector<double>* wgt,
                                          int k1, int k2,
@@ -1277,7 +1277,7 @@ double vtkSlicerKMAPLogic::computeVuongP(const std::vector<double>& r1,
 
 
 
-double vtkSlicerKMAPLogic::computeLRTP(double logLik1,
+double vtkSlicerDynamicPETLogic::computeLRTP(double logLik1,
                                        double logLik2,
                                        int df2, int df1
                                       )
@@ -1302,7 +1302,7 @@ double vtkSlicerKMAPLogic::computeLRTP(double logLik1,
   return p;
 }
 
-void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
+void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
                                 const std::vector<double>& Cp,
                                 const std::vector<double>& framing,
                                 MTGAParameters & params,
@@ -1491,7 +1491,7 @@ void vtkSlicerKMAPLogic::Patlak(const std::vector<double>& tac,
   }
 }
 
-void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
+void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
                                const std::vector<double>& Cp,
                                const std::vector<double>& framing,
                                MTGAParameters & params,
@@ -1689,7 +1689,7 @@ void vtkSlicerKMAPLogic::Logan(const std::vector<double>& tac,
   }
 }
 
-void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
+void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
                             const std::vector<double>& Cp,
                             const std::vector<double>& framing,
                             MTGAParameters & params,
@@ -1886,7 +1886,7 @@ void vtkSlicerKMAPLogic::RE(const std::vector<double>& tac,
   }
 }
 
-void vtkSlicerKMAPLogic::Image2Flatten(
+void vtkSlicerDynamicPETLogic::Image2Flatten(
     vtkIdType petID,
     std::vector<std::vector<double>>& flatten_voxels_values,
     int (&dims)[3],
@@ -2050,7 +2050,7 @@ void vtkSlicerKMAPLogic::Image2Flatten(
   }
 }
 
-vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
+vtkMRMLScalarVolumeNode* vtkSlicerDynamicPETLogic::Flatten2Image(
     const std::vector<double>& flatten_values,
     const int dims[3],
     const std::string& name
@@ -2127,7 +2127,7 @@ vtkMRMLScalarVolumeNode* vtkSlicerKMAPLogic::Flatten2Image(
 }
 
 
-void vtkSlicerKMAPLogic::Patlak4Img(
+void vtkSlicerDynamicPETLogic::Patlak4Img(
     const std::vector<std::vector<double>>& voxels,
     const std::vector<double>& Cp,
     const std::vector<double>& framing,
@@ -2383,7 +2383,7 @@ void vtkSlicerKMAPLogic::Patlak4Img(
   }
 }
 
-void vtkSlicerKMAPLogic::Logan4Img(
+void vtkSlicerDynamicPETLogic::Logan4Img(
     const std::vector<std::vector<double>>& voxels, // TACs, [nVoxels][N]
     const std::vector<double>& Cp,
     const std::vector<double>& framing,
@@ -2627,7 +2627,7 @@ void vtkSlicerKMAPLogic::Logan4Img(
     }
 }
 
-void vtkSlicerKMAPLogic::RE4Img(
+void vtkSlicerDynamicPETLogic::RE4Img(
     const std::vector<std::vector<double>>& voxels, // TACs, [nVoxels][N]
     const std::vector<double>& Cp,
     const std::vector<double>& framing,
@@ -2891,7 +2891,7 @@ void vtkSlicerKMAPLogic::RE4Img(
 }
 
 
-std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
+std::vector<double> vtkSlicerDynamicPETLogic::ExtractParameter(
     const std::vector<MTGAParameters>& outputParams,
     const std::string& field)
 {
@@ -2912,7 +2912,7 @@ std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
   return values;
 }
 
-void vtkSlicerKMAPLogic::CreateMTGAParametricImages(
+void vtkSlicerDynamicPETLogic::CreateMTGAParametricImages(
     const std::vector<MTGAParameters>& outputParams,
     const int dims[3],
     const std::vector<std::string>& fields,
@@ -2965,7 +2965,7 @@ void bench_exp_strict()
   double sec = std::chrono::duration<double>(t1 - t0).count();
 }
 
-void vtkSlicerKMAPLogic::callTCMImg(
+void vtkSlicerDynamicPETLogic::callTCMImg(
     const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
     const std::vector<double>& Cp,                    // [Nframe]
     const std::vector<double>& framing,               // [Nframe]
@@ -3275,7 +3275,7 @@ void vtkSlicerKMAPLogic::callTCMImg(
     delete[] cwb_new;
 }
 
-std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
+std::vector<double> vtkSlicerDynamicPETLogic::ExtractParameter(
     const std::vector<TCMParameters>& outputParams,
     const std::string& field)
 {
@@ -3302,7 +3302,7 @@ std::vector<double> vtkSlicerKMAPLogic::ExtractParameter(
   return values;
 }
 
-void vtkSlicerKMAPLogic::CreateTCMParametricImages(
+void vtkSlicerDynamicPETLogic::CreateTCMParametricImages(
     const std::vector<TCMParameters>& outputParams,
     const int dims[3],
     const std::vector<std::string>& fields,

@@ -21,59 +21,59 @@
 #endif
 
 
-// KMAP Logic includes
-#include <vtkSlicerKMAPLogic.h>
+// DynamicPET Logic includes
+#include <vtkSlicerDynamicPETLogic.h>
 
-// KMAP includes
-#include "qSlicerKMAPModule.h"
-#include "qSlicerKMAPModuleWidget.h"
+// DynamicPET includes
+#include "qSlicerDynamicPETModule.h"
+#include "qSlicerDynamicPETModuleWidget.h"
 
 
 
 //-----------------------------------------------------------------------------
-class qSlicerKMAPModulePrivate
+class qSlicerDynamicPETModulePrivate
 {
 public:
-  qSlicerKMAPModulePrivate();
+  qSlicerDynamicPETModulePrivate();
 };
 
 //-----------------------------------------------------------------------------
-// qSlicerKMAPModulePrivate methods
+// qSlicerDynamicPETModulePrivate methods
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModulePrivate::qSlicerKMAPModulePrivate()
+qSlicerDynamicPETModulePrivate::qSlicerDynamicPETModulePrivate()
 {
 }
 
 //-----------------------------------------------------------------------------
-// qSlicerKMAPModule methods
+// qSlicerDynamicPETModule methods
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModule::qSlicerKMAPModule(QObject* _parent)
+qSlicerDynamicPETModule::qSlicerDynamicPETModule(QObject* _parent)
   : Superclass(_parent)
-  , d_ptr(new qSlicerKMAPModulePrivate)
+  , d_ptr(new qSlicerDynamicPETModulePrivate)
 {
 }
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModule::~qSlicerKMAPModule()
+qSlicerDynamicPETModule::~qSlicerDynamicPETModule()
 {
 }
 
 //-----------------------------------------------------------------------------
-QString qSlicerKMAPModule::helpText() const
+QString qSlicerDynamicPETModule::helpText() const
 {
   return "This is a loadable module that can be bundled in an extension";
 }
 
 //-----------------------------------------------------------------------------
-QString qSlicerKMAPModule::acknowledgementText() const
+QString qSlicerDynamicPETModule::acknowledgementText() const
 {
   return "This work was partially funded by NIH grant NXNNXXNNNNNN-NNXN";
 }
 
 //-----------------------------------------------------------------------------
-QStringList qSlicerKMAPModule::contributors() const
+QStringList qSlicerDynamicPETModule::contributors() const
 {
   QStringList moduleContributors;
   moduleContributors << QString("John Doe (AnyWare Corp.)");
@@ -81,38 +81,38 @@ QStringList qSlicerKMAPModule::contributors() const
 }
 
 //-----------------------------------------------------------------------------
-QIcon qSlicerKMAPModule::icon() const
+QIcon qSlicerDynamicPETModule::icon() const
 {
-  return QIcon(":/Icons/KMAP.png");
+  return QIcon(":/Icons/DynamicPET.png");
 }
 
 //-----------------------------------------------------------------------------
-QStringList qSlicerKMAPModule::categories() const
+QStringList qSlicerDynamicPETModule::categories() const
 {
   return QStringList() << "Examples";
 }
 
 //-----------------------------------------------------------------------------
-QStringList qSlicerKMAPModule::dependencies() const
+QStringList qSlicerDynamicPETModule::dependencies() const
 {
   return QStringList();
 }
 
 //-----------------------------------------------------------------------------
-void qSlicerKMAPModule::setup()
+void qSlicerDynamicPETModule::setup()
 {
   this->Superclass::setup();
 }
 
 //-----------------------------------------------------------------------------
-qSlicerAbstractModuleRepresentation* qSlicerKMAPModule
+qSlicerAbstractModuleRepresentation* qSlicerDynamicPETModule
 ::createWidgetRepresentation()
 {
-  return new qSlicerKMAPModuleWidget;
+  return new qSlicerDynamicPETModuleWidget;
 }
 
 //-----------------------------------------------------------------------------
-vtkMRMLAbstractLogic* qSlicerKMAPModule::createLogic()
+vtkMRMLAbstractLogic* qSlicerDynamicPETModule::createLogic()
 {
-  return vtkSlicerKMAPLogic::New();
+  return vtkSlicerDynamicPETLogic::New();
 }

@@ -19,53 +19,53 @@
 ==============================================================================*/
 
 // FooBar Widgets includes
-#include "qSlicerKMAPFooBarWidget.h"
-#include "ui_qSlicerKMAPFooBarWidget.h"
+#include "qSlicerDynamicPETFooBarWidget.h"
+#include "ui_qSlicerDynamicPETFooBarWidget.h"
 
 //-----------------------------------------------------------------------------
-class qSlicerKMAPFooBarWidgetPrivate
-  : public Ui_qSlicerKMAPFooBarWidget
+class qSlicerDynamicPETFooBarWidgetPrivate
+  : public Ui_qSlicerDynamicPETFooBarWidget
 {
-  Q_DECLARE_PUBLIC(qSlicerKMAPFooBarWidget);
+  Q_DECLARE_PUBLIC(qSlicerDynamicPETFooBarWidget);
 protected:
-  qSlicerKMAPFooBarWidget* const q_ptr;
+  qSlicerDynamicPETFooBarWidget* const q_ptr;
 
 public:
-  qSlicerKMAPFooBarWidgetPrivate(
-    qSlicerKMAPFooBarWidget& object);
-  virtual void setupUi(qSlicerKMAPFooBarWidget*);
+  qSlicerDynamicPETFooBarWidgetPrivate(
+    qSlicerDynamicPETFooBarWidget& object);
+  virtual void setupUi(qSlicerDynamicPETFooBarWidget*);
 };
 
 // --------------------------------------------------------------------------
-qSlicerKMAPFooBarWidgetPrivate
-::qSlicerKMAPFooBarWidgetPrivate(
-  qSlicerKMAPFooBarWidget& object)
+qSlicerDynamicPETFooBarWidgetPrivate
+::qSlicerDynamicPETFooBarWidgetPrivate(
+  qSlicerDynamicPETFooBarWidget& object)
   : q_ptr(&object)
 {
 }
 
 // --------------------------------------------------------------------------
-void qSlicerKMAPFooBarWidgetPrivate
-::setupUi(qSlicerKMAPFooBarWidget* widget)
+void qSlicerDynamicPETFooBarWidgetPrivate
+::setupUi(qSlicerDynamicPETFooBarWidget* widget)
 {
-  this->Ui_qSlicerKMAPFooBarWidget::setupUi(widget);
+  this->Ui_qSlicerDynamicPETFooBarWidget::setupUi(widget);
 }
 
 //-----------------------------------------------------------------------------
-// qSlicerKMAPFooBarWidget methods
+// qSlicerDynamicPETFooBarWidget methods
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPFooBarWidget
-::qSlicerKMAPFooBarWidget(QWidget* parentWidget)
+qSlicerDynamicPETFooBarWidget
+::qSlicerDynamicPETFooBarWidget(QWidget* parentWidget)
   : Superclass( parentWidget )
-  , d_ptr( new qSlicerKMAPFooBarWidgetPrivate(*this) )
+  , d_ptr( new qSlicerDynamicPETFooBarWidgetPrivate(*this) )
 {
-  Q_D(qSlicerKMAPFooBarWidget);
+  Q_D(qSlicerDynamicPETFooBarWidget);
   d->setupUi(this);
 }
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPFooBarWidget
-::~qSlicerKMAPFooBarWidget()
+qSlicerDynamicPETFooBarWidget
+::~qSlicerDynamicPETFooBarWidget()
 {
 }

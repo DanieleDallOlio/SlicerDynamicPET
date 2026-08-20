@@ -15,14 +15,14 @@
 
 ==============================================================================*/
 
-// .NAME vtkSlicerKMAPLogic - slicer logic class for volumes manipulation
+// .NAME vtkSlicerDynamicPETLogic - slicer logic class for volumes manipulation
 // .SECTION Description
 // This class manages the logic associated with reading, saving,
 // and changing propertied of the volumes
 
 
-#ifndef __vtkSlicerKMAPLogic_h
-#define __vtkSlicerKMAPLogic_h
+#ifndef __vtkSlicerDynamicPETLogic_h
+#define __vtkSlicerDynamicPETLogic_h
 
 // Slicer includes
 #include "vtkSlicerModuleLogic.h"
@@ -33,7 +33,7 @@
 // STD includes
 #include <cstdlib>
 
-#include "vtkSlicerKMAPModuleLogicExport.h"
+#include "vtkSlicerDynamicPETModuleLogicExport.h"
 #include "vtkMRMLSubjectHierarchyNode.h"
 #include <vtkMRMLScalarVolumeNode.h>
 #include <vtkMRMLSegmentationNode.h>
@@ -128,13 +128,13 @@ enum class VuongCorrection { None, AIC, BIC };
 
 enum class Tail { TwoSided, Model1Greater, Model2Greater };
 
-class VTK_SLICER_KMAP_MODULE_LOGIC_EXPORT vtkSlicerKMAPLogic :
+class VTK_SLICER_DYNAMICPET_MODULE_LOGIC_EXPORT vtkSlicerDynamicPETLogic :
   public vtkSlicerModuleLogic
 {
 public:
 
-  static vtkSlicerKMAPLogic *New();
-  vtkTypeMacro(vtkSlicerKMAPLogic, vtkSlicerModuleLogic);
+  static vtkSlicerDynamicPETLogic *New();
+  vtkTypeMacro(vtkSlicerDynamicPETLogic, vtkSlicerModuleLogic);
   void PrintSelf(ostream& os, vtkIndent indent) override;
   void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar, QPushButton* stopButton, std::atomic<bool>& stopRequested);
   void setupSeg(vtkMRMLSegmentationNode* segNode);
@@ -369,8 +369,8 @@ public:
       vtkIdType refID
     );
 protected:
-  vtkSlicerKMAPLogic();
-  ~vtkSlicerKMAPLogic() override;
+  vtkSlicerDynamicPETLogic();
+  ~vtkSlicerDynamicPETLogic() override;
 
   void SetMRMLSceneInternal(vtkMRMLScene* newScene) override;
   /// Register MRML Node classes to Scene. Gets called automatically when the MRMLScene is attached to this logic class.
@@ -380,8 +380,8 @@ protected:
   void OnMRMLSceneNodeRemoved(vtkMRMLNode* node) override;
 private:
 
-  vtkSlicerKMAPLogic(const vtkSlicerKMAPLogic&); // Not implemented
-  void operator=(const vtkSlicerKMAPLogic&); // Not implemented
+  vtkSlicerDynamicPETLogic(const vtkSlicerDynamicPETLogic&); // Not implemented
+  void operator=(const vtkSlicerDynamicPETLogic&); // Not implemented
 };
 
 #endif

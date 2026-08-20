@@ -24,8 +24,8 @@
 // Qt includes
 
 // Slicer includes
-#include "qSlicerKMAPModuleWidget.h"
-#include "ui_qSlicerKMAPModuleWidget.h"
+#include "qSlicerDynamicPETModuleWidget.h"
+#include "ui_qSlicerDynamicPETModuleWidget.h"
 #include <QApplication>
 
 #ifdef _WIN32
@@ -92,18 +92,18 @@ std::vector<std::string> sortedSegmentIDs(
 
 
 //-----------------------------------------------------------------------------
-class qSlicerKMAPModuleWidgetPrivate: public Ui_qSlicerKMAPModuleWidget
+class qSlicerDynamicPETModuleWidgetPrivate: public Ui_qSlicerDynamicPETModuleWidget
 {
-  Q_DECLARE_PUBLIC(qSlicerKMAPModuleWidget);
+  Q_DECLARE_PUBLIC(qSlicerDynamicPETModuleWidget);
 
 protected:
-  qSlicerKMAPModuleWidget* const q_ptr;
+  qSlicerDynamicPETModuleWidget* const q_ptr;
   void setDoubleField(QLineEdit* le, double lo, double hi, int decimals);
   void setIntField(QLineEdit* le, int lo, int hi);
 public:
   std::vector<std::string> segmentDisplayOrder;
-  qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModuleWidget& object);
-  ~qSlicerKMAPModuleWidgetPrivate()=default;
+  qSlicerDynamicPETModuleWidgetPrivate(qSlicerDynamicPETModuleWidget& object);
+  ~qSlicerDynamicPETModuleWidgetPrivate()=default;
   void init();
   void populatePatientComboBox();
   void populateStudyComboBox(vtkIdType patientID);
@@ -134,16 +134,16 @@ public:
 };
 
 //-----------------------------------------------------------------------------
-// qSlicerKMAPModuleWidgetPrivate methods
+// qSlicerDynamicPETModuleWidgetPrivate methods
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModuleWidgetPrivate::qSlicerKMAPModuleWidgetPrivate(qSlicerKMAPModuleWidget& object): q_ptr(&object)
+qSlicerDynamicPETModuleWidgetPrivate::qSlicerDynamicPETModuleWidgetPrivate(qSlicerDynamicPETModuleWidget& object): q_ptr(&object)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::setDoubleField(QLineEdit* le, double lo, double hi, int decimals)
+void qSlicerDynamicPETModuleWidgetPrivate::setDoubleField(QLineEdit* le, double lo, double hi, int decimals)
 {
 
   QObject::connect(le, &QLineEdit::editingFinished, le, [le, lo, hi, decimals]() {
@@ -162,7 +162,7 @@ void qSlicerKMAPModuleWidgetPrivate::setDoubleField(QLineEdit* le, double lo, do
   return ;
 }
 
-void qSlicerKMAPModuleWidgetPrivate::setIntField(QLineEdit* le, int lo, int hi)
+void qSlicerDynamicPETModuleWidgetPrivate::setIntField(QLineEdit* le, int lo, int hi)
 {
   QObject::connect(le, &QLineEdit::editingFinished, le, [le, lo, hi]() {
     bool ok = false;
@@ -180,9 +180,9 @@ void qSlicerKMAPModuleWidgetPrivate::setIntField(QLineEdit* le, int lo, int hi)
 }
 
 //-----------------------------------------------------------------------------
-void qSlicerKMAPModuleWidgetPrivate::init()
+void qSlicerDynamicPETModuleWidgetPrivate::init()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
   this->setupUi(q);
 
 
@@ -571,8 +571,8 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
 
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
-  Q_Q(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidgetPrivate::populatePatientComboBox() {
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   vtkIdType currentSelectedID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   int currentIndex = this->PatSelector->currentIndex();
@@ -652,9 +652,9 @@ void qSlicerKMAPModuleWidgetPrivate::populatePatientComboBox() {
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populateStudyComboBox(vtkIdType patientID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateStudyComboBox(vtkIdType patientID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
   // Save current selection by study ID
   vtkIdType currentSelectedStudyID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   int currentIndex = this->StuSelector->currentIndex();
@@ -789,14 +789,14 @@ void qSlicerKMAPModuleWidgetPrivate::populateStudyComboBox(vtkIdType patientID)
   return;
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateNodeComboBox(
+void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
   QComboBox* comboBox,
   vtkIdType parentItemID,
   const char * requiredNodeType,
   const std :: string requiredModality = ""  // Optional: empty string disables filtering
 )
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
   // Save current selection
   vtkIdType currentSelectedItemID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   int currentIndex = comboBox->currentIndex();
@@ -929,9 +929,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateNodeComboBox(
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItemID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItemID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   // Step 1: Save currently selected segment IDs
   QSet<QString> previouslySelectedIDs;
@@ -1059,9 +1059,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateSegmentCheckboxes(vtkIdType SegItem
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
+void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   // Step 1: Save currently selected segment IDs
   QSet<QString> previouslyPlotSelectedIDs;
@@ -1115,8 +1115,8 @@ void qSlicerKMAPModuleWidgetPrivate::populatePlotSegmentCheckboxes()
   this->PlotSegmentCheckContents->blockSignals(false);
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGA() {
-  Q_Q(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA() {
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   this->timeOffsetSlider->setMinimum(1);
   this->timeOffsetSlider->setMaximum(q->numberOfTimepoints);
@@ -1131,8 +1131,8 @@ void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGA() {
     q, SLOT(onSliderChanged(int)));
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGAImg() {
-  Q_Q(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg() {
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   this->timeOffsetSliderImg->setMinimum(1);
   this->timeOffsetSliderImg->setMaximum(q->numberOfTimepoints);
@@ -1147,9 +1147,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateTimeBarMTGAImg() {
     q, SLOT(onSliderImgChanged(int)));
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateIF()
+void qSlicerDynamicPETModuleWidgetPrivate::populateIF()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->IFSelector->currentIndex();
@@ -1200,9 +1200,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateIF()
   return;
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateIFMTGA()
+void qSlicerDynamicPETModuleWidgetPrivate::populateIFMTGA()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->IFSelectorMTGA->currentIndex();
@@ -1253,9 +1253,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateIFMTGA()
   return;
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateIFImg()
+void qSlicerDynamicPETModuleWidgetPrivate::populateIFImg()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->IFSelectorImg->currentIndex();
@@ -1304,9 +1304,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateIFImg()
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populateVOI(std :: string ifID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateVOI(std :: string ifID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   // Step 1: Save currently selected segment IDs
   QSet<QString> previouslySelectedIDs;
@@ -1373,9 +1373,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateVOI(std :: string ifID)
 
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateVOIMTGA(std :: string ifID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateVOIMTGA(std :: string ifID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   // Step 1: Save currently selected segment IDs
   QSet<QString> previouslySelectedIDs;
@@ -1442,9 +1442,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateVOIMTGA(std :: string ifID)
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populateResultsVOI()
+void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOI()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->VOISelector->currentIndex();
@@ -1493,9 +1493,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsVOI()
   return;
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateResultsVOIMTGA()
+void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOIMTGA()
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->VOISelectorMTGA->currentIndex();
@@ -1553,9 +1553,9 @@ auto makeNumericItem = [](double value, int precision = 6) {
     return item;
 };
 
-void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string segmentID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   this->TCMResultsTable->clear();
   this->TCMResultsTable->setRowCount(0);
@@ -1628,9 +1628,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsTable(std :: string segmentI
   }
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segmentID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateResultsMTGATable(std :: string segmentID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   this->MTGAResultsTable->clear();
   this->MTGAResultsTable->setRowCount(0);
@@ -1697,9 +1697,9 @@ void qSlicerKMAPModuleWidgetPrivate::populateResultsMTGATable(std :: string segm
 }
 
 
-void qSlicerKMAPModuleWidgetPrivate::populateModelsTCM(std :: string segmentID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateModelsTCM(std :: string segmentID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
   // Step 1: Save currently selected segment IDs
   QSet<QString> previouslySelectedIDs;
   for (int i = 0; i < this->ModelsTCMCheckLayout->count(); ++i)
@@ -1749,10 +1749,10 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelsTCM(std :: string segmentID)
   q->onPlotTCMbutton();
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateModelsMTGA(std :: string segmentID)
+void qSlicerDynamicPETModuleWidgetPrivate::populateModelsMTGA(std :: string segmentID)
 {
 
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   std :: string currentSelectedID = "";
   int currentIndex = this->MTGASelector->currentIndex();
@@ -1796,13 +1796,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelsMTGA(std :: string segmentID)
   q->onPlotMTGAbutton();
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateModelCombo(
+void qSlicerDynamicPETModuleWidgetPrivate::populateModelCombo(
     QComboBox* comboToFill,
     const std::string& otherSelectedModel,
     const std::string& currentSelectedModel,
     const std::string& segmentID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   if (segmentID.empty()) {
     this->MTGAModel1->clear();
@@ -1847,13 +1847,13 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelCombo(
   comboToFill->blockSignals(false);
 }
 
-void qSlicerKMAPModuleWidgetPrivate::populateModelComboTCM(
+void qSlicerDynamicPETModuleWidgetPrivate::populateModelComboTCM(
     QComboBox* comboToFill,
     const std::string& otherSelectedModel,
     const std::string& currentSelectedModel,
     const std::string& segmentID)
 {
-  Q_Q(qSlicerKMAPModuleWidget);
+  Q_Q(qSlicerDynamicPETModuleWidget);
 
   if (segmentID.empty()) {
     this->TCMModel1->clear();
@@ -1903,14 +1903,14 @@ void qSlicerKMAPModuleWidgetPrivate::populateModelComboTCM(
 
 
 //-----------------------------------------------------------------------------
-// qSlicerKMAPModuleWidget methods
+// qSlicerDynamicPETModuleWidget methods
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
+qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
   : Superclass( _parent )
-  , d_ptr( new qSlicerKMAPModuleWidgetPrivate(*this) )
+  , d_ptr( new qSlicerDynamicPETModuleWidgetPrivate(*this) )
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->SubjectHierarchyNode = nullptr;
   this->patID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->stuID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
@@ -1984,11 +1984,11 @@ qSlicerKMAPModuleWidget::qSlicerKMAPModuleWidget(QWidget* _parent)
 }
 
 //-----------------------------------------------------------------------------
-qSlicerKMAPModuleWidget::~qSlicerKMAPModuleWidget()
+qSlicerDynamicPETModuleWidget::~qSlicerDynamicPETModuleWidget()
 {
 }
 
-// void qSlicerKMAPModuleWidget::setNodeSelectorEnabled(qMRMLNodeComboBox* selector, bool enabled)
+// void qSlicerDynamicPETModuleWidget::setNodeSelectorEnabled(qMRMLNodeComboBox* selector, bool enabled)
 // {
 //   selector->setEnabled(enabled);
 //   const auto children = selector->findChildren<QWidget*>();
@@ -1998,7 +1998,7 @@ qSlicerKMAPModuleWidget::~qSlicerKMAPModuleWidget()
 //   }
 // }
 
-// std::map<std::string, vtkIdType> qSlicerKMAPModuleWidget::GetStudyAndPatientAncestors(
+// std::map<std::string, vtkIdType> qSlicerDynamicPETModuleWidget::GetStudyAndPatientAncestors(
 //   vtkMRMLSubjectHierarchyNode* shNode,
 //   vtkIdType itemID)
 // {
@@ -2038,24 +2038,24 @@ qSlicerKMAPModuleWidget::~qSlicerKMAPModuleWidget()
 // }
 
 
-// void qSlicerKMAPModuleWidget::showProgressBar()
+// void qSlicerDynamicPETModuleWidget::showProgressBar()
 // {
 //   this->ui->progressBar->setVisible(true);
 //   this->ui->progressBar->setValue(0);
 // }
 //
-// void qSlicerKMAPModuleWidget::updateProgress(double progress)
+// void qSlicerDynamicPETModuleWidget::updateProgress(double progress)
 // {
 //   this->ui->progressBar->setValue(static_cast<int>(progress * 100.0));
 //   qApp->processEvents(); // To force GUI update
 // }
 //
-// void qSlicerKMAPModuleWidget::hideProgressBar()
+// void qSlicerDynamicPETModuleWidget::hideProgressBar()
 // {
 //   this->ui->progressBar->setVisible(false);
 // }
 
-void qSlicerKMAPModuleWidget::enter()
+void qSlicerDynamicPETModuleWidget::enter()
 {
   this->IsActive = true;
   this->Superclass::enter();
@@ -2064,25 +2064,25 @@ void qSlicerKMAPModuleWidget::enter()
   this->onSubjectHierarchyChanged();
 }
 
-void qSlicerKMAPModuleWidget::exit()
+void qSlicerDynamicPETModuleWidget::exit()
 {
   this->IsActive = false;
   this->Superclass::exit();
 }
 
 
-void qSlicerKMAPModuleWidget::onSubjectHierarchyChanged() {
+void qSlicerDynamicPETModuleWidget::onSubjectHierarchyChanged() {
   if (!this->IsActive)
   {
     return;  // Don't do anything if the module is not active
   }
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->populatePatientComboBox();
 }
 
-void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
+void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->Superclass::setMRMLScene(scene);
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   this->qvtkDisconnectAll();
 
@@ -2098,7 +2098,7 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   }
   this->SegWatcher = vtkSmartPointer<SegmentationChangeWatcher>::New();
   this->SegWatcher->GetSequencePET = [this]() { return this->sequencePETNode; };
-  this->SegWatcher->GetLogic = [this]() { return vtkSlicerKMAPLogic::SafeDownCast(this->logic()); };
+  this->SegWatcher->GetLogic = [this]() { return vtkSlicerDynamicPETLogic::SafeDownCast(this->logic()); };
   this->SegWatcher->GetsegmentTACs = [this]() { return &this->segmentTACs; };
   this->SegWatcher->GetSegEditCorr = [d]() { return d->PlotLiveSegEdit->isChecked(); };
   this->SegWatcher->RunPlot = [this]() { this->onPlotbutton(); };
@@ -2109,8 +2109,8 @@ void qSlicerKMAPModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
 
 
 
-void qSlicerKMAPModuleWidget::onPatChanged (int index) {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onPatChanged (int index) {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->patID = d->PatSelector->itemData(index).value<vtkIdType>();
   d->populateStudyComboBox(this->patID);
   if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
@@ -2133,8 +2133,8 @@ void qSlicerKMAPModuleWidget::onPatChanged (int index) {
 }
 
 
-void qSlicerKMAPModuleWidget::onStuChanged (int index) {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onStuChanged (int index) {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->stuID = d->StuSelector->itemData(index).value<vtkIdType>();
   d->populateNodeComboBox(d->CTSelector,
                           this->stuID,
@@ -2154,15 +2154,15 @@ void qSlicerKMAPModuleWidget::onStuChanged (int index) {
 }
 
 
-void qSlicerKMAPModuleWidget::onCTChanged (int index) {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onCTChanged (int index) {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->ctID = d->CTSelector->itemData(index).value<vtkIdType>();
   this->enableTACbutton();
 }
 
-void qSlicerKMAPModuleWidget::resetPETSelection()
+void qSlicerDynamicPETModuleWidget::resetPETSelection()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
   this->SegWatcher->browser = nullptr;
@@ -2189,8 +2189,8 @@ void qSlicerKMAPModuleWidget::resetPETSelection()
                           );
 }
 
-void qSlicerKMAPModuleWidget::onPETChanged (int index) {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
 
   this->sequencePETNode = nullptr;
@@ -2405,8 +2405,8 @@ void qSlicerKMAPModuleWidget::onPETChanged (int index) {
   }
 }
 
-void qSlicerKMAPModuleWidget::onSegChanged (int index) {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onSegChanged (int index) {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->segID = d->SegSelector->itemData(index).value<vtkIdType>();
 
   this->segSequenceNode = nullptr;
@@ -2448,7 +2448,7 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
     return;
   }
   // Make sure the source of the segmentation is a binary label map, alongside a created closed surface
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     return;
   }
@@ -2556,9 +2556,9 @@ void qSlicerKMAPModuleWidget::onSegChanged (int index) {
 
 }
 
-void qSlicerKMAPModuleWidget::onSegmentsChanged()
+void qSlicerDynamicPETModuleWidget::onSegmentsChanged()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   // std::vector<QString> selectedSegmentIDs;
   //
   // for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
@@ -2575,8 +2575,8 @@ void qSlicerKMAPModuleWidget::onSegmentsChanged()
   d->populateSegmentCheckboxes(this->segID);
 }
 
-void qSlicerKMAPModuleWidget::clearTACdata() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::clearTACdata() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->PET_flatten_values.clear();
   this->RemoveExistingPlotChartAndTable();
   this->segmentTACs.clear();
@@ -2600,8 +2600,8 @@ void qSlicerKMAPModuleWidget::clearTACdata() {
   return;
 }
 
-void qSlicerKMAPModuleWidget::enableTACbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::enableTACbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   if (this->ctID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
     this->clearTACdata();
@@ -2636,14 +2636,14 @@ void qSlicerKMAPModuleWidget::enableTACbutton() {
 }
 
 
-vtkMRMLTableNode* qSlicerKMAPModuleWidget::GetOrCreatePlotTable()
+vtkMRMLTableNode* qSlicerDynamicPETModuleWidget::GetOrCreatePlotTable()
 {
   vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
-    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
+    this->mrmlScene()->GetFirstNodeByName("DynamicPET.PlotTable"));
   if (!tableNode)
   {
     tableNode = vtkMRMLTableNode::New();
-    tableNode->SetName("KMAP.PlotTable");
+    tableNode->SetName("DynamicPET.PlotTable");
     this->mrmlScene()->AddNode(tableNode);
     tableNode->Delete();
   }
@@ -2654,14 +2654,14 @@ vtkMRMLTableNode* qSlicerKMAPModuleWidget::GetOrCreatePlotTable()
   return tableNode;
 }
 
-vtkMRMLPlotChartNode* qSlicerKMAPModuleWidget::GetOrCreatePlotChart()
+vtkMRMLPlotChartNode* qSlicerDynamicPETModuleWidget::GetOrCreatePlotChart()
 {
   vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
-    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotChart"));
+    this->mrmlScene()->GetFirstNodeByName("DynamicPET.PlotChart"));
   if (!chartNode)
   {
     chartNode = vtkMRMLPlotChartNode::New();
-    chartNode->SetName("KMAP.PlotChart");
+    chartNode->SetName("DynamicPET.PlotChart");
     this->mrmlScene()->AddNode(chartNode);
     chartNode->Delete();
   }
@@ -2672,7 +2672,7 @@ vtkMRMLPlotChartNode* qSlicerKMAPModuleWidget::GetOrCreatePlotChart()
   return chartNode;
 }
 
-void qSlicerKMAPModuleWidget::RemoveExistingPlotChartAndTable()
+void qSlicerDynamicPETModuleWidget::RemoveExistingPlotChartAndTable()
 {
   this->MapPlotSeriesNodeIDToPlot.clear();
   this->ColNameToSegmentID.clear();
@@ -2681,7 +2681,7 @@ void qSlicerKMAPModuleWidget::RemoveExistingPlotChartAndTable()
   this->lastSelection.clear();
 
   vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
-    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotChart"));
+    this->mrmlScene()->GetFirstNodeByName("DynamicPET.PlotChart"));
   if (chartNode)
   {
     vtkCollection* viewNodes = this->mrmlScene()->GetNodesByClass("vtkMRMLPlotViewNode");
@@ -2712,20 +2712,20 @@ void qSlicerKMAPModuleWidget::RemoveExistingPlotChartAndTable()
   }
 
   vtkMRMLTableNode* tableNode = vtkMRMLTableNode::SafeDownCast(
-    this->mrmlScene()->GetFirstNodeByName("KMAP.PlotTable"));
+    this->mrmlScene()->GetFirstNodeByName("DynamicPET.PlotTable"));
   if (tableNode)
     this->mrmlScene()->RemoveNode(tableNode);
 }
 
-void qSlicerKMAPModuleWidget::onTACbutton()
+void qSlicerDynamicPETModuleWidget::onTACbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   vtkMRMLScene* scene = this->mrmlScene();
   if (!scene) {
     return;
   }
   // Run TAC computation
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     return;
   }
@@ -2777,9 +2777,9 @@ void qSlicerKMAPModuleWidget::onTACbutton()
   return;
 }
 
-void qSlicerKMAPModuleWidget::onSelectAllbutton()
+void qSlicerDynamicPETModuleWidget::onSelectAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->SegmentCheckContents->blockSignals(true);
   if (this->segmentIDs.size()==(d->segmentCheckLayout->count()-1)) {
     for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
@@ -2810,39 +2810,39 @@ void qSlicerKMAPModuleWidget::onSelectAllbutton()
   d->populateSegmentCheckboxes(this->segID);
 }
 
-void qSlicerKMAPModuleWidget::onExcelPathChanged(const QString& path)
+void qSlicerDynamicPETModuleWidget::onExcelPathChanged(const QString& path)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->saveExcelButton->setEnabled(!path.trimmed().isEmpty());
 }
 
-void qSlicerKMAPModuleWidget::onExcelTCMPathChanged(const QString& path)
+void qSlicerDynamicPETModuleWidget::onExcelTCMPathChanged(const QString& path)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->saveTCMExcelButton->setEnabled(!path.trimmed().isEmpty());
 }
 
-void qSlicerKMAPModuleWidget::onExcelMTGAPathChanged(const QString& path)
+void qSlicerDynamicPETModuleWidget::onExcelMTGAPathChanged(const QString& path)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->saveMTGAExcelButton->setEnabled(!path.trimmed().isEmpty());
 }
 
-void qSlicerKMAPModuleWidget::onExcelTCMfittedPathChanged(const QString& path)
+void qSlicerDynamicPETModuleWidget::onExcelTCMfittedPathChanged(const QString& path)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->saveTCMfittedExcelButton->setEnabled(!path.trimmed().isEmpty());
 }
 
-void qSlicerKMAPModuleWidget::onExcelMTGAfittedPathChanged(const QString& path)
+void qSlicerDynamicPETModuleWidget::onExcelMTGAfittedPathChanged(const QString& path)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->saveMTGAfittedExcelButton->setEnabled(!path.trimmed().isEmpty());
 }
 
-QVariantMap qSlicerKMAPModuleWidget::TACtoPythonDict()
+QVariantMap qSlicerDynamicPETModuleWidget::TACtoPythonDict()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QVariantMap out;
 
   for (const auto& [segmentName, statsVec] : this->segmentTACs)
@@ -2893,7 +2893,7 @@ QVariantMap qSlicerKMAPModuleWidget::TACtoPythonDict()
   return out;
 }
 
-QVariantMap qSlicerKMAPModuleWidget::TCMParamsToPythonDict()
+QVariantMap qSlicerDynamicPETModuleWidget::TCMParamsToPythonDict()
 {
   QVariantMap out;
 
@@ -2934,7 +2934,7 @@ QVariantMap qSlicerKMAPModuleWidget::TCMParamsToPythonDict()
   return out;
 }
 
-QVariantMap qSlicerKMAPModuleWidget::MTGAParamsToPythonDict()
+QVariantMap qSlicerDynamicPETModuleWidget::MTGAParamsToPythonDict()
 {
   QVariantMap out;
 
@@ -2970,9 +2970,9 @@ QVariantMap qSlicerKMAPModuleWidget::MTGAParamsToPythonDict()
   return out;
 }
 
-QVariantMap qSlicerKMAPModuleWidget::fittedTCMtoPythonDict()
+QVariantMap qSlicerDynamicPETModuleWidget::fittedTCMtoPythonDict()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QVariantMap out;
 
   int statIDQString = d->StatSelector->currentIndex();
@@ -3025,9 +3025,9 @@ QVariantMap qSlicerKMAPModuleWidget::fittedTCMtoPythonDict()
   return out;
 }
 
-QVariantMap qSlicerKMAPModuleWidget::fittedMTGAtoPythonDict()
+QVariantMap qSlicerDynamicPETModuleWidget::fittedMTGAtoPythonDict()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QVariantMap out;
 
   int statIDQString = d->StatSelectorMTGA->currentIndex();
@@ -3072,9 +3072,9 @@ QVariantMap qSlicerKMAPModuleWidget::fittedMTGAtoPythonDict()
   return out;
 }
 
-void qSlicerKMAPModuleWidget::onSaveExcelbutton()
+void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QString path = d->direxcel->currentPath();
   QString filename = d->fileexcel->text();
   QString fullPath = QDir(path).filePath(filename);
@@ -3084,9 +3084,9 @@ void qSlicerKMAPModuleWidget::onSaveExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
-void qSlicerKMAPModuleWidget::onSaveTCMExcelbutton()
+void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QString path = d->direxceltcm->currentPath();
   QString filename = d->fileexceltcm->text();
   QString fullPath = QDir(path).filePath(filename);
@@ -3096,9 +3096,9 @@ void qSlicerKMAPModuleWidget::onSaveTCMExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_saveTCM_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
-void qSlicerKMAPModuleWidget::onSaveMTGAExcelbutton()
+void qSlicerDynamicPETModuleWidget::onSaveMTGAExcelbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QString path = d->direxcelmtga->currentPath();
   QString filename = d->fileexcelmtga->text();
   QString fullPath = QDir(path).filePath(filename);
@@ -3108,9 +3108,9 @@ void qSlicerKMAPModuleWidget::onSaveMTGAExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_saveMTGA_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
-void qSlicerKMAPModuleWidget::onSaveTCMfittedExcelbutton()
+void qSlicerDynamicPETModuleWidget::onSaveTCMfittedExcelbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QString path = d->direxceltcmfitted->currentPath();
   QString filename = d->fileexceltcmfitted->text();
   QString fullPath = QDir(path).filePath(filename);
@@ -3120,9 +3120,9 @@ void qSlicerKMAPModuleWidget::onSaveTCMfittedExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_generic_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
-void qSlicerKMAPModuleWidget::onSaveMTGAfittedExcelbutton()
+void qSlicerDynamicPETModuleWidget::onSaveMTGAfittedExcelbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   QString path = d->direxcelmtgafitted->currentPath();
   QString filename = d->fileexcelmtgafitted->text();
   QString fullPath = QDir(path).filePath(filename);
@@ -3132,9 +3132,9 @@ void qSlicerKMAPModuleWidget::onSaveMTGAfittedExcelbutton()
   PythonQtObjectPtr result = mainContext.call("DPE_genericMTGA_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
 }
 
-void qSlicerKMAPModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol)
+void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol)
 {
-  if (!this->checkdisplayedKMAP())
+  if (!this->checkdisplayedDynamicPET())
     return;
 
   vtkMRMLScene* scene = this->mrmlScene();
@@ -3223,9 +3223,9 @@ void qSlicerKMAPModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs,
   this->lastSelection = newSelection;
 }
 
-void qSlicerKMAPModuleWidget::onPlotbutton()
+void qSlicerDynamicPETModuleWidget::onPlotbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->ColNameToSegmentID.clear();
   this->MapPlotSeriesNodeIDToPlot.clear();
   vtkMRMLScene* scene = this->mrmlScene();
@@ -3458,9 +3458,9 @@ void qSlicerKMAPModuleWidget::onPlotbutton()
   }
 }
 
-void qSlicerKMAPModuleWidget::onIFSelectionChanged(int index)
+void qSlicerDynamicPETModuleWidget::onIFSelectionChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->IFID = d->IFSelector->itemData(index).toString().toStdString();
   d->populateVOI(this->IFID);
   d->IFSelectorMTGA->setCurrentIndex(index);
@@ -3473,9 +3473,9 @@ void qSlicerKMAPModuleWidget::onIFSelectionChanged(int index)
 
 }
 
-void qSlicerKMAPModuleWidget::onIFMTGASelectionChanged(int index)
+void qSlicerDynamicPETModuleWidget::onIFMTGASelectionChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->IFID = d->IFSelectorMTGA->itemData(index).toString().toStdString();
   d->populateVOIMTGA(this->IFID);
   d->IFSelector->setCurrentIndex(index);
@@ -3488,9 +3488,9 @@ void qSlicerKMAPModuleWidget::onIFMTGASelectionChanged(int index)
 
 }
 
-void qSlicerKMAPModuleWidget::onIFImgSelectionChanged(int index)
+void qSlicerDynamicPETModuleWidget::onIFImgSelectionChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->IFID = d->IFSelectorImg->itemData(index).toString().toStdString();
   d->IFSelector->setCurrentIndex(index);
   d->IFSelectorMTGA->setCurrentIndex(index);
@@ -3503,9 +3503,9 @@ void qSlicerKMAPModuleWidget::onIFImgSelectionChanged(int index)
 
 }
 
-void qSlicerKMAPModuleWidget::onVOISelectionChanged(int index)
+void qSlicerDynamicPETModuleWidget::onVOISelectionChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   std :: string segmentID = d->VOISelector->itemData(index).toString().toStdString();
   this->plotTCMVOI=segmentID;
   d->populateResultsTable(segmentID);
@@ -3515,9 +3515,9 @@ void qSlicerKMAPModuleWidget::onVOISelectionChanged(int index)
   }
 }
 
-void qSlicerKMAPModuleWidget::onVOIMTGASelectionChanged(int index)
+void qSlicerDynamicPETModuleWidget::onVOIMTGASelectionChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   std :: string segmentID = d->VOISelectorMTGA->itemData(index).toString().toStdString();
   this->plotMTGAVOI=segmentID;
   d->populateResultsMTGATable(segmentID);
@@ -3527,9 +3527,9 @@ void qSlicerKMAPModuleWidget::onVOIMTGASelectionChanged(int index)
   }
 }
 
-void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
+void qSlicerDynamicPETModuleWidget::onVOISelectAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->VOICheckContents->blockSignals(true);
   if (this->VOIsegmentIDs.size()==(d->VOICheckLayout->count()-1)) {
     for (int i = 0; i < d->VOICheckLayout->count(); ++i)
@@ -3560,9 +3560,9 @@ void qSlicerKMAPModuleWidget::onVOISelectAllbutton()
   d->populateVOI(this->IFID);
 }
 
-void qSlicerKMAPModuleWidget::onVOIMTGASelectAllbutton()
+void qSlicerDynamicPETModuleWidget::onVOIMTGASelectAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->VOIMTGACheckContents->blockSignals(true);
   if (this->VOIMTGAsegmentIDs.size()==(d->VOIMTGACheckLayout->count()-1)) {
     for (int i = 0; i < d->VOIMTGACheckLayout->count(); ++i)
@@ -3593,9 +3593,9 @@ void qSlicerKMAPModuleWidget::onVOIMTGASelectAllbutton()
   d->populateVOIMTGA(this->IFID);
 }
 
-void qSlicerKMAPModuleWidget::onOLSclicked()
+void qSlicerDynamicPETModuleWidget::onOLSclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->weightedFitCheckBox->blockSignals(true);
   d->robustFitCheckBox->blockSignals(true);
   d->weightedFitCheckBox->setChecked(false);
@@ -3607,9 +3607,9 @@ void qSlicerKMAPModuleWidget::onOLSclicked()
     d->olsFitCheckBox->setChecked(true);
 }
 
-void qSlicerKMAPModuleWidget::onOLSImgclicked()
+void qSlicerDynamicPETModuleWidget::onOLSImgclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->weightedFitCheckBoxImg->blockSignals(true);
   d->robustFitCheckBoxImg->blockSignals(true);
   d->weightedFitCheckBoxImg->setChecked(false);
@@ -3621,9 +3621,9 @@ void qSlicerKMAPModuleWidget::onOLSImgclicked()
     d->olsFitCheckBoxImg->setChecked(true);
 }
 
-void qSlicerKMAPModuleWidget::onWLSclicked()
+void qSlicerDynamicPETModuleWidget::onWLSclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->olsFitCheckBox->blockSignals(true);
   d->robustFitCheckBox->blockSignals(true);
   d->olsFitCheckBox->setChecked(false);
@@ -3635,9 +3635,9 @@ void qSlicerKMAPModuleWidget::onWLSclicked()
     d->olsFitCheckBox->setChecked(true);
 }
 
-void qSlicerKMAPModuleWidget::onWLSImgclicked()
+void qSlicerDynamicPETModuleWidget::onWLSImgclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->olsFitCheckBoxImg->blockSignals(true);
   d->robustFitCheckBoxImg->blockSignals(true);
   d->olsFitCheckBoxImg->setChecked(false);
@@ -3649,9 +3649,9 @@ void qSlicerKMAPModuleWidget::onWLSImgclicked()
     d->olsFitCheckBoxImg->setChecked(true);
 }
 
-void qSlicerKMAPModuleWidget::onRLSclicked()
+void qSlicerDynamicPETModuleWidget::onRLSclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->olsFitCheckBox->blockSignals(true);
   d->weightedFitCheckBox->blockSignals(true);
   d->olsFitCheckBox->setChecked(false);
@@ -3666,9 +3666,9 @@ void qSlicerKMAPModuleWidget::onRLSclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onRLSImgclicked()
+void qSlicerDynamicPETModuleWidget::onRLSImgclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->olsFitCheckBoxImg->blockSignals(true);
   d->weightedFitCheckBoxImg->blockSignals(true);
   d->olsFitCheckBoxImg->setChecked(false);
@@ -3683,9 +3683,9 @@ void qSlicerKMAPModuleWidget::onRLSImgclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onStdFitclicked()
+void qSlicerDynamicPETModuleWidget::onStdFitclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->weightFitCheckBox->blockSignals(true);
   d->weightFitCheckBox->setChecked(false);
   d->weightFitCheckBox->blockSignals(false);
@@ -3694,9 +3694,9 @@ void qSlicerKMAPModuleWidget::onStdFitclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onStdFitImgclicked()
+void qSlicerDynamicPETModuleWidget::onStdFitImgclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->weightFitCheckBoxImg->blockSignals(true);
   d->weightFitCheckBoxImg->setChecked(false);
   d->weightFitCheckBoxImg->blockSignals(false);
@@ -3705,9 +3705,9 @@ void qSlicerKMAPModuleWidget::onStdFitImgclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onWFitclicked()
+void qSlicerDynamicPETModuleWidget::onWFitclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->standardFitCheckBox->blockSignals(true);
   d->standardFitCheckBox->setChecked(false);
   d->standardFitCheckBox->blockSignals(false);
@@ -3716,9 +3716,9 @@ void qSlicerKMAPModuleWidget::onWFitclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onWFitImgclicked()
+void qSlicerDynamicPETModuleWidget::onWFitImgclicked()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->standardFitCheckBoxImg->blockSignals(true);
   d->standardFitCheckBoxImg->setChecked(false);
   d->standardFitCheckBoxImg->blockSignals(false);
@@ -3727,9 +3727,9 @@ void qSlicerKMAPModuleWidget::onWFitImgclicked()
   }
 }
 
-void qSlicerKMAPModuleWidget::onSliderChanged(int index)
+void qSlicerDynamicPETModuleWidget::onSliderChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   double timeSec = this->timePoints[index-1];
   double timeMin = timeSec / 60.0;
 
@@ -3738,9 +3738,9 @@ void qSlicerKMAPModuleWidget::onSliderChanged(int index)
   d->timeMinEdit->setText(QString::number(timeMin, 'f', 2));
 }
 
-void qSlicerKMAPModuleWidget::onSliderImgChanged(int index)
+void qSlicerDynamicPETModuleWidget::onSliderImgChanged(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   double timeSec = this->timePoints[index-1];
   double timeMin = timeSec / 60.0;
 
@@ -3749,13 +3749,13 @@ void qSlicerKMAPModuleWidget::onSliderImgChanged(int index)
   d->timeMinEditImg->setText(QString::number(timeMin, 'f', 2));
 }
 
-void qSlicerKMAPModuleWidget::runVuong(std::string sel1,
+void qSlicerDynamicPETModuleWidget::runVuong(std::string sel1,
                                        std::string sel2,
                                        std::string segmentID
                                      )
 {
-  Q_D(qSlicerKMAPModuleWidget);
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  Q_D(qSlicerDynamicPETModuleWidget);
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -3810,13 +3810,13 @@ void qSlicerKMAPModuleWidget::runVuong(std::string sel1,
   return;
 }
 
-void qSlicerKMAPModuleWidget::runTCMstat(std::string sel1,
+void qSlicerDynamicPETModuleWidget::runTCMstat(std::string sel1,
                                          std::string sel2,
                                          std::string segmentID
                                         )
 {
-  Q_D(qSlicerKMAPModuleWidget);
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  Q_D(qSlicerDynamicPETModuleWidget);
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -3886,9 +3886,9 @@ void qSlicerKMAPModuleWidget::runTCMstat(std::string sel1,
   return;
 }
 
-void qSlicerKMAPModuleWidget::onMTGAModelBox(int index)
+void qSlicerDynamicPETModuleWidget::onMTGAModelBox(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   std::string selectedVOI = this->plotMTGAVOI;
   if (selectedVOI.empty()) {
@@ -3923,9 +3923,9 @@ void qSlicerKMAPModuleWidget::onMTGAModelBox(int index)
   return;
 }
 
-void qSlicerKMAPModuleWidget::onTCMModelBox(int index)
+void qSlicerDynamicPETModuleWidget::onTCMModelBox(int index)
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   std::string selectedVOI = this->plotTCMVOI;
   if (selectedVOI.empty()) {
@@ -3963,8 +3963,8 @@ void qSlicerKMAPModuleWidget::onTCMModelBox(int index)
   return;
 }
 
-void qSlicerKMAPModuleWidget::clearFITdata() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::clearFITdata() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->segmentTCM.clear();
   d->populateResultsVOI();
   d->TCMResultsButton->setCollapsed(true);
@@ -3972,8 +3972,8 @@ void qSlicerKMAPModuleWidget::clearFITdata() {
 
 }
 
-void qSlicerKMAPModuleWidget::clearFITMTGAdata() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::clearFITMTGAdata() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->segmentMTGA.clear();
   d->populateResultsVOIMTGA();
   d->MTGAResultsButton->setCollapsed(true);
@@ -3982,8 +3982,8 @@ void qSlicerKMAPModuleWidget::clearFITMTGAdata() {
 
 
 
-void qSlicerKMAPModuleWidget::enableFITbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::enableFITbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   if (this->IFID=="") {
     d->FITbutton->setEnabled(false);
     this->clearFITdata();
@@ -4002,8 +4002,8 @@ void qSlicerKMAPModuleWidget::enableFITbutton() {
   d->FITbutton->setEnabled(true);
 }
 
-void qSlicerKMAPModuleWidget::enableFITTCMImgbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::enableFITTCMImgbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   if (this->IFID=="") {
     d->FITbuttonTCMImg->setEnabled(false);
     // this->clearFITTCMImgdata();
@@ -4017,8 +4017,8 @@ void qSlicerKMAPModuleWidget::enableFITTCMImgbutton() {
   d->FITbuttonTCMImg->setEnabled(true);
 }
 
-void qSlicerKMAPModuleWidget::enableFITMTGAbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::enableFITMTGAbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   if (this->IFID=="") {
     d->FITMTGAbutton->setEnabled(false);
     this->clearFITMTGAdata();
@@ -4037,8 +4037,8 @@ void qSlicerKMAPModuleWidget::enableFITMTGAbutton() {
   d->FITMTGAbutton->setEnabled(true);
 }
 
-void qSlicerKMAPModuleWidget::enableFITMTGAImgbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::enableFITMTGAImgbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   if (this->IFID=="") {
     d->FITbuttonMTGAImg->setEnabled(false);
     // this->clearFITMTGAImgdata();
@@ -4054,9 +4054,9 @@ void qSlicerKMAPModuleWidget::enableFITMTGAImgbutton() {
 
 
 
-void qSlicerKMAPModuleWidget::onVOISegmentsChanged()
+void qSlicerDynamicPETModuleWidget::onVOISegmentsChanged()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   std::vector<std::string> VOIselectedSegmentIDs;
 
   for (int i = 0; i < d->VOICheckLayout->count(); ++i)
@@ -4074,9 +4074,9 @@ void qSlicerKMAPModuleWidget::onVOISegmentsChanged()
   this->enableFITbutton();
 }
 
-void qSlicerKMAPModuleWidget::onVOIMTGASegmentsChanged()
+void qSlicerDynamicPETModuleWidget::onVOIMTGASegmentsChanged()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   std::vector<std::string> VOIselectedSegmentIDs;
 
   for (int i = 0; i < d->VOIMTGACheckLayout->count(); ++i)
@@ -4094,7 +4094,7 @@ void qSlicerKMAPModuleWidget::onVOIMTGASegmentsChanged()
   this->enableFITMTGAbutton();
 }
 
-std::vector<double> qSlicerKMAPModuleWidget::extractColumn(const std::vector<std::vector<double>>& mat, const int index)
+std::vector<double> qSlicerDynamicPETModuleWidget::extractColumn(const std::vector<std::vector<double>>& mat, const int index)
 {
     std::vector<double> col;
     col.reserve(mat.size());
@@ -4105,9 +4105,9 @@ std::vector<double> qSlicerKMAPModuleWidget::extractColumn(const std::vector<std
     return col;
 }
 
-void qSlicerKMAPModuleWidget::onFITbutton()
+void qSlicerDynamicPETModuleWidget::onFITbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
@@ -4143,7 +4143,7 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   }
 
   // Run TAC computation
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -4394,9 +4394,9 @@ void qSlicerKMAPModuleWidget::onFITbutton()
   d->populateResultsVOI();
 }
 
-void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
+void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   if ((this->PETdims[0]==0) | (this->PETdims[1]==0) | (this->PETdims[2]==0)) {
     QMessageBox::warning(nullptr,
@@ -4462,7 +4462,7 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
   }
 
   // Run TAC computation
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -4730,9 +4730,9 @@ void qSlicerKMAPModuleWidget::onFITTCMImgbutton()
 
 }
 
-void qSlicerKMAPModuleWidget::onFITMTGAbutton()
+void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
@@ -4768,7 +4768,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
   }
 
   // Run TAC computation
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -4908,9 +4908,9 @@ void qSlicerKMAPModuleWidget::onFITMTGAbutton()
   d->populateResultsVOIMTGA();
 }
 
-void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
+void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   if ((this->PETdims[0]==0) | (this->PETdims[1]==0) | (this->PETdims[2]==0)) {
     QMessageBox::warning(nullptr,
@@ -4975,7 +4975,7 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
   }
 
   // Run TAC computation
-  vtkSlicerKMAPLogic* logic = vtkSlicerKMAPLogic::SafeDownCast(this->logic());
+  vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
     std::cerr << "Missing Logic!" << std::endl;
     return;
@@ -5197,9 +5197,9 @@ void qSlicerKMAPModuleWidget::onFITMTGAImgbutton()
 }
 
 
-void qSlicerKMAPModuleWidget::onModelsAllbutton()
+void qSlicerDynamicPETModuleWidget::onModelsAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContents->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
@@ -5246,9 +5246,9 @@ void qSlicerKMAPModuleWidget::onModelsAllbutton()
 
 }
 
-void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
+void qSlicerDynamicPETModuleWidget::onModelsMTGAAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsMTGACheckContents->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
@@ -5295,9 +5295,9 @@ void qSlicerKMAPModuleWidget::onModelsMTGAAllbutton()
 
 }
 
-void qSlicerKMAPModuleWidget::onModelsSelectAllMTGAImgbutton()
+void qSlicerDynamicPETModuleWidget::onModelsSelectAllMTGAImgbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContentsMTGAImg->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
@@ -5344,9 +5344,9 @@ void qSlicerKMAPModuleWidget::onModelsSelectAllMTGAImgbutton()
 
 }
 
-void qSlicerKMAPModuleWidget::onModelsChanged()
+void qSlicerDynamicPETModuleWidget::onModelsChanged()
 {
-  Q_D(const qSlicerKMAPModuleWidget);
+  Q_D(const qSlicerDynamicPETModuleWidget);
 
   this->modelsID.clear();
   for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
@@ -5362,9 +5362,9 @@ void qSlicerKMAPModuleWidget::onModelsChanged()
   return ;
 }
 
-void qSlicerKMAPModuleWidget::onModelsTCMImgChanged()
+void qSlicerDynamicPETModuleWidget::onModelsTCMImgChanged()
 {
-  Q_D(const qSlicerKMAPModuleWidget);
+  Q_D(const qSlicerDynamicPETModuleWidget);
 
   this->modelsTCMImgID.clear();
   for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
@@ -5380,9 +5380,9 @@ void qSlicerKMAPModuleWidget::onModelsTCMImgChanged()
   return ;
 }
 
-void qSlicerKMAPModuleWidget::onModelsMTGAChanged()
+void qSlicerDynamicPETModuleWidget::onModelsMTGAChanged()
 {
-  Q_D(const qSlicerKMAPModuleWidget);
+  Q_D(const qSlicerDynamicPETModuleWidget);
 
   this->modelsMTGAID.clear();
   for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
@@ -5398,9 +5398,9 @@ void qSlicerKMAPModuleWidget::onModelsMTGAChanged()
   return ;
 }
 
-void qSlicerKMAPModuleWidget::onModelsMTGAImgChanged()
+void qSlicerDynamicPETModuleWidget::onModelsMTGAImgChanged()
 {
-  Q_D(const qSlicerKMAPModuleWidget);
+  Q_D(const qSlicerDynamicPETModuleWidget);
 
   this->modelsMTGAImgID.clear();
   for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
@@ -5416,9 +5416,9 @@ void qSlicerKMAPModuleWidget::onModelsMTGAImgChanged()
   return ;
 }
 
-void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
+void qSlicerDynamicPETModuleWidget::onModelsTCMSelectAllbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   d->ModelsTCMCheckContents->blockSignals(true);
   QSet<QString> previouslySelectedIDs;
   for (int i = 0; i < d->ModelsTCMCheckLayout->count(); ++i)
@@ -5460,9 +5460,9 @@ void qSlicerKMAPModuleWidget::onModelsTCMSelectAllbutton()
   d->populateModelsTCM(this->plotTCMVOI);
 }
 
-void qSlicerKMAPModuleWidget::onModelsSelectAllTCMImgbutton()
+void qSlicerDynamicPETModuleWidget::onModelsSelectAllTCMImgbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContentsTCMImg->blockSignals(true);
   std :: vector < std :: string > previouslySelectedModels;
@@ -5510,9 +5510,9 @@ void qSlicerKMAPModuleWidget::onModelsSelectAllTCMImgbutton()
 }
 
 
-void qSlicerKMAPModuleWidget::onPlotTCMbutton()
+void qSlicerDynamicPETModuleWidget::onPlotTCMbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->ColNameToSegmentID.clear();
   this->MapPlotSeriesNodeIDToPlot.clear();
   if (this->plotTCMVOI.empty()) {
@@ -5692,8 +5692,8 @@ void qSlicerKMAPModuleWidget::onPlotTCMbutton()
 
 }
 
-void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
-  Q_D(qSlicerKMAPModuleWidget);
+void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
+  Q_D(qSlicerDynamicPETModuleWidget);
   this->ColNameToSegmentID.clear();
   this->MapPlotSeriesNodeIDToPlot.clear();
 
@@ -5864,7 +5864,7 @@ void qSlicerKMAPModuleWidget::onPlotMTGAbutton() {
   }
 }
 
-bool qSlicerKMAPModuleWidget::checkdisplayedKMAP() {
+bool qSlicerDynamicPETModuleWidget::checkdisplayedDynamicPET() {
   vtkMRMLPlotViewNode* plotViewNode = nullptr;
   vtkCollection* viewNodes = this->mrmlScene()->GetNodesByClass("vtkMRMLPlotViewNode");
   if (!viewNodes || viewNodes->GetNumberOfItems() == 0)
@@ -5887,17 +5887,17 @@ bool qSlicerKMAPModuleWidget::checkdisplayedKMAP() {
       return false;
   }
 
-  // Check if the currently displayed plot is your "KMAP.PlotChart"
-  if (currentPlot->GetName() == nullptr || std::string(currentPlot->GetName()) != "KMAP.PlotChart")
+  // Check if the currently displayed plot is your "DynamicPET.PlotChart"
+  if (currentPlot->GetName() == nullptr || std::string(currentPlot->GetName()) != "DynamicPET.PlotChart")
   {
-      return false; // not the KMAP plot, do nothing
+      return false; // not the DynamicPET plot, do nothing
   }
   return true;
 }
 
-void qSlicerKMAPModuleWidget::onDeleteKeyPressed() {
-  Q_D(qSlicerKMAPModuleWidget);
-  if (!this->checkdisplayedKMAP())
+void qSlicerDynamicPETModuleWidget::onDeleteKeyPressed() {
+  Q_D(qSlicerDynamicPETModuleWidget);
+  if (!this->checkdisplayedDynamicPET())
     return;
 
   if (this->PlotSelectedFrame == -1)
@@ -5918,9 +5918,9 @@ void qSlicerKMAPModuleWidget::onDeleteKeyPressed() {
   return;
 }
 
-void qSlicerKMAPModuleWidget::onResetbutton()
+void qSlicerDynamicPETModuleWidget::onResetbutton()
 {
-  Q_D(qSlicerKMAPModuleWidget);
+  Q_D(qSlicerDynamicPETModuleWidget);
   vtkGenericWarningMacro("Restoring removed points ");
 
   if (this->segmentTACs.empty())
@@ -5940,7 +5940,7 @@ void qSlicerKMAPModuleWidget::onResetbutton()
       }
     }
   }
-  if (this->checkdisplayedKMAP()) {
+  if (this->checkdisplayedDynamicPET()) {
     this->onPlotbutton();
   }
   return;

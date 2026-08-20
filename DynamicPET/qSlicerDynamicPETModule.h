@@ -15,18 +15,18 @@
 
 ==============================================================================*/
 
-#ifndef __qSlicerKMAPModule_h
-#define __qSlicerKMAPModule_h
+#ifndef __qSlicerDynamicPETModule_h
+#define __qSlicerDynamicPETModule_h
 
 // Slicer includes
 #include "qSlicerLoadableModule.h"
 
-#include "qSlicerKMAPModuleExport.h"
+#include "qSlicerDynamicPETModuleExport.h"
 
-class qSlicerKMAPModulePrivate;
+class qSlicerDynamicPETModulePrivate;
 
-class Q_SLICER_QTMODULES_KMAP_EXPORT
-qSlicerKMAPModule
+class Q_SLICER_QTMODULES_DYNAMICPET_EXPORT
+qSlicerDynamicPETModule
   : public qSlicerLoadableModule
 {
   Q_OBJECT
@@ -36,10 +36,10 @@ qSlicerKMAPModule
 public:
 
   typedef qSlicerLoadableModule Superclass;
-  explicit qSlicerKMAPModule(QObject *parent=nullptr);
-  ~qSlicerKMAPModule() override;
+  explicit qSlicerDynamicPETModule(QObject *parent=nullptr);
+  ~qSlicerDynamicPETModule() override;
 
-  qSlicerGetTitleMacro(tr("KMAP"));
+  qSlicerGetTitleMacro(tr("DynamicPET"));
 
   QString helpText()const override;
   QString acknowledgementText()const override;
@@ -62,11 +62,11 @@ protected:
   vtkMRMLAbstractLogic* createLogic() override;
 
 protected:
-  QScopedPointer<qSlicerKMAPModulePrivate> d_ptr;
+  QScopedPointer<qSlicerDynamicPETModulePrivate> d_ptr;
 
 private:
-  Q_DECLARE_PRIVATE(qSlicerKMAPModule);
-  Q_DISABLE_COPY(qSlicerKMAPModule);
+  Q_DECLARE_PRIVATE(qSlicerDynamicPETModule);
+  Q_DISABLE_COPY(qSlicerDynamicPETModule);
 
 };
 

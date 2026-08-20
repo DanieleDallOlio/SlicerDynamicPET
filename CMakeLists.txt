@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16.3...3.19.7 FATAL_ERROR)
 
-project(DynamicPETExtension)
+project(SlicerDynamicPET)
 
 # -----------------------------------------------------------------------------
 # CPU feature detection and compiler optimization flags
@@ -46,11 +46,10 @@ endif()
 
 # -----------------------------------------------------------------------------
 # Extension meta-information
-set(EXTENSION_HOMEPAGE "https://www.slicer.org/wiki/Documentation/Nightly/Extensions/DynamicPETExtension")
 set(EXTENSION_CONTRIBUTORS "Daniele Dall'Olio (University of Bologna)")
 set(EXTENSION_DESCRIPTION "Tools to work with dynamic PET imaging")
-set(EXTENSION_ICONURL "https://www.example.com/Slicer/Extensions/DynamicPETExtension.png")
-set(EXTENSION_SCREENSHOTURLS "https://www.example.com/Slicer/Extensions/DynamicPETExtension/Screenshots/1.png")
+set(EXTENSION_ICONURL "https://github.com/DanieleDallOlio/SlicerDynamicPET/blob/main/SlicerDynamicPET.png")
+set(EXTENSION_SCREENSHOTURLS "")
 set(EXTENSION_DEPENDS "NA") # Specified as a list or "NA" if no dependencies
 
 # -----------------------------------------------------------------------------
@@ -80,7 +79,7 @@ endif()
 add_subdirectory(KMAP-PY)
 if(NOT APPLE)
   set_target_properties(kmap PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:qSlicerKMAPModuleWidgets>
+    RUNTIME_OUTPUT_DIRECTORY $<TARGET_FILE_DIR:qSlicerDynamicPETModuleWidgets>
   )
   install(TARGETS kmap
     RUNTIME DESTINATION ${Slicer_INSTALL_QTLOADABLEMODULES_BIN_DIR}
@@ -95,8 +94,8 @@ endif()
 #################################################################
 
 message(STATUS ""                                                                    )
-message(STATUS "=================== DynamicPETExtension configuration Summary =================="   )
-message(STATUS "   DynamicPETExtension "       )
+message(STATUS "=================== SlicerDynamicPET configuration Summary =================="   )
+message(STATUS "   SlicerDynamicPET "       )
 message(STATUS ""                                                                    )
 message(STATUS "   Build type : ${CMAKE_BUILD_TYPE}"                                 )
 message(STATUS "   C++ :"                                                            )
@@ -122,7 +121,7 @@ message(STATUS ""                                                               
 
 # -----------------------------------------------------------------------------
 # Extension modules
-add_subdirectory(KMAP)
+add_subdirectory(DynamicPET)
 ## NEXT_MODULE
 # -----------------------------------------------------------------------------
 include(${Slicer_EXTENSION_GENERATE_CONFIG})

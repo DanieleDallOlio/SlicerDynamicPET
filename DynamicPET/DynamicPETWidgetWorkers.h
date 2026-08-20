@@ -1,7 +1,7 @@
-#ifndef __KMAPWidgetWorkers_h
-#define __KMAPWidgetWorkers_h
+#ifndef __DynamicPETWidgetWorkers_h
+#define __DynamicPETWidgetWorkers_h
 #include <QThread>
-#include "vtkSlicerKMAPLogic.h"
+#include "vtkSlicerDynamicPETLogic.h"
 #include <QString>
 
 
@@ -9,7 +9,7 @@ class TCMWorker : public QThread
 {
     Q_OBJECT
 public:
-    TCMWorker(vtkSlicerKMAPLogic* logic,
+    TCMWorker(vtkSlicerDynamicPETLogic* logic,
               std::vector<std::vector<double>>& voxels,
               std::vector<double>& Cp,
               std::vector<double>& framing,
@@ -180,7 +180,7 @@ private:
       }
     }
 
-    vtkSlicerKMAPLogic* logic;
+    vtkSlicerDynamicPETLogic* logic;
     std::vector<std::vector<double>> voxels;
     std::vector<double> Cp;
     std::vector<double> framing;

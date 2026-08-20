@@ -7,7 +7,7 @@
 #include <vtkSmartPointer.h>
 #include <vtkMRMLSegmentationNode.h>
 #include <vtkMRMLSequenceBrowserNode.h>
-#include <vtkSlicerKMAPLogic.h>
+#include <vtkSlicerDynamicPETLogic.h>
 
 #include <unordered_map>
 
@@ -16,7 +16,7 @@ class SegmentationChangeWatcher : public vtkObject
 public:
   vtkMRMLSequenceBrowserNode* browser;
   std::function<vtkMRMLSequenceNode*()> GetSequencePET;
-  std::function<vtkSlicerKMAPLogic*()> GetLogic;
+  std::function<vtkSlicerDynamicPETLogic*()> GetLogic;
   std::function<std::map<std::string, std::vector<VoxelStatistics>>*()> GetsegmentTACs;
   std::function<bool()> GetSegEditCorr;
   std::function<void()> RunPlot;

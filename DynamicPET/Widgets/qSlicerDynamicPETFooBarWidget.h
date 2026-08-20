@@ -18,34 +18,34 @@
 
 ==============================================================================*/
 
-#ifndef __qSlicerKMAPFooBarWidget_h
-#define __qSlicerKMAPFooBarWidget_h
+#ifndef __qSlicerDynamicPETFooBarWidget_h
+#define __qSlicerDynamicPETFooBarWidget_h
 
 // Qt includes
 #include <QWidget>
 
 // FooBar Widgets includes
-#include "qSlicerKMAPModuleWidgetsExport.h"
+#include "qSlicerDynamicPETModuleWidgetsExport.h"
 
-class qSlicerKMAPFooBarWidgetPrivate;
+class qSlicerDynamicPETFooBarWidgetPrivate;
 
-class Q_SLICER_MODULE_KMAP_WIDGETS_EXPORT qSlicerKMAPFooBarWidget
+class Q_SLICER_MODULE_DYNAMICPET_WIDGETS_EXPORT qSlicerDynamicPETFooBarWidget
   : public QWidget
 {
   Q_OBJECT
 public:
   typedef QWidget Superclass;
-  qSlicerKMAPFooBarWidget(QWidget *parent=0);
-  ~qSlicerKMAPFooBarWidget() override;
+  qSlicerDynamicPETFooBarWidget(QWidget *parent=0);
+  ~qSlicerDynamicPETFooBarWidget() override;
 
 protected slots:
 
 protected:
-  QScopedPointer<qSlicerKMAPFooBarWidgetPrivate> d_ptr;
+  QScopedPointer<qSlicerDynamicPETFooBarWidgetPrivate> d_ptr;
 
 private:
-  Q_DECLARE_PRIVATE(qSlicerKMAPFooBarWidget);
-  Q_DISABLE_COPY(qSlicerKMAPFooBarWidget);
+  Q_DECLARE_PRIVATE(qSlicerDynamicPETFooBarWidget);
+  Q_DISABLE_COPY(qSlicerDynamicPETFooBarWidget);
 };
 
 #endif

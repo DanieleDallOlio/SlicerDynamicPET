@@ -2141,10 +2141,8 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
     std::atomic<bool>& stopRequested,
-    QProgressBar* progressBar,
     int numThreads,
-    QPushButton* stopButton
-)
+    std::function<void(int)> progressCallback)
 {
     #ifdef HAVE_OPENMP
     int max_hw_threads = omp_get_num_procs();
@@ -2217,19 +2215,6 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     outputParams.clear();
     outputParams.resize(nVoxels);
 
-
-    if (progressBar)
-    {
-        progressBar->setFormat("Fitting Patlak (%p%)");
-        progressBar->setVisible(true);
-        progressBar->setMinimum(0);
-        progressBar->setMaximum(100);
-        progressBar->setValue(0);
-        stopButton->setVisible(true);
-        stopButton->show();
-        qApp->processEvents();
-    }
-
     std::atomic<size_t> voxProcessed(0);
 
     // ---------- 5) Parallel voxel-wise processing ----------
@@ -2248,7 +2233,11 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
         #endif
         for (int v = 0; v < nVoxels; ++v)
         {
-            if (stopRequested) continue;
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
+            }
             MTGAParameters params;
             const std::vector<double>& tac = voxels[v];
 
@@ -2299,6 +2288,11 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
                 Eigen::VectorXd prev_coeff = coeff;
                 for (int iter = 0; iter < max_iter; ++iter)
                 {
+                    if (stopRequested.load(
+                            std::memory_order_relaxed))
+                    {
+                      break;
+                    }
                     Eigen::MatrixXd W = wts.asDiagonal();
                     Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
                     if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
@@ -2309,6 +2303,12 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
                     coeff = c;
                 }
                 for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
             }
 
             // ---------- Compute fitted values ----------
@@ -2349,38 +2349,28 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Update progress bar safely ----------
-            if (progressBar)
+            size_t done = ++voxProcessed;
+
+            const size_t updateInterval =
+                std::max(
+                    static_cast<size_t>(1),
+                    std::min(
+                        nVoxels / 1000,
+                        static_cast<size_t>(10000)));
+
+            if (progressCallback &&
+                (done % updateInterval == 0 ||
+                 done == nVoxels))
             {
-                size_t done = ++voxProcessed;
+              const int progress =
+                  static_cast<int>(
+                      100 * done / nVoxels);
 
-                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
-
-                if (done % updateInterval == 0 || done == nVoxels)
-                {
-                    int progress = static_cast<int>(100 * done / nVoxels);
-                    if (QThread::currentThread() == progressBar->thread())
-                    {
-                        progressBar->setValue(progress);
-                        // qApp->processEvents();
-                    } else
-                    {
-                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
-                    }
-                }
+              progressCallback(progress);
             }
 
         }
     }
-  if (progressBar)
-  {
-    progressBar->setVisible(false);
-    stopButton->setVisible(false);
-    // stopButton->deleteLater();
-    if (stopRequested) {
-      outputParams.clear();
-    }
-    qApp->processEvents();
-  }
 }
 
 void vtkSlicerDynamicPETLogic::Logan4Img(
@@ -2397,10 +2387,8 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
     std::atomic<bool>& stopRequested,
-    QProgressBar* progressBar,
     int numThreads,
-    QPushButton* stopButton
-)
+    std::function<void(int)> progressCallback)
 {
     #ifdef HAVE_OPENMP
     int max_hw_threads = omp_get_num_procs();
@@ -2445,18 +2433,6 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
     outputParams.clear();
     outputParams.resize(nVoxels);
 
-    if (progressBar)
-    {
-        progressBar->setFormat("Fitting Logan (%p%)");
-        progressBar->setVisible(true);
-        progressBar->setMinimum(0);
-        progressBar->setMaximum(100);
-        progressBar->setValue(0);
-        stopButton->setVisible(true);
-        stopButton->show();
-        qApp->processEvents();
-    }
-
     std::atomic<size_t> voxProcessed(0);
 
     // ---------- 4) Parallel voxel-wise processing ----------
@@ -2473,7 +2449,11 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
         #endif
         for (int v = 0; v < nVoxels; ++v)
         {
-            if (stopRequested) continue;
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
+            }
             MTGAParameters params;
             const std::vector<double>& tac = voxels[v];
 
@@ -2544,6 +2524,11 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
                 Eigen::VectorXd prev_coeff = coeff;
                 for (int iter = 0; iter < max_iter; ++iter)
                 {
+                    if (stopRequested.load(
+                            std::memory_order_relaxed))
+                    {
+                      break;
+                    }
                     Eigen::MatrixXd W = wts.asDiagonal();
                     Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
                     if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
@@ -2554,6 +2539,12 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
                     coeff = c;
                 }
                 for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
             }
 
             // ---------- Compute fitted values ----------
@@ -2594,37 +2585,28 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Progress bar ----------
-            if (progressBar)
+            size_t done = ++voxProcessed;
+
+            const size_t updateInterval =
+                std::max(
+                    static_cast<size_t>(1),
+                    std::min(
+                        nVoxels / 1000,
+                        static_cast<size_t>(10000)));
+
+            if (progressCallback &&
+                (done % updateInterval == 0 ||
+                 done == nVoxels))
             {
-                size_t done = ++voxProcessed;
+              const int progress =
+                  static_cast<int>(
+                      100 * done / nVoxels);
 
-                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
-
-                if (done % updateInterval == 0 || done == nVoxels)
-                {
-                    int progress = static_cast<int>(100 * done / nVoxels);
-                    if (QThread::currentThread() == progressBar->thread())
-                    {
-                        progressBar->setValue(progress);
-                        // qApp->processEvents();
-                    } else
-                    {
-                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
-                    }
-                }
+              progressCallback(progress);
             }
         }
     }
 
-    if (progressBar)
-    {
-        progressBar->setVisible(false);
-        stopButton->setVisible(false);
-        if (stopRequested) {
-          outputParams.clear();
-        }
-        qApp->processEvents();
-    }
 }
 
 void vtkSlicerDynamicPETLogic::RE4Img(
@@ -2641,10 +2623,8 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
     std::atomic<bool>& stopRequested,
-    QProgressBar* progressBar,
     int numThreads,
-    QPushButton* stopButton
-)
+    std::function<void(int)> progressCallback)
 {
     #ifdef HAVE_OPENMP
     int max_hw_threads = omp_get_num_procs();
@@ -2717,18 +2697,6 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     outputParams.clear();
     outputParams.resize(nVoxels);
 
-    if (progressBar)
-    {
-        progressBar->setFormat("Fitting RE (%p%)");
-        progressBar->setVisible(true);
-        progressBar->setMinimum(0);
-        progressBar->setMaximum(100);
-        progressBar->setValue(0);
-        stopButton->setVisible(true);
-        stopButton->show();
-        qApp->processEvents();
-    }
-
     std::atomic<size_t> voxProcessed(0);
 
     // ---------- 5) Parallel voxel-wise processing ----------
@@ -2747,7 +2715,11 @@ void vtkSlicerDynamicPETLogic::RE4Img(
         #endif
         for (int v = 0; v < nVoxels; ++v)
         {
-            if (stopRequested) continue;
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
+            }
             MTGAParameters params;
             const std::vector<double>& tac = voxels[v];
 
@@ -2807,6 +2779,11 @@ void vtkSlicerDynamicPETLogic::RE4Img(
                 Eigen::VectorXd prev_coeff = coeff;
                 for (int iter=0; iter<max_iter; ++iter)
                 {
+                    if (stopRequested.load(
+                            std::memory_order_relaxed))
+                    {
+                      break;
+                    }
                     Eigen::MatrixXd W = wts.asDiagonal();
                     Eigen::Vector2d c = (A.transpose()*W*A).ldlt().solve(A.transpose()*W*Yv_map);
                     if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
@@ -2817,6 +2794,12 @@ void vtkSlicerDynamicPETLogic::RE4Img(
                     coeff = c;
                 }
                 for (size_t ii=0; ii<n; ++ii) wgt_adj[ii] = wts(ii);
+            }
+
+            if (stopRequested.load(
+                    std::memory_order_relaxed))
+            {
+              continue;
             }
 
             // ---------- Compute fitted values ----------
@@ -2858,36 +2841,28 @@ void vtkSlicerDynamicPETLogic::RE4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Progress bar ----------
-            if (progressBar)
+            size_t done = ++voxProcessed;
+
+            const size_t updateInterval =
+                std::max(
+                    static_cast<size_t>(1),
+                    std::min(
+                        nVoxels / 1000,
+                        static_cast<size_t>(10000)));
+
+            if (progressCallback &&
+                (done % updateInterval == 0 ||
+                 done == nVoxels))
             {
-                size_t done = ++voxProcessed;
+              const int progress =
+                  static_cast<int>(
+                      100 * done / nVoxels);
 
-                size_t updateInterval = std::max(static_cast<size_t>(1), std::min(nVoxels / 1000, static_cast<size_t>(10000)));
-
-                if (done % updateInterval == 0 || done == nVoxels)
-                {
-                    int progress = static_cast<int>(100 * done / nVoxels);
-                    if (QThread::currentThread() == progressBar->thread())
-                    {
-                        progressBar->setValue(progress);
-                        // qApp->processEvents();
-                    } else {
-                        QMetaObject::invokeMethod(progressBar, "setValue", Qt::QueuedConnection, Q_ARG(int, progress));
-                    }
-                }
+              progressCallback(progress);
             }
         }
     }
 
-    if (progressBar)
-    {
-        progressBar->setVisible(false);
-        stopButton->setVisible(false);
-        if (stopRequested) {
-          outputParams.clear();
-        }
-        qApp->processEvents();
-    }
 }
 
 
@@ -2926,44 +2901,37 @@ void vtkSlicerDynamicPETLogic::CreateMTGAParametricImages(
   for (const auto& field : fields)
   {
     std::vector<double> flatten = this->ExtractParameter(outputParams, field);
-    vtkMRMLScalarVolumeNode* node = this->Flatten2Image(flatten, dims, modelID + " - " + field);
+    vtkMRMLScalarVolumeNode* node =
+        this->Flatten2Image(
+            flatten,
+            dims,
+            modelID + " - " + field);
+
+    if (!node)
+    {
+      std::cerr
+          << "Could not create image for "
+          << modelID + " - " + field
+          << std::endl;
+      return;
+    }
+
     node->CopyOrientation(refNode);
     node->SetSpacing(refNode->GetSpacing());
     node->SetOrigin(refNode->GetOrigin());
-    vtkIdType parentItemID = refSH->GetItemParent(refID);
-    vtkIdType newItemID = refSH->GetItemByDataNode(node);
-    refSH->SetItemParent(newItemID, parentItemID);
-    if (!node)
-    {
-      std :: cerr << "Could not create image for " << modelID + " - " + field << std :: endl;
-      return;
-    }
+
+    vtkIdType parentItemID =
+        refSH->GetItemParent(refID);
+
+    vtkIdType newItemID =
+        refSH->GetItemByDataNode(node);
+
+    refSH->SetItemParent(
+        newItemID,
+        parentItemID);
   }
 }
 
-
-static volatile double sink = 0.0;
-
-void bench_exp_strict()
-{
-  const int N = 20'000'000;
-  double x = -0.001;
-
-  auto t0 = std::chrono::high_resolution_clock::now();
-
-  double acc = 0.0;
-  for (int i = 0; i < N; ++i) {
-    // vary input to prevent constant folding and SIMD tricks
-    x += 1e-9 * (i & 1023);
-    double y = std::exp(x);
-    acc += y;
-  }
-
-  auto t1 = std::chrono::high_resolution_clock::now();
-  sink = acc; // force side-effect
-
-  double sec = std::chrono::duration<double>(t1 - t0).count();
-}
 
 void vtkSlicerDynamicPETLogic::callTCMImg(
     const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
@@ -2987,7 +2955,6 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     std::function<bool()> stopCallback /*= nullptr*/
 )
 {
-    bench_exp_strict();
     const double EPS = 1e-12;
     const int Nframe = static_cast<int>(Cp.size());
     const int Nvox = static_cast<int>(voxels.size());
@@ -3001,25 +2968,6 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         omp_set_num_threads(n);
     }
     #endif
-
-
-    int N = 10000000;
-    std::vector<double> a(N, 1.234567);
-    auto t0 = std::chrono::high_resolution_clock::now();
-    #pragma omp parallel for schedule(static)
-    for(int i=0;i<N;++i){
-        double x = a[i];
-        // heavy-ish FP work to force vectorization
-        for (int k=0;k<100;++k) {
-            x = x*1.0000001 + 0.1234567;
-            x = x / 1.0000003 + x*0.000001;
-        }
-        a[i] = x;
-    }
-    auto t1 = std::chrono::high_resolution_clock::now();
-    double sec = std::chrono::duration<double>(t1-t0).count();
-    std::cout << "threads="<<numThreads<<" time="<<sec<<" s\n";
-
 
 
     // ---------- 1) Weights ----------
@@ -3156,7 +3104,6 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     const int progressUpdateInterval = std::max(1, Nfit / 200);
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
-    t0 = std::chrono::high_resolution_clock::now();
     #ifdef HAVE_OPENMP
     #pragma omp parallel
     #endif
@@ -3170,10 +3117,11 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         #pragma omp for schedule(dynamic)
         #endif
         for (int fitIndex = 0; fitIndex < Nfit; ++fitIndex) {
-            // if ((stopCallback && stopCallback()) || stopRequested) {
-            //   // v = Nvox;
-            //   continue;
-            // }
+            if (stopRequested.load(std::memory_order_relaxed) ||
+                (stopCallback && stopCallback()))
+            {
+              continue;
+            }
             const int v = fitVoxelIndices[fitIndex];
 
             TCMParameters params;
@@ -3200,6 +3148,12 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
                   fitted_local.data(),
                   &stx
               );
+
+              if (stopRequested.load(std::memory_order_relaxed) ||
+                  (stopCallback && stopCallback()))
+              {
+                continue;
+              }
 
               if (v == 0 || v == 99 || v == 999 || v == 9999) {
                 std::cout
@@ -3266,10 +3220,6 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
 
         }
     }
-    t1 = std::chrono::high_resolution_clock::now();
-
-    sec = std::chrono::duration<double>(t1-t0).count();
-    std::cout << "elapsed time per call "<<sec/10000<<" s\n";
 
     delete[] Cp_new;
     delete[] cwb_new;

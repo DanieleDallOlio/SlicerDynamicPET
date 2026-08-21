@@ -3,7 +3,200 @@
 #include <QThread>
 #include "vtkSlicerDynamicPETLogic.h"
 #include <QString>
+#include <QThread>
+#include <QDebug>
 
+
+class MTGAWorker : public QThread
+{
+  Q_OBJECT
+
+public:
+  MTGAWorker(
+      vtkSlicerDynamicPETLogic* logic,
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<std::string>& modelIDs,
+      const std::vector<double>* wgtGlobal,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huberTune,
+      double tol,
+      int maxIter,
+      std::atomic<bool>& stopRequested,
+      int numThreads)
+    : logic(logic)
+    , voxels(voxels)
+    , Cp(Cp)
+    , framing(framing)
+    , modelIDs(modelIDs)
+    , timeOffset(timeOffset)
+    , framingNorm(framingNorm)
+    , robust(robust)
+    , standardize(standardize)
+    , huberTune(huberTune)
+    , tol(tol)
+    , maxIter(maxIter)
+    , stopRequested(stopRequested)
+    , numThreads(numThreads)
+  {
+    if (wgtGlobal)
+    {
+      this->weights = *wgtGlobal;
+      this->hasWeights = true;
+    }
+  }
+
+  std::vector<MTGAParameters> results;
+
+signals:
+  void progressChanged(int value);
+  void modelStarted(const QString& modelID);
+  void finishedProcessing(const QString& modelID);
+  void canceled(const QString& modelID);
+  void finishedAll();
+
+protected:
+  void run() override
+  {
+    const std::vector<double>* wgt =
+        this->hasWeights
+        ? &this->weights
+        : nullptr;
+
+    for (const std::string& modelID :
+         this->modelIDs)
+    {
+      if (this->stopRequested.load(
+              std::memory_order_relaxed))
+      {
+        break;
+      }
+
+      emit modelStarted(
+          QString::fromStdString(modelID));
+
+      std::vector<MTGAParameters>
+          localOutput;
+
+      auto progressCallback =
+          [this](int value)
+          {
+            emit progressChanged(value);
+          };
+
+      if (modelID == "Patlak")
+      {
+        this->logic->Patlak4Img(
+            this->voxels,
+            this->Cp,
+            this->framing,
+            wgt,
+            this->timeOffset,
+            this->framingNorm,
+            this->robust,
+            this->standardize,
+            this->huberTune,
+            this->tol,
+            this->maxIter,
+            localOutput,
+            this->stopRequested,
+            this->numThreads,
+            progressCallback);
+      }
+      else if (modelID == "Logan")
+      {
+        this->logic->Logan4Img(
+            this->voxels,
+            this->Cp,
+            this->framing,
+            wgt,
+            this->timeOffset,
+            this->framingNorm,
+            this->robust,
+            this->standardize,
+            this->huberTune,
+            this->tol,
+            this->maxIter,
+            localOutput,
+            this->stopRequested,
+            this->numThreads,
+            progressCallback);
+      }
+      else if (modelID == "RE")
+      {
+        this->logic->RE4Img(
+            this->voxels,
+            this->Cp,
+            this->framing,
+            wgt,
+            this->timeOffset,
+            this->framingNorm,
+            this->robust,
+            this->standardize,
+            this->huberTune,
+            this->tol,
+            this->maxIter,
+            localOutput,
+            this->stopRequested,
+            this->numThreads,
+            progressCallback);
+      }
+      else
+      {
+        qWarning()
+            << "Unknown MTGA model:"
+            << QString::fromStdString(modelID);
+
+        continue;
+      }
+
+      if (this->stopRequested.load(
+              std::memory_order_relaxed))
+      {
+        emit canceled(
+            QString::fromStdString(modelID));
+
+        break;
+      }
+
+      this->results =
+          std::move(localOutput);
+
+      emit finishedProcessing(
+          QString::fromStdString(modelID));
+    }
+
+    emit finishedAll();
+  }
+
+private:
+  vtkSlicerDynamicPETLogic* logic{nullptr};
+
+  std::vector<std::vector<double>> voxels;
+  std::vector<double> Cp;
+  std::vector<double> framing;
+  std::vector<std::string> modelIDs;
+
+  std::vector<double> weights;
+  bool hasWeights{false};
+
+  double timeOffset{0.0};
+  double framingNorm{1.0};
+
+  bool robust{false};
+  bool standardize{false};
+
+  double huberTune{1.345};
+  double tol{1e-8};
+  int maxIter{100};
+
+  std::atomic<bool>& stopRequested;
+  int numThreads{1};
+};
 
 class TCMWorker : public QThread
 {

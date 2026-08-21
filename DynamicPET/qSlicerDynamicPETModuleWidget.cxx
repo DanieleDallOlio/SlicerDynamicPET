@@ -131,6 +131,17 @@ public:
                              const std::string& otherSelectedModel,
                              const std::string& currentSelectedModel,
                              const std::string& segmentID);
+  void setPostTACEnabled(bool enabled);
+  void updateMTGAOutputUI();
+  void updateTCMOutputUI();
+  void updateMTGAOptimizationUI();
+  void populateTCMOptimizationModels();
+  void updateTCMOptimizationUI();
+
+  std::map<std::string, QString> MTGAImgFitSignatures;
+  std::map<std::string, QString> TCMImgFitSignatures;
+
+  bool parametricFitRunning{false};
 };
 
 //-----------------------------------------------------------------------------
@@ -192,12 +203,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   this->SegSelector->setEnabled(false);
   this->segmentSelectAll->setEnabled(false);
   this->saveExcelButton->setEnabled(false);
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->MTGAWidget), false);
-  this->MTGAWidget->setEnabled(false);
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->TCMWidget), false);
-  this->TCMWidget->setEnabled(false);
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), false);
-  this->ImagingWidget->setEnabled(false);
+
+  this->setPostTACEnabled(false);
 
   this->VOIsegmentSelectAll->setEnabled(false);
   this->VOIMTGAsegmentSelectAll->setEnabled(false);
@@ -568,6 +575,199 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
   this->StatSelector->setCurrentIndex(0);
   this->StatSelectorMTGA->setCurrentIndex(0);
   this->StatSelectorImg->setCurrentIndex(0);
+
+  // --------------------------------------------------------------------------
+  // Parametric imaging output controls
+  // --------------------------------------------------------------------------
+
+  QObject::connect(
+      this->MTGASaveDICOMCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+        this->updateMTGAOutputUI();
+      });
+
+  QObject::connect(
+      this->MTGAShowInSlicerCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+        this->updateMTGAOutputUI();
+      });
+
+  QObject::connect(
+      this->MTGADICOMDirectoryImg,
+      &ctkPathLineEdit::currentPathChanged,
+      q,
+      [this](const QString&)
+      {
+        this->updateMTGAOutputUI();
+      });
+
+
+  QObject::connect(
+      this->TCMSaveDICOMCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+        this->updateTCMOutputUI();
+      });
+
+  QObject::connect(
+      this->TCMShowInSlicerCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+        this->updateTCMOutputUI();
+      });
+
+  QObject::connect(
+      this->TCMDICOMDirectoryImg,
+      &ctkPathLineEdit::currentPathChanged,
+      q,
+      [this](const QString&)
+      {
+        this->updateTCMOutputUI();
+      });
+
+
+  // --------------------------------------------------------------------------
+  // MTGA model-selection controls
+  // --------------------------------------------------------------------------
+
+  QObject::connect(
+      this->MTGAUseVuongCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool checked)
+      {
+        this->MTGAVuongAlphaSpinBoxImg
+            ->setEnabled(checked);
+
+        this->MTGANonSignificantPolicyComboImg
+            ->setEnabled(checked);
+
+        this->updateMTGAOptimizationUI();
+      });
+
+  QObject::connect(
+      this->MTGAReversibleModelComboImg,
+      QOverload<int>::of(&QComboBox::currentIndexChanged),
+      q,
+      [this](int)
+      {
+        this->updateMTGAOptimizationUI();
+      });
+
+
+  // --------------------------------------------------------------------------
+  // TCM model-selection controls
+  // --------------------------------------------------------------------------
+
+  QObject::connect(
+      this->TCMUseStatTestsCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool checked)
+      {
+        this->TCMStatAlphaSpinBoxImg
+            ->setEnabled(checked);
+
+        this->updateTCMOptimizationUI();
+      });
+
+  QObject::connect(
+      this->TCMOptimizationModelsSelectAllImg,
+      &QPushButton::clicked,
+      q,
+      [this]()
+      {
+        int numberOfModels = 0;
+        bool allChecked = true;
+
+        for (int i = 0;
+             i < this->TCMOptimizationModelsCheckLayoutImg->count();
+             ++i)
+        {
+          QLayoutItem* item =
+              this->TCMOptimizationModelsCheckLayoutImg->itemAt(i);
+
+          QCheckBox* cb =
+              qobject_cast<QCheckBox*>(item->widget());
+
+          if (!cb)
+          {
+            continue;
+          }
+
+          ++numberOfModels;
+
+          if (!cb->isChecked())
+          {
+            allChecked = false;
+          }
+        }
+
+        const bool newState =
+            !(numberOfModels > 0 && allChecked);
+
+        for (int i = 0;
+             i < this->TCMOptimizationModelsCheckLayoutImg->count();
+             ++i)
+        {
+          QLayoutItem* item =
+              this->TCMOptimizationModelsCheckLayoutImg->itemAt(i);
+
+          QCheckBox* cb =
+              qobject_cast<QCheckBox*>(item->widget());
+
+          if (!cb)
+          {
+            continue;
+          }
+
+          cb->blockSignals(true);
+          cb->setChecked(newState);
+          cb->blockSignals(false);
+        }
+
+        this->updateTCMOptimizationUI();
+      });
+
+  const std::vector<QCheckBox*> tcmOptimizationParameterBoxes =
+  {
+    this->TCMOptK1CheckBoxImg,
+    this->TCMOptk2CheckBoxImg,
+    this->TCMOptk3CheckBoxImg,
+    this->TCMOptk4CheckBoxImg,
+    this->TCMOptvbCheckBoxImg,
+    this->TCMOpttdCheckBoxImg,
+    this->TCMOptKiCheckBoxImg,
+    this->TCMOptDVCheckBoxImg
+  };
+
+  for (QCheckBox* cb : tcmOptimizationParameterBoxes)
+  {
+    QObject::connect(
+        cb,
+        &QCheckBox::toggled,
+        q,
+        [this](bool)
+        {
+          this->updateTCMOptimizationUI();
+        });
+  }
+
+  this->updateMTGAOutputUI();
+  this->updateTCMOutputUI();
+
+  this->updateMTGAOptimizationUI();
+  this->populateTCMOptimizationModels();
 
 }
 
@@ -1162,15 +1362,12 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateIF()
   this->IFSelector->clear();
   this->IFSelector->addItem(QString::fromStdString("None"), QString::fromStdString(""));
 
-  if (q->segmentTACsnames.empty() || q->segmentTACs.empty())
+  if (q->segmentTACsnames.empty() ||
+      q->segmentTACs.empty())
   {
-    this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->TCMWidget), false);
-    this->TCMWidget->setEnabled(false);
     this->IFSelector->blockSignals(false);
     return;
   }
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->TCMWidget), true);
-  this->TCMWidget->setEnabled(true);
 
   int restoredIndex = 0;
   for (const std::string& segmentID : this->segmentDisplayOrder)
@@ -1215,15 +1412,12 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateIFMTGA()
   this->IFSelectorMTGA->clear();
   this->IFSelectorMTGA->addItem(QString::fromStdString("None"), QString::fromStdString(""));
 
-  if (q->segmentTACsnames.empty() || q->segmentTACs.empty())
+  if (q->segmentTACsnames.empty() ||
+      q->segmentTACs.empty())
   {
-    this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->MTGAWidget), false);
-    this->MTGAWidget->setEnabled(false);
     this->IFSelectorMTGA->blockSignals(false);
     return;
   }
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->MTGAWidget), true);
-  this->MTGAWidget->setEnabled(true);
 
   int restoredIndex = 0;
   for (const std::string& segmentID : this->segmentDisplayOrder)
@@ -1268,15 +1462,12 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateIFImg()
   this->IFSelectorImg->clear();
   this->IFSelectorImg->addItem(QString::fromStdString("None"), QString::fromStdString(""));
 
-  if (q->segmentTACsnames.empty() || q->segmentTACs.empty())
+  if (q->segmentTACsnames.empty() ||
+      q->segmentTACs.empty())
   {
-    this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), false);
-    this->ImagingWidget->setEnabled(false);
     this->IFSelectorImg->blockSignals(false);
     return;
   }
-  this->PlotsTabWidget->setTabEnabled(this->PlotsTabWidget->indexOf(this->ImagingWidget), true);
-  this->ImagingWidget->setEnabled(true);
 
   int restoredIndex = 0;
   for (const std::string& segmentID : this->segmentDisplayOrder)
@@ -1900,6 +2091,337 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateModelComboTCM(
   comboToFill->blockSignals(false);
 }
 
+void qSlicerDynamicPETModuleWidgetPrivate::setPostTACEnabled(
+    bool enabled)
+{
+  const int roiIndex =
+      this->PlotsTabWidget->indexOf(
+          this->ROIModelingWidget);
+
+  if (roiIndex >= 0)
+  {
+    this->PlotsTabWidget->setTabEnabled(
+        roiIndex, enabled);
+  }
+
+  const int imagingIndex =
+      this->PlotsTabWidget->indexOf(
+          this->ImagingWidget);
+
+  if (imagingIndex >= 0)
+  {
+    this->PlotsTabWidget->setTabEnabled(
+        imagingIndex, enabled);
+  }
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOutputUI()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  const bool saveDICOM =
+      this->MTGASaveDICOMCheckBoxImg->isChecked();
+
+  this->MTGADICOMDirectoryLabelImg->setEnabled(saveDICOM);
+  this->MTGADICOMDirectoryImg->setEnabled(saveDICOM);
+
+  q->enableFITMTGAImgbutton();
+
+  this->updateMTGAOptimizationUI();
+}
+
+
+void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOutputUI()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  const bool saveDICOM =
+      this->TCMSaveDICOMCheckBoxImg->isChecked();
+
+  this->TCMDICOMDirectoryLabelImg->setEnabled(saveDICOM);
+  this->TCMDICOMDirectoryImg->setEnabled(saveDICOM);
+
+  q->enableFITTCMImgbutton();
+
+  this->updateTCMOptimizationUI();
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  auto hasResult =
+      [&](const std::string& modelID)
+      {
+        auto it = q->MTGAImgOutcomes.find(modelID);
+
+        return
+            it != q->MTGAImgOutcomes.end() &&
+            !it->second.empty();
+      };
+
+  const bool hasPatlak = hasResult("Patlak");
+  const bool hasLogan  = hasResult("Logan");
+  const bool hasRE     = hasResult("RE");
+
+  const bool available =
+      hasPatlak && (hasLogan || hasRE);
+
+  this->MTGAOptimizationCollapsibleButtonImg
+      ->setEnabled(available);
+
+  if (!available)
+  {
+    this->MTGAOptimizationCollapsibleButtonImg
+        ->setCollapsed(true);
+
+    this->GenerateMTGAOptimizedImgButton
+        ->setEnabled(false);
+
+    return;
+  }
+
+  // Preserve current reversible-model choice if possible.
+  const QString previousModel =
+      this->MTGAReversibleModelComboImg->currentText();
+
+  this->MTGAReversibleModelComboImg->blockSignals(true);
+  this->MTGAReversibleModelComboImg->clear();
+
+  if (hasLogan)
+  {
+    this->MTGAReversibleModelComboImg
+        ->addItem("Logan", "Logan");
+  }
+
+  if (hasRE)
+  {
+    this->MTGAReversibleModelComboImg
+        ->addItem("RE", "RE");
+  }
+
+  int restoredIndex =
+      this->MTGAReversibleModelComboImg
+          ->findText(previousModel);
+
+  if (restoredIndex < 0 &&
+      this->MTGAReversibleModelComboImg->count() > 0)
+  {
+    restoredIndex = 0;
+  }
+
+  if (restoredIndex >= 0)
+  {
+    this->MTGAReversibleModelComboImg
+        ->setCurrentIndex(restoredIndex);
+  }
+
+  this->MTGAReversibleModelComboImg->blockSignals(false);
+
+  const bool useVuong =
+      this->MTGAUseVuongCheckBoxImg->isChecked();
+
+  this->MTGAVuongAlphaSpinBoxImg
+      ->setEnabled(useVuong);
+
+  this->MTGANonSignificantPolicyComboImg
+      ->setEnabled(useVuong);
+
+  const bool show =
+      this->MTGAShowInSlicerCheckBoxImg->isChecked();
+
+  const bool save =
+      this->MTGASaveDICOMCheckBoxImg->isChecked();
+
+  const bool saveReady =
+      !save ||
+      !this->MTGADICOMDirectoryImg
+           ->currentPath()
+           .trimmed()
+           .isEmpty();
+
+  this->GenerateMTGAOptimizedImgButton
+      ->setEnabled(
+          available &&
+          (show || save) &&
+          saveReady);
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::populateTCMOptimizationModels()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  // Preserve previous states.
+  QMap<QString, bool> previousStates;
+
+  for (int i = 0;
+       i < this->TCMOptimizationModelsCheckLayoutImg->count();
+       ++i)
+  {
+    QLayoutItem* item =
+        this->TCMOptimizationModelsCheckLayoutImg->itemAt(i);
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(item->widget());
+
+    if (cb)
+    {
+      previousStates[cb->text()] = cb->isChecked();
+    }
+  }
+
+  // Clear old checkboxes.
+  QLayoutItem* child = nullptr;
+
+  while ((child =
+      this->TCMOptimizationModelsCheckLayoutImg
+          ->takeAt(0)) != nullptr)
+  {
+    if (child->widget())
+    {
+      delete child->widget();
+    }
+
+    delete child;
+  }
+
+  // Keep your established model ordering rather than
+  // std::map alphabetical ordering.
+  for (const QString& modelName : q->ModelsNamesTCM)
+  {
+    const std::string modelID =
+        modelName.toStdString();
+
+    auto it = q->TCMImgOutcomes.find(modelID);
+
+    if (it == q->TCMImgOutcomes.end() ||
+        it->second.empty())
+    {
+      continue;
+    }
+
+    QCheckBox* cb =
+        new QCheckBox(
+            modelName,
+            this->TCMOptimizationModelsCheckContentsImg);
+
+    // Previously existing model -> restore state.
+    // Newly fitted model -> selected by default.
+    if (previousStates.contains(modelName))
+    {
+      cb->setChecked(previousStates.value(modelName));
+    }
+    else
+    {
+      cb->setChecked(true);
+    }
+
+    this->TCMOptimizationModelsCheckLayoutImg
+        ->addWidget(cb);
+
+    QObject::connect(
+        cb,
+        &QCheckBox::toggled,
+        q,
+        [this](bool)
+        {
+          this->updateTCMOptimizationUI();
+        });
+  }
+
+  this->TCMOptimizationModelsCheckLayoutImg
+      ->addStretch();
+
+  this->updateTCMOptimizationUI();
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOptimizationUI()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  int fittedModelCount = 0;
+  int selectedModelCount = 0;
+
+  for (int i = 0;
+       i < this->TCMOptimizationModelsCheckLayoutImg->count();
+       ++i)
+  {
+    QLayoutItem* item =
+        this->TCMOptimizationModelsCheckLayoutImg->itemAt(i);
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(item->widget());
+
+    if (!cb)
+    {
+      continue;
+    }
+
+    ++fittedModelCount;
+
+    if (cb->isChecked())
+    {
+      ++selectedModelCount;
+    }
+  }
+
+  // Section becomes available when at least one voxelwise
+  // TCM result exists.
+  this->TCMOptimizationCollapsibleButtonImg
+      ->setEnabled(fittedModelCount > 0);
+
+  this->TCMOptimizationModelsSelectAllImg
+      ->setEnabled(fittedModelCount > 0);
+
+  if (fittedModelCount == 0)
+  {
+    this->TCMOptimizationCollapsibleButtonImg
+        ->setCollapsed(true);
+
+    this->GenerateTCMOptimizedImgButton
+        ->setEnabled(false);
+
+    return;
+  }
+
+  const bool useTests =
+      this->TCMUseStatTestsCheckBoxImg->isChecked();
+
+  this->TCMStatAlphaSpinBoxImg
+      ->setEnabled(useTests);
+
+  const bool anyParameter =
+      this->TCMOptK1CheckBoxImg->isChecked() ||
+      this->TCMOptk2CheckBoxImg->isChecked() ||
+      this->TCMOptk3CheckBoxImg->isChecked() ||
+      this->TCMOptk4CheckBoxImg->isChecked() ||
+      this->TCMOptvbCheckBoxImg->isChecked() ||
+      this->TCMOpttdCheckBoxImg->isChecked() ||
+      this->TCMOptKiCheckBoxImg->isChecked() ||
+      this->TCMOptDVCheckBoxImg->isChecked();
+
+  const bool show =
+      this->TCMShowInSlicerCheckBoxImg->isChecked();
+
+  const bool save =
+      this->TCMSaveDICOMCheckBoxImg->isChecked();
+
+  const bool saveReady =
+      !save ||
+      !this->TCMDICOMDirectoryImg
+           ->currentPath()
+           .trimmed()
+           .isEmpty();
+
+  // Selection itself requires >=2 models.
+  this->GenerateTCMOptimizedImgButton
+      ->setEnabled(
+          selectedModelCount >= 2 &&
+          anyParameter &&
+          (show || save) &&
+          saveReady);
+}
+
 
 
 //-----------------------------------------------------------------------------
@@ -1947,9 +2469,16 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
       "}"
   );
   this->stopRequested = false;
-  QObject::connect(stopButton, &QPushButton::clicked, [this]() {
-      this->stopRequested = true;
-  });
+  QObject::connect(
+      this->stopButton,
+      &QPushButton::clicked,
+      this,
+      [this]()
+      {
+        this->stopRequested.store(true);
+        this->stopButton->setEnabled(false);
+        this->stopButton->setText("Stopping...");
+      });
 
   this->checkboxNames = QStringList{
     "Mean", "Median", "Peak", "Min", "Max"//, "VoxelCount", "Volume(cc)"
@@ -2575,29 +3104,70 @@ void qSlicerDynamicPETModuleWidget::onSegmentsChanged()
   d->populateSegmentCheckboxes(this->segID);
 }
 
-void qSlicerDynamicPETModuleWidget::clearTACdata() {
+void qSlicerDynamicPETModuleWidget::clearTACdata()
+{
   Q_D(qSlicerDynamicPETModuleWidget);
+
+  // Disable all workflows that depend on TAC computation.
+  d->setPostTACEnabled(false);
+
+  // Dynamic PET / TAC data
   this->PET_flatten_values.clear();
-  this->RemoveExistingPlotChartAndTable();
   this->segmentTACs.clear();
   this->segmentTACsnames.clear();
+
+  // Current TAC-dependent selections
+  this->IFID.clear();
+  this->VOIsegmentIDs.clear();
+  this->VOIMTGAsegmentIDs.clear();
+  this->plotTCMVOI.clear();
+  this->plotMTGAVOI.clear();
+
+  // ROI modeling results
+  this->segmentTCM.clear();
+  this->segmentMTGA.clear();
+
+  // TCM plotting/fitted data
+  this->segmentTAC4TCMfits.clear();
+  this->segmentkeep4TCMfits.clear();
+  this->segmentTCMfits.clear();
+
+  // Parametric imaging results
+  this->TCMImgOutcomes.clear();
+  this->MTGAImgOutcomes.clear();
+  d->TCMImgFitSignatures.clear();
+  d->MTGAImgFitSignatures.clear();
+
+  d->updateMTGAOptimizationUI();
+  d->populateTCMOptimizationModels();
+
+  // Plot nodes
+  this->RemoveExistingPlotChartAndTable();
+
+  // Refresh TAC-dependent UI
   d->populatePlotSegmentCheckboxes();
   d->populateIF();
   d->populateIFMTGA();
   d->populateIFImg();
+
   d->TACCollapsibleButton->setCollapsed(true);
+
   for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
   {
-    QWidget* widget = d->PlotStatsCheckLayout->itemAt(i)->widget();
-    QCheckBox* cb = qobject_cast<QCheckBox*>(widget);
+    QWidget* widget =
+        d->PlotStatsCheckLayout->itemAt(i)->widget();
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(widget);
+
     if (cb)
     {
       cb->setChecked(false);
     }
   }
-  d->direxcel->setCurrentPath(QString::fromStdString(""));
+
+  d->direxcel->setCurrentPath(QString());
   d->saveExcelButton->setEnabled(false);
-  return;
 }
 
 void qSlicerDynamicPETModuleWidget::enableTACbutton() {
@@ -2774,6 +3344,12 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   d->populateTimeBarMTGAImg();
   d->populateIFMTGA();
   d->populateIFImg();
+
+  const bool tacReady =
+      !this->segmentTACs.empty() &&
+      !this->segmentTACsnames.empty();
+
+  d->setPostTACEnabled(tacReady);
   return;
 }
 
@@ -3461,46 +4037,65 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
 void qSlicerDynamicPETModuleWidget::onIFSelectionChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  this->IFID = d->IFSelector->itemData(index).toString().toStdString();
+
+  this->IFID =
+      d->IFSelector->itemData(index).toString().toStdString();
+
   d->populateVOI(this->IFID);
   d->IFSelectorMTGA->setCurrentIndex(index);
   d->populateVOIMTGA(this->IFID);
   d->IFSelectorImg->setCurrentIndex(index);
+
+  this->enableFITMTGAImgbutton();
+  this->enableFITTCMImgbutton();
+
   if (this->IFID == "")
   {
     return;
   }
-
 }
 
 void qSlicerDynamicPETModuleWidget::onIFMTGASelectionChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  this->IFID = d->IFSelectorMTGA->itemData(index).toString().toStdString();
+
+  this->IFID =
+      d->IFSelectorMTGA->itemData(index).toString().toStdString();
+
   d->populateVOIMTGA(this->IFID);
   d->IFSelector->setCurrentIndex(index);
   d->populateVOI(this->IFID);
   d->IFSelectorImg->setCurrentIndex(index);
+
+  this->enableFITMTGAImgbutton();
+  this->enableFITTCMImgbutton();
+
   if (this->IFID == "")
   {
     return;
   }
-
 }
 
 void qSlicerDynamicPETModuleWidget::onIFImgSelectionChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  this->IFID = d->IFSelectorImg->itemData(index).toString().toStdString();
+
+  this->IFID =
+      d->IFSelectorImg->itemData(index).toString().toStdString();
+
   d->IFSelector->setCurrentIndex(index);
   d->IFSelectorMTGA->setCurrentIndex(index);
+
   d->populateVOI(this->IFID);
   d->populateVOIMTGA(this->IFID);
+
+  this->enableFITMTGAImgbutton();
+  this->enableFITTCMImgbutton();
+
   if (this->IFID == "")
   {
     return;
   }
-
 }
 
 void qSlicerDynamicPETModuleWidget::onVOISelectionChanged(int index)
@@ -4002,18 +4597,50 @@ void qSlicerDynamicPETModuleWidget::enableFITbutton() {
   d->FITbutton->setEnabled(true);
 }
 
-void qSlicerDynamicPETModuleWidget::enableFITTCMImgbutton() {
+void qSlicerDynamicPETModuleWidget::enableFITTCMImgbutton()
+{
   Q_D(qSlicerDynamicPETModuleWidget);
-  if (this->IFID=="") {
+
+  if (d->parametricFitRunning)
+  {
     d->FITbuttonTCMImg->setEnabled(false);
-    // this->clearFITTCMImgdata();
     return;
   }
-  if (this->modelsTCMImgID.empty()) {
+
+  if (this->IFID.empty())
+  {
     d->FITbuttonTCMImg->setEnabled(false);
-    // this->clearFITTCMImgdata();
     return;
   }
+
+  if (this->modelsTCMImgID.empty())
+  {
+    d->FITbuttonTCMImg->setEnabled(false);
+    return;
+  }
+
+  const bool show =
+      d->TCMShowInSlicerCheckBoxImg->isChecked();
+
+  const bool save =
+      d->TCMSaveDICOMCheckBoxImg->isChecked();
+
+  if (!show && !save)
+  {
+    d->FITbuttonTCMImg->setEnabled(false);
+    return;
+  }
+
+  if (save &&
+      d->TCMDICOMDirectoryImg
+          ->currentPath()
+          .trimmed()
+          .isEmpty())
+  {
+    d->FITbuttonTCMImg->setEnabled(false);
+    return;
+  }
+
   d->FITbuttonTCMImg->setEnabled(true);
 }
 
@@ -4037,18 +4664,50 @@ void qSlicerDynamicPETModuleWidget::enableFITMTGAbutton() {
   d->FITMTGAbutton->setEnabled(true);
 }
 
-void qSlicerDynamicPETModuleWidget::enableFITMTGAImgbutton() {
+void qSlicerDynamicPETModuleWidget::enableFITMTGAImgbutton()
+{
   Q_D(qSlicerDynamicPETModuleWidget);
-  if (this->IFID=="") {
+
+  if (d->parametricFitRunning)
+  {
     d->FITbuttonMTGAImg->setEnabled(false);
-    // this->clearFITMTGAImgdata();
     return;
   }
-  if (this->modelsMTGAImgID.empty()) {
+
+  if (this->IFID.empty())
+  {
     d->FITbuttonMTGAImg->setEnabled(false);
-    // this->clearFITMTGAImgdata();
     return;
   }
+
+  if (this->modelsMTGAImgID.empty())
+  {
+    d->FITbuttonMTGAImg->setEnabled(false);
+    return;
+  }
+
+  const bool show =
+      d->MTGAShowInSlicerCheckBoxImg->isChecked();
+
+  const bool save =
+      d->MTGASaveDICOMCheckBoxImg->isChecked();
+
+  if (!show && !save)
+  {
+    d->FITbuttonMTGAImg->setEnabled(false);
+    return;
+  }
+
+  if (save &&
+      d->MTGADICOMDirectoryImg
+          ->currentPath()
+          .trimmed()
+          .isEmpty())
+  {
+    d->FITbuttonMTGAImg->setEnabled(false);
+    return;
+  }
+
   d->FITbuttonMTGAImg->setEnabled(true);
 }
 
@@ -4156,12 +4815,47 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     };
   };
 
-  auto [k1Init, k1Lower, k1Upper] = getParamTriplet(d->k1Initial, d->k1Lower, d->k1Upper);
-  auto [k2Init, k2Lower, k2Upper] = getParamTriplet(d->k2Initial, d->k2Lower, d->k2Upper);
-  auto [k3Init, k3Lower, k3Upper] = getParamTriplet(d->k3Initial, d->k3Lower, d->k3Upper);
-  auto [k4Init, k4Lower, k4Upper] = getParamTriplet(d->k4Initial, d->k4Lower, d->k4Upper);
-  auto [vbInit, vbLower, vbUpper] = getParamTriplet(d->vbInitial, d->vbLower, d->vbUpper);
-  auto [tdInit, tdLower, tdUpper] = getParamTriplet(d->tdInitial, d->tdLower, d->tdUpper);
+  double k1Init, k1Lower, k1Upper;
+  std::tie(k1Init, k1Lower, k1Upper) =
+      getParamTriplet(
+          d->k1Initial,
+          d->k1Lower,
+          d->k1Upper);
+
+  double k2Init, k2Lower, k2Upper;
+  std::tie(k2Init, k2Lower, k2Upper) =
+      getParamTriplet(
+          d->k2Initial,
+          d->k2Lower,
+          d->k2Upper);
+
+  double k3Init, k3Lower, k3Upper;
+  std::tie(k3Init, k3Lower, k3Upper) =
+      getParamTriplet(
+          d->k3Initial,
+          d->k3Lower,
+          d->k3Upper);
+
+  double k4Init, k4Lower, k4Upper;
+  std::tie(k4Init, k4Lower, k4Upper) =
+      getParamTriplet(
+          d->k4Initial,
+          d->k4Lower,
+          d->k4Upper);
+
+  double vbInit, vbLower, vbUpper;
+  std::tie(vbInit, vbLower, vbUpper) =
+      getParamTriplet(
+          d->vbInitial,
+          d->vbLower,
+          d->vbUpper);
+
+  double tdInit, tdLower, tdUpper;
+  std::tie(tdInit, tdLower, tdUpper) =
+      getParamTriplet(
+          d->tdInitial,
+          d->tdLower,
+          d->tdUpper);
 
   const long Nframe = timePoints.size();
   const long Nvox = 1;
@@ -4234,7 +4928,12 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
   const double dk = d->decayConstEdit->text().toDouble();
   const double timestep = d->timeStepEdit->text().toDouble();
 
-  auto [pbrp1, pbrp2, pbrp3] = getParamTriplet(d->pbrp1Edit, d->pbrp2Edit, d->pbrp3Edit);
+  double pbrp1, pbrp2, pbrp3;
+  std::tie(pbrp1, pbrp2, pbrp3) =
+      getParamTriplet(
+          d->pbrp1Edit,
+          d->pbrp2Edit,
+          d->pbrp3Edit);
   const double pbrp[] = {pbrp1, pbrp2, pbrp3};
   const int maxiter = d->maxIterTCMEdit->text().toInt();
 
@@ -4514,12 +5213,47 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     };
   };
 
-  auto [k1Init, k1Lower, k1Upper] = getParamTriplet(d->k1InitialImg, d->k1LowerImg, d->k1UpperImg);
-  auto [k2Init, k2Lower, k2Upper] = getParamTriplet(d->k2InitialImg, d->k2LowerImg, d->k2UpperImg);
-  auto [k3Init, k3Lower, k3Upper] = getParamTriplet(d->k3InitialImg, d->k3LowerImg, d->k3UpperImg);
-  auto [k4Init, k4Lower, k4Upper] = getParamTriplet(d->k4InitialImg, d->k4LowerImg, d->k4UpperImg);
-  auto [vbInit, vbLower, vbUpper] = getParamTriplet(d->vbInitialImg, d->vbLowerImg, d->vbUpperImg);
-  auto [tdInit, tdLower, tdUpper] = getParamTriplet(d->tdInitialImg, d->tdLowerImg, d->tdUpperImg);
+  double k1Init, k1Lower, k1Upper;
+  std::tie(k1Init, k1Lower, k1Upper) =
+      getParamTriplet(
+          d->k1InitialImg,
+          d->k1LowerImg,
+          d->k1UpperImg);
+
+  double k2Init, k2Lower, k2Upper;
+  std::tie(k2Init, k2Lower, k2Upper) =
+      getParamTriplet(
+          d->k2InitialImg,
+          d->k2LowerImg,
+          d->k2UpperImg);
+
+  double k3Init, k3Lower, k3Upper;
+  std::tie(k3Init, k3Lower, k3Upper) =
+      getParamTriplet(
+          d->k3InitialImg,
+          d->k3LowerImg,
+          d->k3UpperImg);
+
+  double k4Init, k4Lower, k4Upper;
+  std::tie(k4Init, k4Lower, k4Upper) =
+      getParamTriplet(
+          d->k4InitialImg,
+          d->k4LowerImg,
+          d->k4UpperImg);
+
+  double vbInit, vbLower, vbUpper;
+  std::tie(vbInit, vbLower, vbUpper) =
+      getParamTriplet(
+          d->vbInitialImg,
+          d->vbLowerImg,
+          d->vbUpperImg);
+
+  double tdInit, tdLower, tdUpper;
+  std::tie(tdInit, tdLower, tdUpper) =
+      getParamTriplet(
+          d->tdInitialImg,
+          d->tdLowerImg,
+          d->tdUpperImg);
 
   const long Nframe = timePoints.size();
   const long Nvox = 1;
@@ -4554,7 +5288,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     double value;
     if (currentSelectedStatID == "Mean") {
       value = vs.mean;
-      if (d->weightFitCheckBox->isChecked()) {
+      if (d->weightFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -4562,7 +5296,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     }
     else if (currentSelectedStatID == "Median") {
       value = vs.median;
-      if (d->weightFitCheckBox->isChecked()) {
+      if (d->weightFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -4570,7 +5304,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     }
     else if (currentSelectedStatID == "Peak") {
       value = vs.peak;
-      if (d->weightFitCheckBox->isChecked()) {
+      if (d->weightFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -4591,7 +5325,12 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   const double dk = d->decayConstEditImg->text().toDouble();
   const double timestep = d->timeStepEditImg->text().toDouble();
 
-  auto [pbrp1, pbrp2, pbrp3] = getParamTriplet(d->pbrp1EditImg, d->pbrp2EditImg, d->pbrp3EditImg);
+  double pbrp1, pbrp2, pbrp3;
+  std::tie(pbrp1, pbrp2, pbrp3) =
+      getParamTriplet(
+          d->pbrp1EditImg,
+          d->pbrp2EditImg,
+          d->pbrp3EditImg);
   const double pbrp[] = {pbrp1, pbrp2, pbrp3};
   const int maxiter = d->maxIterTCMEditImg->text().toInt();
   const int numThreads = d->numThreadsTCM->text().toInt();
@@ -4601,13 +5340,177 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   auto Cp_flatten = extractColumn(Cp);
   std::vector<double> framing_flatten = extractColumn(framing);
 
+  auto appendDouble =
+      [](QString& key, double value)
+      {
+        key += "|" + QString::number(value, 'g', 17);
+      };
+
+  auto appendTriplet =
+      [&](QString& key,
+          double init,
+          double lower,
+          double upper)
+      {
+        appendDouble(key, init);
+        appendDouble(key, lower);
+        appendDouble(key, upper);
+      };
+
+  auto appendVector =
+      [&](QString& key,
+          const std::vector<double>& values)
+      {
+        for (double value : values)
+        {
+          appendDouble(key, value);
+        }
+      };
+
+  auto makeTCMFitSignature =
+      [&](const std::string& modelID)
+      {
+        QString key =
+            QString::fromStdString(modelID)
+            + "|IF=" + QString::fromStdString(this->IFID)
+            + "|stat=" + QString::fromStdString(currentSelectedStatID)
+            + "|weighted="
+            + QString::number(
+                d->weightFitCheckBoxImg->isChecked());
+
+        // Common TCM settings
+        appendDouble(key, dk);
+        appendDouble(key, timestep);
+
+        appendDouble(key, pbrp1);
+        appendDouble(key, pbrp2);
+        appendDouble(key, pbrp3);
+
+        key += "|" + QString::number(maxiter);
+
+        // All models use vb and K1.
+        appendTriplet(
+            key, vbInit, vbLower, vbUpper);
+
+        appendTriplet(
+            key, k1Init, k1Lower, k1Upper);
+
+        const bool usesK2 =
+            modelID == "1TCM"  ||
+            modelID == "1TdCM" ||
+            modelID == "2TCM"  ||
+            modelID == "2dTCM" ||
+            modelID == "2TiCM" ||
+            modelID == "2TidCM";
+
+        const bool usesK3 =
+            modelID == "2TCM"  ||
+            modelID == "2dTCM" ||
+            modelID == "2TiCM" ||
+            modelID == "2TidCM";
+
+        const bool usesK4 =
+            modelID == "2TCM" ||
+            modelID == "2dTCM";
+
+        const bool usesTd =
+            modelID == "1TdCM"  ||
+            modelID == "1TidCM" ||
+            modelID == "2dTCM"  ||
+            modelID == "2TidCM";
+
+        if (usesK2)
+        {
+          appendTriplet(
+              key, k2Init, k2Lower, k2Upper);
+        }
+
+        if (usesK3)
+        {
+          appendTriplet(
+              key, k3Init, k3Lower, k3Upper);
+        }
+
+        if (usesK4)
+        {
+          appendTriplet(
+              key, k4Init, k4Lower, k4Upper);
+        }
+
+        if (usesTd)
+        {
+          appendTriplet(
+              key, tdInit, tdLower, tdUpper);
+        }
+
+        // Effective input function + weights.
+        appendVector(key, Cp_flatten);
+        appendVector(key, *wgt);
+
+        return key;
+      };
+
+  std::vector<std::string> modelsToFit;
+  std::map<std::string, QString> pendingFitSignatures;
+
+  for (const std::string& modelID :
+       this->modelsTCMImgID)
+  {
+    const QString signature =
+        makeTCMFitSignature(modelID);
+
+    const auto resultIt =
+        this->TCMImgOutcomes.find(modelID);
+
+    const auto signatureIt =
+        d->TCMImgFitSignatures.find(modelID);
+
+    const bool alreadyValid =
+        resultIt != this->TCMImgOutcomes.end() &&
+        !resultIt->second.empty() &&
+        signatureIt !=
+            d->TCMImgFitSignatures.end() &&
+        signatureIt->second == signature;
+
+    if (alreadyValid)
+    {
+      qDebug()
+          << "Reusing existing TCM voxelwise fit:"
+          << QString::fromStdString(modelID);
+
+      continue;
+    }
+
+    // The old result no longer represents current settings.
+    this->TCMImgOutcomes.erase(modelID);
+    d->TCMImgFitSignatures.erase(modelID);
+
+    modelsToFit.push_back(modelID);
+    pendingFitSignatures[modelID] =
+        signature;
+  }
+
+  if (modelsToFit.empty())
+  {
+    qDebug()
+        << "All requested TCM models already have valid fits.";
+
+    d->populateTCMOptimizationModels();
+    return;
+  }
+
   this->stopRequested = false;
+
+  d->parametricFitRunning = true;
+  d->FITbuttonMTGAImg->setEnabled(false);
+  d->FITbuttonTCMImg->setEnabled(false);
+
   TCMWorker* worker = new TCMWorker(
     logic,
-    this->PET_flatten_values,  // voxels
+    this->PET_flatten_values,
     Cp_flatten,
     framing_flatten,
-    modelsTCMImgID,            // vector<string> of model IDs
+    modelsToFit,
     vbInit, vbLower, vbUpper,
     k1Init, k1Lower, k1Upper,
     k2Init, k2Lower, k2Upper,
@@ -4652,7 +5555,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   const vtkIdType refPetID = this->petID;
 
   QObject::connect(worker, &TCMWorker::finishedProcessing,
-    this, [this, logic, worker, refPETNodeWeak, shNodeWeak, refPetID](const QString& modelID){//, const std::vector<TCMParameters>& results) {
+    this, [this, logic, worker, refPETNodeWeak, shNodeWeak, refPetID, pendingFitSignatures](const QString& modelID){//, const std::vector<TCMParameters>& results) {
 
       if (!refPETNodeWeak)
       {
@@ -4670,7 +5573,25 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
           return;
       }
 
-      this->TCMImgOutcomes[modelID.toStdString()] = std::move(worker->results);
+      Q_D(qSlicerDynamicPETModuleWidget);
+
+      const std::string id =
+          modelID.toStdString();
+
+      this->TCMImgOutcomes[id] =
+          std::move(worker->results);
+
+      auto signatureIt =
+          pendingFitSignatures.find(id);
+
+      if (signatureIt !=
+          pendingFitSignatures.end())
+      {
+        d->TCMImgFitSignatures[id] =
+            signatureIt->second;
+      }
+
+      d->populateTCMOptimizationModels();
 
       auto getModelfields = [](const std::string& modelID) -> std::vector<std::string> {
           if (modelID == "1TCM")
@@ -4706,9 +5627,9 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       );
   }, Qt::BlockingQueuedConnection);
 
-  connect(this->stopButton, &QPushButton::clicked, this, [this](){
-      this->stopRequested = true;
-  });
+  // connect(this->stopButton, &QPushButton::clicked, this, [this](){
+  //     this->stopRequested = true;
+  // });
 
   QObject::connect(
       worker,
@@ -4716,8 +5637,19 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       this,
       [this]()
       {
-          this->ProgressBar->setVisible(false);
-          this->stopButton->setVisible(false);
+        Q_D(qSlicerDynamicPETModuleWidget);
+        
+        this->ProgressBar->setVisible(false);
+
+        this->stopButton->setVisible(false);
+        this->stopButton->setEnabled(true);
+        this->stopButton->setText("Stop");
+
+        d->parametricFitRunning = false;
+
+        this->enableFITMTGAImgbutton();
+        this->enableFITTCMImgbutton();
+
       });
 
   QObject::connect(
@@ -5048,7 +5980,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
     double value;
     if (currentSelectedStatID == "Mean") {
       value = vs.mean;
-      if (d->weightedFitCheckBox->isChecked()) {
+      if (d->weightedFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -5056,7 +5988,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
     }
     else if (currentSelectedStatID == "Median") {
       value = vs.median;
-      if (d->weightedFitCheckBox->isChecked()) {
+      if (d->weightedFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -5064,7 +5996,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
     }
     else if (currentSelectedStatID == "Peak") {
       value = vs.peak;
-      if (d->weightedFitCheckBox->isChecked()) {
+      if (d->weightedFitCheckBoxImg->isChecked()) {
         wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
       } else {
         wgtVec[segmentName].push_back(1.);
@@ -5094,106 +6026,319 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   auto Cp_flatten = extractColumn(Cp);
   wgt = &wgtVec[segmentName];
 
-  this->stopRequested = false;
-  for (const std::string& modelID : this->modelsMTGAImgID) {
-    if (modelID == "Patlak") {
-      logic->Patlak4Img(
-        this->PET_flatten_values,
-        Cp_flatten,
-        framing_flatten,
-        wgt,
-        timeOffset,
-        framingNorm,
-        robust,
-        std,
-        huber_tune,
-        tol,
-        max_iter,
-        this->MTGAImgOutcomes[modelID],
-        this->stopRequested,
-        this->ProgressBar,
-        numThreads,
-        this->stopButton
-      );
-      if (this->stopRequested) {
-        break;
-      }
-      logic->CreateMTGAParametricImages(
-          this->MTGAImgOutcomes[modelID],
-          this->PETdims,
-          {"Ki", "Intercept", "AIC", "MASE", "R2", "chi2"},
-          modelID,
-          refPETNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
-    } else if (modelID == "Logan") {
-      logic->Logan4Img(
-        this->PET_flatten_values,
-        Cp_flatten,
-        framing_flatten,
-        wgt,
-        timeOffset,
-        framingNorm,
-        robust,
-        std,
-        huber_tune,
-        tol,
-        max_iter,
-        this->MTGAImgOutcomes[modelID],
-        this->stopRequested,
-        this->ProgressBar,
-        numThreads,
-        this->stopButton
-      );
-      if (this->stopRequested) {
-        break;
-      }
-      logic->CreateMTGAParametricImages(
-          this->MTGAImgOutcomes[modelID],
-          this->PETdims,
-          {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
-          modelID,
-          refPETNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
-    } else if (modelID == "RE") {
-      logic->RE4Img(
-        this->PET_flatten_values,
-        Cp_flatten,
-        framing_flatten,
-        wgt,
-        timeOffset,
-        framingNorm,
-        robust,
-        std,
-        huber_tune,
-        tol,
-        max_iter,
-        this->MTGAImgOutcomes[modelID],
-        this->stopRequested,
-        this->ProgressBar,
-        numThreads,
-        this->stopButton
-      );
-      if (this->stopRequested) {
-        break;
-      }
-      logic->CreateMTGAParametricImages(
-          this->MTGAImgOutcomes[modelID],
-          this->PETdims,
-          {"DV", "Intercept", "AIC", "MASE", "R2", "chi2"},
-          modelID,
-          refPETNode,
-          this->SubjectHierarchyNode,
-          this->petID
-        );
-    } else {
-      std::cerr << "Unknown model ID: " << modelID << std::endl;
-      return;
+  // --------------------------------------------------------------------------
+  // Fit signature used to determine whether this MTGA model must be refitted.
+  // --------------------------------------------------------------------------
+  auto appendDouble =
+      [](QString& key, double value)
+      {
+        key += "|" + QString::number(value, 'g', 17);
+      };
+
+  auto appendVector =
+      [&](QString& key,
+          const std::vector<double>& values)
+      {
+        for (double value : values)
+        {
+          appendDouble(key, value);
+        }
+      };
+
+  auto makeMTGAFitSignature =
+      [&](const std::string& modelID)
+      {
+        QString key =
+            QString::fromStdString(modelID)
+            + "|IF="
+            + QString::fromStdString(this->IFID)
+            + "|stat="
+            + QString::fromStdString(currentSelectedStatID)
+            + "|weighted="
+            + QString::number(
+                d->weightedFitCheckBoxImg->isChecked())
+            + "|robust="
+            + QString::number(robust)
+            + "|standardize="
+            + QString::number(std);
+
+        appendDouble(key, framingNorm);
+        appendDouble(key, timeOffset);
+
+        if (robust)
+        {
+          appendDouble(key, huber_tune);
+          appendDouble(key, tol);
+
+          key += "|maxiter="
+              + QString::number(max_iter);
+        }
+
+        // Include actual effective input data.
+        appendVector(key, Cp_flatten);
+        appendVector(key, *wgt);
+
+        return key;
+      };
+
+  std::vector<std::string> modelsToFit;
+
+  std::map<std::string, QString>
+      pendingFitSignatures;
+
+  for (const std::string& modelID :
+       this->modelsMTGAImgID)
+  {
+    const QString fitSignature =
+        makeMTGAFitSignature(modelID);
+
+    const auto resultIt =
+        this->MTGAImgOutcomes.find(
+            modelID);
+
+    const auto signatureIt =
+        d->MTGAImgFitSignatures.find(
+            modelID);
+
+    const bool alreadyValid =
+        resultIt !=
+            this->MTGAImgOutcomes.end() &&
+        !resultIt->second.empty() &&
+        signatureIt !=
+            d->MTGAImgFitSignatures.end() &&
+        signatureIt->second ==
+            fitSignature;
+
+    if (alreadyValid)
+    {
+      qDebug()
+          << "Reusing existing MTGA voxelwise fit:"
+          << QString::fromStdString(modelID);
+
+      continue;
     }
+
+    this->MTGAImgOutcomes.erase(
+        modelID);
+
+    d->MTGAImgFitSignatures.erase(
+        modelID);
+
+    modelsToFit.push_back(
+        modelID);
+
+    pendingFitSignatures[modelID] =
+        fitSignature;
   }
+
+  if (modelsToFit.empty())
+  {
+    qDebug()
+        << "All requested MTGA models "
+           "already have valid fits.";
+
+    d->updateMTGAOptimizationUI();
+    return;
+  }
+
+  this->stopRequested.store(false);
+
+  this->stopButton->setEnabled(true);
+  this->stopButton->setText("Stop");
+
+  d->parametricFitRunning = true;
+  d->FITbuttonMTGAImg->setEnabled(false);
+  d->FITbuttonTCMImg->setEnabled(false);
+
+  MTGAWorker* worker =
+      new MTGAWorker(
+          logic,
+          this->PET_flatten_values,
+          Cp_flatten,
+          framing_flatten,
+          modelsToFit,
+          wgt,
+          timeOffset,
+          framingNorm,
+          robust,
+          std,
+          huber_tune,
+          tol,
+          max_iter,
+          this->stopRequested,
+          numThreads);
+
+  QObject::connect(
+      worker,
+      &MTGAWorker::modelStarted,
+      this,
+      [this](const QString& modelID)
+      {
+        this->ProgressBar->setFormat(
+            "Fitting " +
+            modelID +
+            " (%p%)");
+
+        this->ProgressBar->setMinimum(0);
+        this->ProgressBar->setMaximum(100);
+        this->ProgressBar->setValue(0);
+        this->ProgressBar->setVisible(true);
+
+        this->stopButton->setEnabled(true);
+        this->stopButton->setText("Stop");
+        this->stopButton->setVisible(true);
+      });
+
+  QObject::connect(
+      worker,
+      &MTGAWorker::progressChanged,
+      this,
+      [this](int value)
+      {
+        this->ProgressBar->setValue(
+            value);
+      });
+
+  QObject::connect(
+      worker,
+      &MTGAWorker::canceled,
+      this,
+      [this](const QString&)
+      {
+        this->ProgressBar->setVisible(
+            false);
+
+        this->stopButton->setVisible(
+            false);
+      });
+
+  vtkWeakPointer<
+      vtkMRMLScalarVolumeNode>
+      refPETNodeWeak =
+          refPETNode;
+
+  vtkWeakPointer<
+      vtkMRMLSubjectHierarchyNode>
+      shNodeWeak =
+          shNode;
+
+  const vtkIdType refPetID =
+      this->petID;
+
+  QObject::connect(
+      worker,
+      &MTGAWorker::finishedProcessing,
+      this,
+      [this,
+       logic,
+       worker,
+       refPETNodeWeak,
+       shNodeWeak,
+       refPetID,
+       pendingFitSignatures]
+      (const QString& modelID)
+      {
+        if (!refPETNodeWeak ||
+            !shNodeWeak)
+        {
+          return;
+        }
+
+        Q_D(qSlicerDynamicPETModuleWidget);
+
+        const std::string id =
+            modelID.toStdString();
+
+        this->MTGAImgOutcomes[id] =
+            std::move(worker->results);
+
+        auto signatureIt =
+            pendingFitSignatures.find(id);
+
+        if (signatureIt !=
+            pendingFitSignatures.end())
+        {
+          d->MTGAImgFitSignatures[id] =
+              signatureIt->second;
+        }
+
+        std::vector<std::string> fields;
+
+        if (id == "Patlak")
+        {
+          fields =
+          {
+            "Ki",
+            "Intercept",
+            "AIC",
+            "MASE",
+            "R2",
+            "chi2"
+          };
+        }
+        else
+        {
+          fields =
+          {
+            "DV",
+            "Intercept",
+            "AIC",
+            "MASE",
+            "R2",
+            "chi2"
+          };
+        }
+
+        logic->CreateMTGAParametricImages(
+            this->MTGAImgOutcomes[id],
+            this->PETdims,
+            fields,
+            id,
+            refPETNodeWeak,
+            shNodeWeak,
+            refPetID);
+
+        d->updateMTGAOptimizationUI();
+      },
+      Qt::BlockingQueuedConnection);
+
+  QObject::connect(
+      worker,
+      &MTGAWorker::finishedAll,
+      this,
+      [this]()
+      {
+        Q_D(qSlicerDynamicPETModuleWidget);
+
+        this->ProgressBar->setVisible(
+            false);
+
+        this->stopButton->setVisible(
+            false);
+
+        this->stopButton->setEnabled(
+            true);
+
+        this->stopButton->setText(
+            "Stop");
+
+        d->parametricFitRunning = false;
+
+        d->updateMTGAOptimizationUI();
+
+        this->enableFITMTGAImgbutton();
+        this->enableFITTCMImgbutton();
+
+      });
+
+  QObject::connect(
+      worker,
+      &QThread::finished,
+      worker,
+      &QObject::deleteLater);
+
+  worker->start();
+
 }
 
 

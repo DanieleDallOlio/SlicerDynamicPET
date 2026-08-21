@@ -281,10 +281,8 @@ public:
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
       std::atomic<bool>& stopRequested,
-      QProgressBar* progressBar = nullptr,
-      int numThreads = 1,
-      QPushButton* stopButton = nullptr
-  );
+      int numThreads,
+      std::function<void(int)> progressCallback);
   void Logan4Img(
       const std::vector<std::vector<double>>& voxels,
       const std::vector<double>& Cp,
@@ -299,10 +297,8 @@ public:
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
       std::atomic<bool>& stopRequested,
-      QProgressBar* progressBar = nullptr,
-      int numThreads = 1,
-      QPushButton* stopButton = nullptr
-  );
+      int numThreads,
+      std::function<void(int)> progressCallback);
   void RE4Img(
       const std::vector<std::vector<double>>& voxels,
       const std::vector<double>& Cp,
@@ -317,10 +313,8 @@ public:
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
       std::atomic<bool>& stopRequested,
-      QProgressBar* progressBar = nullptr,
-      int numThreads = 1,
-      QPushButton* stopButton = nullptr
-  );
+      int numThreads,
+      std::function<void(int)> progressCallback);
   std::vector<double> ExtractParameter(
       const std::vector<MTGAParameters>& outputParams,
       const std::string& field);

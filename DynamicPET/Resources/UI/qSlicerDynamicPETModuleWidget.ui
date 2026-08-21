@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <ui version="4.0">
  <class>qSlicerDynamicPETModuleWidget</class>
  <widget class="qSlicerWidget" name="qSlicerDynamicPETModuleWidget">
@@ -11,14 +11,14 @@
    </rect>
   </property>
   <property name="windowTitle">
-   <string>K-MAP</string>
+   <string>SlicerDynamicPET</string>
   </property>
   <layout class="QVBoxLayout" name="verticalLayoutOuter">
     <item>
       <widget class="QTabWidget" name="PlotsTabWidget">
         <widget class="QWidget" name="TACwidget">
           <attribute name="title">
-           <string>TAC</string>
+           <string>Setup &amp; TAC</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayout">
             <item>
@@ -312,7 +312,7 @@
             </item>
           </layout>
         </widget>
-        <widget class="QWidget" name="MTGAWidget">
+        <widget class="QWidget" name="ROIModelingWidget"><attribute name="title"><string>ROI Modeling</string></attribute><layout class="QVBoxLayout" name="verticalLayoutROIModeling" stretch="0"><item><widget class="QTabWidget" name="ROIModelsTabWidget"><widget class="QWidget" name="MTGAWidget">
           <attribute name="title">
            <string>MTGA</string>
           </attribute>
@@ -1613,9 +1613,9 @@
             </item>
           </layout>
         </widget>
-        <widget class="QWidget" name="ImagingWidget">
+        </widget></item></layout></widget><widget class="QWidget" name="ImagingWidget">
           <attribute name="title">
-            <string>Imaging</string>
+            <string>Parametric Imaging</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayoutImg">
 
@@ -1660,7 +1660,7 @@
                 <!-- MTGA Tab -->
                 <widget class="QWidget" name="MTGATabImg">
                   <attribute name="title">
-                    <string>MTGA Models</string>
+                    <string>MTGA</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="mtgaLayoutImg">
 
@@ -1977,15 +1977,192 @@
                       </widget>
                     </item>
 
-                    <!-- Run button -->
+                    <!-- Output destination shared by standard and model-selected MTGA maps -->
+                    <item>
+                      <widget class="ctkCollapsibleButton" name="MTGAOutputCollapsibleButtonImg">
+                        <property name="text">
+                          <string>Output</string>
+                        </property>
+                        <property name="collapsed">
+                          <bool>false</bool>
+                        </property>
+                        <layout class="QGridLayout" name="MTGAOutputLayoutImg">
+                          <item row="0" column="0" colspan="2">
+                            <widget class="QCheckBox" name="MTGAShowInSlicerCheckBoxImg">
+                              <property name="toolTip">
+                                <string>Add generated quantitative parametric maps to the Slicer scene.</string>
+                              </property>
+                              <property name="text">
+                                <string>Show in Slicer</string>
+                              </property>
+                              <property name="checked">
+                                <bool>true</bool>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="0" colspan="2">
+                            <widget class="QCheckBox" name="MTGASaveDICOMCheckBoxImg">
+                              <property name="toolTip">
+                                <string>Save generated quantitative maps as DICOM Parametric Map objects.</string>
+                              </property>
+                              <property name="text">
+                                <string>Save as DICOM Parametric Map</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="0">
+                            <widget class="QLabel" name="MTGADICOMDirectoryLabelImg">
+                              <property name="text">
+                                <string>Output directory</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="1">
+                            <widget class="ctkPathLineEdit" name="MTGADICOMDirectoryImg">
+                              <property name="enabled">
+                                <bool>false</bool>
+                              </property>
+                              <property name="toolTip">
+                                <string>Directory for DICOM Parametric Map export. Series names will be derived from the generated map names.</string>
+                              </property>
+                              <property name="filters">
+                                <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                              </property>
+                            </widget>
+                          </item>
+                        </layout>
+                      </widget>
+                    </item>
+
+                    <!-- Standard voxelwise MTGA fitting -->
                     <item>
                       <widget class="QPushButton" name="FITbuttonMTGAImg">
                         <property name="toolTip">
-                          <string>Fit MTGA model.</string>
+                          <string>Fit selected MTGA models voxelwise and generate their parametric maps using the selected output options.</string>
                         </property>
                         <property name="text">
-                          <string>Get MTGA imaging</string>
+                          <string>Fit &amp; generate MTGA maps</string>
                         </property>
+                      </widget>
+                    </item>
+
+                    <!-- MTGA model-selected Ki/DV map. Enabled after Patlak and at least one reversible model are fitted. -->
+                    <item>
+                      <widget class="ctkCollapsibleButton" name="MTGAOptimizationCollapsibleButtonImg">
+                        <property name="enabled">
+                          <bool>false</bool>
+                        </property>
+                        <property name="text">
+                          <string>Voxelwise Model Selection</string>
+                        </property>
+                        <property name="collapsed">
+                          <bool>true</bool>
+                        </property>
+                        <layout class="QGridLayout" name="MTGAOptimizationLayoutImg">
+                          <item row="0" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAOptimizationInfoLabelImg">
+                              <property name="wordWrap">
+                                <bool>true</bool>
+                              </property>
+                              <property name="text">
+                                <string>Compare Patlak with a reversible model voxel by voxel. The selected Patlak Ki contributes to the red channel and the selected reversible DV to the blue channel.</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="0">
+                            <widget class="QLabel" name="MTGAReversibleModelLabelImg">
+                              <property name="text">
+                                <string>Reversible model</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="1" column="1">
+                            <widget class="QComboBox" name="MTGAReversibleModelComboImg">
+                              <property name="toolTip">
+                                <string>Choose the reversible model to compare against Patlak. Availability will follow the fitted models.</string>
+                              </property>
+                              <item>
+                                <property name="text"><string>Logan</string></property>
+                              </item>
+                              <item>
+                                <property name="text"><string>RE</string></property>
+                              </item>
+                            </widget>
+                          </item>
+                          <item row="2" column="0">
+                            <widget class="QLabel" name="MTGASelectionCriterionLabelImg">
+                              <property name="text">
+                                <string>Selection criterion</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="2" column="1">
+                            <widget class="QComboBox" name="MTGASelectionCriterionComboImg">
+                              <property name="toolTip">
+                                <string>R2: highest wins. AIC and MASE: lowest wins.</string>
+                              </property>
+                              <item><property name="text"><string>R2</string></property></item>
+                              <item><property name="text"><string>AIC</string></property></item>
+                              <item><property name="text"><string>MASE</string></property></item>
+                            </widget>
+                          </item>
+                          <item row="3" column="0" colspan="2">
+                            <widget class="QCheckBox" name="MTGAUseVuongCheckBoxImg">
+                              <property name="text">
+                                <string>Use Vuong test</string>
+                              </property>
+                              <property name="toolTip">
+                                <string>Use the voxelwise Vuong p-value to determine whether the two fitted models differ significantly.</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="0">
+                            <widget class="QLabel" name="MTGAVuongAlphaLabelImg">
+                              <property name="text">
+                                <string>Significance level</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="4" column="1">
+                            <widget class="QDoubleSpinBox" name="MTGAVuongAlphaSpinBoxImg">
+                              <property name="enabled"><bool>false</bool></property>
+                              <property name="decimals"><number>3</number></property>
+                              <property name="minimum"><double>0.001000000000000</double></property>
+                              <property name="maximum"><double>0.500000000000000</double></property>
+                              <property name="singleStep"><double>0.010000000000000</double></property>
+                              <property name="value"><double>0.050000000000000</double></property>
+                            </widget>
+                          </item>
+                          <item row="5" column="0">
+                            <widget class="QLabel" name="MTGANonSignificantPolicyLabelImg">
+                              <property name="text">
+                                <string>Non-significant voxels</string>
+                              </property>
+                            </widget>
+                          </item>
+                          <item row="5" column="1">
+                            <widget class="QComboBox" name="MTGANonSignificantPolicyComboImg">
+                              <property name="enabled"><bool>false</bool></property>
+                              <property name="toolTip">
+                                <string>When Vuong is enabled, either exclude non-significant voxels or retain both Ki and DV contributions.</string>
+                              </property>
+                              <item><property name="text"><string>Exclude</string></property></item>
+                              <item><property name="text"><string>Show both model contributions</string></property></item>
+                            </widget>
+                          </item>
+                          <item row="6" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAChannelInfoLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Display scaling: Ki and DV are normalized independently; higher Ki is redder and higher DV is bluer. Quantitative channel values remain unchanged.</string></property>
+                            </widget>
+                          </item>
+                          <item row="7" column="0" colspan="2">
+                            <widget class="QPushButton" name="GenerateMTGAOptimizedImgButton">
+                              <property name="text"><string>Generate model-selected Ki/DV map</string></property>
+                              <property name="toolTip"><string>Create the two-channel Ki/DV map using the current output options above.</string></property>
+                            </widget>
+                          </item>
+                        </layout>
                       </widget>
                     </item>
 
@@ -1995,7 +2172,7 @@
                 <!-- TCM Tab -->
                 <widget class="QWidget" name="TCMTabImg">
                   <attribute name="title">
-                    <string>TCM Models</string>
+                    <string>TCM</string>
                   </attribute>
                   <layout class="QVBoxLayout" name="tcmLayoutImg">
 
@@ -2368,15 +2545,147 @@
                       </widget>
                     </item>
 
-                    <!-- Run button -->
+                    <!-- Output destination shared by standard and optimized TCM maps -->
+                    <item>
+                      <widget class="ctkCollapsibleButton" name="TCMOutputCollapsibleButtonImg">
+                        <property name="text">
+                          <string>Output</string>
+                        </property>
+                        <property name="collapsed"><bool>false</bool></property>
+                        <layout class="QGridLayout" name="TCMOutputLayoutImg">
+                          <item row="0" column="0" colspan="2">
+                            <widget class="QCheckBox" name="TCMShowInSlicerCheckBoxImg">
+                              <property name="toolTip"><string>Add generated quantitative parametric maps to the Slicer scene.</string></property>
+                              <property name="text"><string>Show in Slicer</string></property>
+                              <property name="checked"><bool>true</bool></property>
+                            </widget>
+                          </item>
+                          <item row="1" column="0" colspan="2">
+                            <widget class="QCheckBox" name="TCMSaveDICOMCheckBoxImg">
+                              <property name="toolTip"><string>Save generated quantitative maps as DICOM Parametric Map objects.</string></property>
+                              <property name="text"><string>Save as DICOM Parametric Map</string></property>
+                            </widget>
+                          </item>
+                          <item row="2" column="0">
+                            <widget class="QLabel" name="TCMDICOMDirectoryLabelImg">
+                              <property name="text"><string>Output directory</string></property>
+                            </widget>
+                          </item>
+                          <item row="2" column="1">
+                            <widget class="ctkPathLineEdit" name="TCMDICOMDirectoryImg">
+                              <property name="enabled"><bool>false</bool></property>
+                              <property name="toolTip"><string>Directory for DICOM Parametric Map export. Series names will be derived from the generated map names.</string></property>
+                              <property name="filters">
+                                <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                              </property>
+                            </widget>
+                          </item>
+                        </layout>
+                      </widget>
+                    </item>
+
+                    <!-- Standard voxelwise TCM fitting -->
                     <item>
                       <widget class="QPushButton" name="FITbuttonTCMImg">
                         <property name="toolTip">
-                          <string>Fit TCM model.</string>
+                          <string>Fit selected TCM models voxelwise and generate their parametric maps using the selected output options.</string>
                         </property>
                         <property name="text">
-                          <string>Get TCM imaging</string>
+                          <string>Fit &amp; generate TCM maps</string>
                         </property>
+                      </widget>
+                    </item>
+
+                    <!-- Optimized TCM parameter maps. Enabled once fitted voxelwise model results are available. -->
+                    <item>
+                      <widget class="ctkCollapsibleButton" name="TCMOptimizationCollapsibleButtonImg">
+                        <property name="enabled"><bool>false</bool></property>
+                        <property name="text"><string>Voxelwise Model Selection</string></property>
+                        <property name="collapsed"><bool>true</bool></property>
+                        <layout class="QGridLayout" name="TCMOptimizationLayoutImg">
+                          <item row="0" column="0" colspan="2">
+                            <widget class="QLabel" name="TCMOptimizationInfoLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Select fitted TCM models to compare voxel by voxel. The numerically best model is chosen first; optional statistical testing can then favor a statistically equivalent model with fewer free parameters.</string></property>
+                            </widget>
+                          </item>
+                          <item row="1" column="0">
+                            <widget class="QLabel" name="TCMOptimizationModelsLabelImg">
+                              <property name="text"><string>Models to compare</string></property>
+                            </widget>
+                          </item>
+                          <item row="1" column="1">
+                            <widget class="QPushButton" name="TCMOptimizationModelsSelectAllImg">
+                              <property name="text"><string>All/No Models</string></property>
+                            </widget>
+                          </item>
+                          <item row="2" column="0" colspan="2">
+                            <widget class="QScrollArea" name="TCMOptimizationModelsScrollAreaImg">
+                              <property name="widgetResizable"><bool>true</bool></property>
+                              <property name="maximumHeight"><number>120</number></property>
+                              <widget class="QWidget" name="TCMOptimizationModelsCheckContentsImg">
+                                <property name="styleSheet"><string notr="true">background-color: white;</string></property>
+                                <layout class="QVBoxLayout" name="TCMOptimizationModelsCheckLayoutImg"/>
+                              </widget>
+                            </widget>
+                          </item>
+                          <item row="3" column="0">
+                            <widget class="QLabel" name="TCMSelectionCriterionLabelImg">
+                              <property name="text"><string>Selection criterion</string></property>
+                            </widget>
+                          </item>
+                          <item row="3" column="1">
+                            <widget class="QComboBox" name="TCMSelectionCriterionComboImg">
+                              <property name="toolTip"><string>AIC, BIC, MASE and chi2 are minimized.</string></property>
+                              <item><property name="text"><string>AIC</string></property></item>
+                              <item><property name="text"><string>BIC</string></property></item>
+                              <item><property name="text"><string>MASE</string></property></item>
+                              <item><property name="text"><string>chi2</string></property></item>
+                            </widget>
+                          </item>
+                          <item row="4" column="0" colspan="2">
+                            <widget class="QCheckBox" name="TCMUseStatTestsCheckBoxImg">
+                              <property name="text"><string>Use statistical tests</string></property>
+                              <property name="toolTip"><string>Compare each alternative model only against the criterion-selected best model. If models are not significantly different, prefer the one with fewer fitted parameters.</string></property>
+                            </widget>
+                          </item>
+                          <item row="5" column="0">
+                            <widget class="QLabel" name="TCMStatAlphaLabelImg">
+                              <property name="text"><string>Significance level</string></property>
+                            </widget>
+                          </item>
+                          <item row="5" column="1">
+                            <widget class="QDoubleSpinBox" name="TCMStatAlphaSpinBoxImg">
+                              <property name="enabled"><bool>false</bool></property>
+                              <property name="decimals"><number>3</number></property>
+                              <property name="minimum"><double>0.001000000000000</double></property>
+                              <property name="maximum"><double>0.500000000000000</double></property>
+                              <property name="singleStep"><double>0.010000000000000</double></property>
+                              <property name="value"><double>0.050000000000000</double></property>
+                            </widget>
+                          </item>
+                          <item row="6" column="0" colspan="2">
+                            <widget class="QGroupBox" name="TCMOptimizationParametersGroupImg">
+                              <property name="title"><string>Output parameters</string></property>
+                              <layout class="QGridLayout" name="TCMOptimizationParametersLayoutImg">
+                                <item row="0" column="0"><widget class="QCheckBox" name="TCMOptK1CheckBoxImg"><property name="text"><string>K1</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="0" column="1"><widget class="QCheckBox" name="TCMOptk2CheckBoxImg"><property name="text"><string>k2</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="0" column="2"><widget class="QCheckBox" name="TCMOptk3CheckBoxImg"><property name="text"><string>k3</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="0" column="3"><widget class="QCheckBox" name="TCMOptk4CheckBoxImg"><property name="text"><string>k4</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="0"><widget class="QCheckBox" name="TCMOptvbCheckBoxImg"><property name="text"><string>vb</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="1"><widget class="QCheckBox" name="TCMOpttdCheckBoxImg"><property name="text"><string>td</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="2"><widget class="QCheckBox" name="TCMOptKiCheckBoxImg"><property name="text"><string>Ki</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="3"><widget class="QCheckBox" name="TCMOptDVCheckBoxImg"><property name="text"><string>DV</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                              </layout>
+                            </widget>
+                          </item>
+                          <item row="7" column="0" colspan="2">
+                            <widget class="QPushButton" name="GenerateTCMOptimizedImgButton">
+                              <property name="text"><string>Generate optimized parameter maps</string></property>
+                              <property name="toolTip"><string>Generate one-channel quantitative parameter maps from the voxelwise selected TCM model using the current output options above.</string></property>
+                            </widget>
+                          </item>
+                        </layout>
                       </widget>
                     </item>
 

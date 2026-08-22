@@ -1,0 +1,3 @@
+[submodule "dPETImporter"]
+	path = dPETImporter
+	url = https://github.com/DanieleDallOlio/dPETImporter.git

@@ -1,3 +1,6 @@
 [submodule "dPETImporter"]
 	path = dPETImporter
 	url = https://github.com/DanieleDallOlio/dPETImporter.git
+[submodule "KMAP-CPP"]
+	path = KMAP-CPP
+	url = https://github.com/DanieleDallOlio/KMAP-CPP.git

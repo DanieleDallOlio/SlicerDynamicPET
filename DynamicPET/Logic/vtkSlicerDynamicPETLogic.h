@@ -280,6 +280,7 @@ public:
       double tol,
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
+      const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       int numThreads,
       std::function<void(int)> progressCallback);
@@ -296,6 +297,7 @@ public:
       double tol,
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
+      const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       int numThreads,
       std::function<void(int)> progressCallback);
@@ -312,6 +314,7 @@ public:
       double tol,
       int max_iter,
       std::vector<MTGAParameters>& outputParams,
+      const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       int numThreads,
       std::function<void(int)> progressCallback);
@@ -342,6 +345,7 @@ public:
       const int n_tc,
       std::vector<TCMParameters>& outputParams,
       const std::string& modelID,
+      const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       const std::vector<double>* wgt_global = nullptr,
       // QProgressBar* progressBar = nullptr,

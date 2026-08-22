@@ -18,6 +18,7 @@ public:
       const std::vector<double>& Cp,
       const std::vector<double>& framing,
       const std::vector<std::string>& modelIDs,
+      const std::vector<int>& fitVoxelIndices,
       const std::vector<double>* wgtGlobal,
       double timeOffset,
       double framingNorm,
@@ -33,6 +34,7 @@ public:
     , Cp(Cp)
     , framing(framing)
     , modelIDs(modelIDs)
+    , fitVoxelIndices(fitVoxelIndices)
     , timeOffset(timeOffset)
     , framingNorm(framingNorm)
     , robust(robust)
@@ -103,6 +105,7 @@ protected:
             this->tol,
             this->maxIter,
             localOutput,
+            this->fitVoxelIndices,
             this->stopRequested,
             this->numThreads,
             progressCallback);
@@ -122,6 +125,7 @@ protected:
             this->tol,
             this->maxIter,
             localOutput,
+            this->fitVoxelIndices,
             this->stopRequested,
             this->numThreads,
             progressCallback);
@@ -141,6 +145,7 @@ protected:
             this->tol,
             this->maxIter,
             localOutput,
+            this->fitVoxelIndices,
             this->stopRequested,
             this->numThreads,
             progressCallback);
@@ -180,6 +185,7 @@ private:
   std::vector<double> Cp;
   std::vector<double> framing;
   std::vector<std::string> modelIDs;
+  std::vector<int> fitVoxelIndices;
 
   std::vector<double> weights;
   bool hasWeights{false};
@@ -207,6 +213,7 @@ public:
               std::vector<double>& Cp,
               std::vector<double>& framing,
               const std::vector<std::string>& modelIDs,
+              const std::vector<int>& fitVoxelIndices,
               const double& vbInit, const double& vbLower, double& vbUpper,
               const double& k1Init, const double& k1Lower, double& k1Upper,
               const double& k2Init, const double& k2Lower, double& k2Upper,
@@ -225,6 +232,7 @@ public:
           Cp(Cp),
           framing(framing),
           modelIDs(modelIDs),
+          fitVoxelIndices(fitVoxelIndices),
           dk(dk),
           timestep(timestep),
           maxiter(maxiter),
@@ -268,25 +276,34 @@ protected:
           configureModel(modelID, sens, init, lb, ub, num_tc, modelfields);
 
           std::vector<TCMParameters> localOutput;
-          logic->callTCMImg(voxels,
-                            Cp,
-                            framing,
-                            init,
-                            lb,
-                            ub,
-                            sens,
-                            dk,
-                            timestep,
-                            pbrp,
-                            maxiter,
-                            num_tc,
-                            localOutput,
-                            modelID,
-                            stopRequested,
-                            &wgt_copy,
-                            numThreads,
-                            [this](int value){ emit progressChanged(value); },
-                            [this](){ return stopRequested.load(); });
+          logic->callTCMImg(
+              voxels,
+              Cp,
+              framing,
+              init,
+              lb,
+              ub,
+              sens,
+              dk,
+              timestep,
+              pbrp,
+              maxiter,
+              num_tc,
+              localOutput,
+              modelID,
+              this->fitVoxelIndices,
+              stopRequested,
+              &wgt_copy,
+              numThreads,
+              [this](int value)
+              {
+                  emit progressChanged(value);
+              },
+              [this]()
+              {
+                  return stopRequested.load(
+                      std::memory_order_relaxed);
+              });
             if (stopRequested) {
                 emit canceled(QString::fromStdString(modelID));
                 break;
@@ -378,6 +395,7 @@ private:
     std::vector<double> Cp;
     std::vector<double> framing;
     std::vector<std::string> modelIDs;
+    std::vector<int> fitVoxelIndices;
 
     std::atomic<bool>& stopRequested;
     double dk, timestep;

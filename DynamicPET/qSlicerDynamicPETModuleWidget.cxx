@@ -138,10 +138,48 @@ public:
   void populateTCMOptimizationModels();
   void updateTCMOptimizationUI();
 
+  void outputMTGAParametricResult(
+      const std::string& modelID,
+      vtkSlicerDynamicPETLogic* logic,
+      vtkMRMLScalarVolumeNode* refPETNode,
+      vtkMRMLSubjectHierarchyNode* shNode,
+      vtkIdType refPetID);
+
+  void outputTCMParametricResult(
+      const std::string& modelID,
+      vtkSlicerDynamicPETLogic* logic,
+      vtkMRMLScalarVolumeNode* refPETNode,
+      vtkMRMLSubjectHierarchyNode* shNode,
+      vtkIdType refPetID);
+
+  bool exportParametricMapDICOM(
+      vtkMRMLScalarVolumeNode* refPETNode,
+      const std::vector<double>& values,
+      const std::string& method,
+      const std::string& modelID,
+      const std::string& field,
+      const QString& outputDirectory,
+      int seriesNumber,
+      const QString& unitCode,
+      const QString& unitMeaning);
+
   std::map<std::string, QString> MTGAImgFitSignatures;
   std::map<std::string, QString> TCMImgFitSignatures;
 
   bool parametricFitRunning{false};
+
+  // Common parametric-imaging voxel selection.
+  std::vector<unsigned char> parametricVoxelMask;
+  std::vector<int> parametricFitVoxelIndices;
+
+  vtkIdType parametricVoxelSelectionPETID{
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
+
+  bool ensureParametricVoxelSelection();
+  void invalidateParametricVoxelSelection();
+
+  void resetParametricImagingSelections();
+  void setPETItemID(vtkIdType newPetID);
 };
 
 //-----------------------------------------------------------------------------
@@ -334,13 +372,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 
 
   // MTGA controls
-  this->setDoubleField(this->framingNormEdit, 0.0, 3600.0, 2);
+  this->setDoubleField(this->framingNormEdit, 0.01, 3600.0, 2);
   this->setDoubleField(this->huberTuneEdit,  1e-3, 10.0,   6);
   this->setDoubleField(this->tolEdit,        1e-12, 1e-1, 12);
   this->setIntField   (this->maxIterEdit,    1,     100000);
 
   // MTGA imaging controls
-  this->setDoubleField(this->framingNormEditImg, 0.0, 3600.0, 2);
+  this->setDoubleField(this->framingNormEditImg, 0.01, 3600.0, 2);
   this->setDoubleField(this->huberTuneEditImg,  1e-3, 10.0,   6);
   this->setDoubleField(this->tolEditImg,        1e-12, 1e-1, 12);
   this->setIntField   (this->maxIterEditImg,    1,     100000);
@@ -454,6 +492,67 @@ except ImportError:
     import slicer
     slicer.util.pip_install("xlsxwriter")
 
+import importlib
+import importlib.metadata
+import sys
+import slicer
+
+DPE_HIGHDICOM_REQUIRED_VERSION = "0.28.1"
+
+
+def DPE_get_highdicom():
+    try:
+        installed_version = (
+            importlib.metadata.version("highdicom")
+        )
+    except importlib.metadata.PackageNotFoundError:
+        installed_version = None
+
+    if installed_version != DPE_HIGHDICOM_REQUIRED_VERSION:
+
+        highdicom_already_loaded = any(
+            name == "highdicom"
+            or name.startswith("highdicom.")
+            for name in sys.modules
+        )
+
+        slicer.util.pip_install(
+            "--upgrade --force-reinstall --no-deps "
+            "highdicom=="
+            + DPE_HIGHDICOM_REQUIRED_VERSION
+        )
+
+        importlib.invalidate_caches()
+
+        # If another highdicom version was already imported,
+        # replacing files on disk does not safely replace the
+        # Python classes already resident in this Slicer process.
+        if highdicom_already_loaded:
+            raise RuntimeError(
+                "SlicerDynamicPET installed highdicom "
+                + DPE_HIGHDICOM_REQUIRED_VERSION
+                + ", but another highdicom version was already "
+                  "loaded in this Slicer session.\n\n"
+                  "Please restart Slicer once."
+            )
+
+    import highdicom as hd
+
+    if hd.__version__ != DPE_HIGHDICOM_REQUIRED_VERSION:
+        raise RuntimeError(
+            "SlicerDynamicPET requires highdicom "
+            + DPE_HIGHDICOM_REQUIRED_VERSION
+            + ", but Python loaded version "
+            + str(hd.__version__)
+            + " from:\n"
+            + str(hd.__file__)
+        )
+
+    return hd
+
+
+hd = DPE_get_highdicom()
+
 try:
     import numpy as np
 except ImportError:
@@ -539,6 +638,581 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
               df = df[cols]
 
             df.to_excel(writer, sheet_name=sheet, index=False)
+
+def DPE_export_parametric_map(
+    volume_node_id,
+    instance_uids,
+    output_path,
+    series_description,
+    series_number,
+    quantity_code,
+    quantity_meaning,
+    method_code,
+    method_meaning,
+    unit_code,
+    unit_meaning
+):
+    import os
+    import numpy as np
+    import slicer
+    import vtk
+    hd = DPE_get_highdicom()
+
+    try:
+        # ------------------------------------------------------------
+        # 1. Retrieve temporary Slicer parametric volume
+        # ------------------------------------------------------------
+        volume_node = slicer.mrmlScene.GetNodeByID(
+            str(volume_node_id)
+        )
+
+        if volume_node is None:
+            return {
+                "ok": False,
+                "error":
+                    "Temporary parametric volume node was not found."
+            }
+
+        # ------------------------------------------------------------
+        # 2. Resolve ALL source PET DICOM instances
+        # ------------------------------------------------------------
+        uid_list = str(instance_uids).split()
+
+        if not uid_list:
+            return {
+                "ok": False,
+                "error":
+                    "Source PET DICOM instance UID list is empty."
+            }
+
+        source_paths = []
+        seen_paths = set()
+
+        for uid in uid_list:
+            path = slicer.dicomDatabase.fileForInstance(uid)
+
+            if (
+                path and
+                os.path.isfile(path) and
+                path not in seen_paths
+            ):
+                seen_paths.add(path)
+                source_paths.append(path)
+
+        if not source_paths:
+            return {
+                "ok": False,
+                "error":
+                    "Could not resolve any source PET DICOM "
+                    "instances from the Slicer DICOM database."
+            }
+
+        # ------------------------------------------------------------
+        # 3. Read source DICOM objects
+        #
+        # Works for:
+        #   - one Enhanced PET multiframe instance
+        #   - a classic series of single-frame PET instances
+        # ------------------------------------------------------------
+        source_images = [
+            hd.imread(path)
+            for path in source_paths
+        ]
+
+        # ------------------------------------------------------------
+        # Determine whether source PET uses classic single-frame
+        # instances or Enhanced PET multiframe instances.
+        #
+        # highdicom ParametricMap accepts:
+        #
+        #   - many single-frame source images
+        #   - ONE multiframe source image
+        #
+        # but not multiple multiframe source images.
+        # ------------------------------------------------------------
+
+        source_is_multiframe = [
+            int(
+                getattr(
+                    source,
+                    "NumberOfFrames",
+                    1
+                )
+            ) > 1
+            for source in source_images
+        ]
+
+        has_multiframe_sources = any(
+            source_is_multiframe
+        )
+
+        has_singleframe_sources = any(
+            not value
+            for value in source_is_multiframe
+        )
+
+        if (
+            has_multiframe_sources
+            and has_singleframe_sources
+        ):
+            return {
+                "ok": False,
+                "error":
+                    "Source PET contains a mixture of "
+                    "single-frame and multiframe DICOM images. "
+                    "This combination is not supported."
+            }
+
+
+        # ------------------------------------------------------------
+        # Source images passed to the highdicom constructor.
+        #
+        # Classic PET:
+        #     keep all single-frame images.
+        #
+        # Enhanced PET:
+        #     use the first temporal Enhanced PET instance only as
+        #     the spatial reference for constructing the PM.
+        #
+        # All Enhanced temporal instances are added back to the PM
+        # SourceImageSequence after construction.
+        # ------------------------------------------------------------
+
+        if has_multiframe_sources:
+            constructor_source_images = [
+                source_images[0]
+            ]
+        else:
+            constructor_source_images = (
+                source_images
+            )
+
+
+        # ------------------------------------------------------------
+        # Normalize mandatory Type-2 patient/study attributes.
+        #
+        # DICOM Type 2 means the attribute must be present, but its
+        # value may legitimately be empty if it is unknown.
+        #
+        # Some PET datasets omit these attributes completely.
+        # highdicom accesses them directly when constructing a derived
+        # Parametric Map, therefore add empty values rather than
+        # inventing patient/study information.
+        # ------------------------------------------------------------
+        required_type2_attributes = {
+            "PatientName": "",
+            "PatientID": "",
+            "PatientBirthDate": "",
+            "PatientSex": "",
+            "StudyDate": "",
+            "StudyTime": "",
+            "ReferringPhysicianName": "",
+            "StudyID": "",
+            "AccessionNumber": "",
+        }
+
+        for source in source_images:
+            for attribute_name, empty_value in \
+                    required_type2_attributes.items():
+
+                if not hasattr(source, attribute_name):
+                    setattr(
+                        source,
+                        attribute_name,
+                        empty_value
+                    )
+
+        first_source = source_images[0]
+
+        if has_multiframe_sources:
+
+            reference_frames = int(
+                getattr(
+                    first_source,
+                    "NumberOfFrames",
+                    1
+                )
+            )
+
+            reference_rows = int(
+                first_source.Rows
+            )
+
+            reference_columns = int(
+                first_source.Columns
+            )
+
+            for source in source_images[1:]:
+
+                if int(
+                    getattr(
+                        source,
+                        "NumberOfFrames",
+                        1
+                    )
+                ) != reference_frames:
+
+                    return {
+                        "ok": False,
+                        "error":
+                            "Enhanced PET temporal instances "
+                            "do not contain the same number "
+                            "of spatial frames."
+                    }
+
+                if (
+                    int(source.Rows)
+                        != reference_rows
+                    or
+                    int(source.Columns)
+                        != reference_columns
+                ):
+                    return {
+                        "ok": False,
+                        "error":
+                            "Enhanced PET temporal instances "
+                            "do not have consistent image dimensions."
+                    }
+
+        required_type1_attributes = [
+            "StudyInstanceUID",
+            "SeriesInstanceUID",
+            "SOPInstanceUID",
+            "SOPClassUID",
+        ]
+
+        for attribute_name in required_type1_attributes:
+            if (
+                not hasattr(first_source, attribute_name)
+                or not str(
+                    getattr(
+                        first_source,
+                        attribute_name
+                    )
+                ).strip()
+            ):
+                return {
+                    "ok": False,
+                    "error":
+                        "Source PET is missing mandatory DICOM "
+                        "attribute "
+                        + attribute_name
+                        + "."
+                }
+
+        if not hasattr(
+                first_source,
+                "FrameOfReferenceUID"):
+            return {
+                "ok": False,
+                "error":
+                    "Source PET does not contain "
+                    "FrameOfReferenceUID."
+            }
+
+        frame_of_reference_uid = str(
+            first_source.FrameOfReferenceUID
+        )
+
+        # Every source used for the kinetic fit must belong
+        # to the same patient coordinate system.
+        for source in source_images:
+            if (
+                hasattr(source, "FrameOfReferenceUID") and
+                str(source.FrameOfReferenceUID)
+                    != frame_of_reference_uid
+            ):
+                return {
+                    "ok": False,
+                    "error":
+                        "Source PET contains more than one "
+                        "FrameOfReferenceUID."
+                }
+
+        # ------------------------------------------------------------
+        # 4. Get parametric values from Slicer
+        #
+        # Slicer NumPy ordering:
+        #   [K, J, I] == [slice, row, column]
+        # ------------------------------------------------------------
+        pixel_array = (
+            slicer.util.arrayFromVolume(volume_node)
+            .copy()
+            .astype(np.float32)
+        )
+
+        if pixel_array.ndim != 3:
+            return {
+                "ok": False,
+                "error":
+                    "Parametric map is not a 3D scalar volume."
+            }
+
+        # ------------------------------------------------------------
+        # 5. Construct KJI -> RAS affine from Slicer's IJK -> RAS
+        # ------------------------------------------------------------
+        ijk_to_ras_vtk = vtk.vtkMatrix4x4()
+
+        volume_node.GetIJKToRASMatrix(
+            ijk_to_ras_vtk
+        )
+
+        ijk_to_ras = np.array(
+            [
+                [
+                    ijk_to_ras_vtk.GetElement(r, c)
+                    for c in range(4)
+                ]
+                for r in range(4)
+            ],
+            dtype=np.float64
+        )
+
+        # highdicom's Volume array axes are:
+        #
+        #   axis 0 = slice  = K
+        #   axis 1 = row    = J
+        #   axis 2 = column = I
+        #
+        # Slicer's matrix columns are I, J, K.
+        kji_to_ras = np.eye(
+            4,
+            dtype=np.float64
+        )
+
+        kji_to_ras[:3, 0] = ijk_to_ras[:3, 2]
+        kji_to_ras[:3, 1] = ijk_to_ras[:3, 1]
+        kji_to_ras[:3, 2] = ijk_to_ras[:3, 0]
+        kji_to_ras[:3, 3] = ijk_to_ras[:3, 3]
+
+        # highdicom accepts the source affine convention explicitly
+        # and converts RAS -> DICOM LPS internally.
+        parametric_volume = hd.Volume(
+            array=pixel_array,
+            affine=kji_to_ras,
+            coordinate_system="PATIENT",
+            frame_of_reference_uid=
+                frame_of_reference_uid,
+            from_reference_convention="RAS"
+        )
+
+        # ------------------------------------------------------------
+        # 6. Real-world quantity definition
+        # ------------------------------------------------------------
+        quantity = hd.sr.CodedConcept(
+            value=str(quantity_code),
+            scheme_designator="99SDPET",
+            meaning=str(quantity_meaning)
+        )
+
+        unit = hd.sr.CodedConcept(
+            value=str(unit_code),
+            scheme_designator="UCUM",
+            meaning=str(unit_meaning)
+        )
+
+        finite_values = pixel_array[
+            np.isfinite(pixel_array)
+        ]
+
+        if finite_values.size == 0:
+            return {
+                "ok": False,
+                "error":
+                    "Parametric map contains no finite values."
+            }
+
+        value_min = float(
+            finite_values.min()
+        )
+
+        value_max = float(
+            finite_values.max()
+        )
+
+        # Avoid a degenerate mapping range.
+        if value_max <= value_min:
+            value_max = value_min + 1.0e-12
+
+        mapping = hd.pm.RealWorldValueMapping(
+            lut_label=str(quantity_code)[:16],
+            lut_explanation=
+                str(quantity_meaning)[:64],
+            value_range=(
+                value_min,
+                value_max
+            ),
+            quantity_definition=quantity,
+            unit=unit
+        )
+
+        # ------------------------------------------------------------
+        # 7. Display window
+        # ------------------------------------------------------------
+        window_width = max(
+            value_max - value_min,
+            1.0e-12
+        )
+
+        window_center = (
+            value_min + value_max
+        ) / 2.0
+
+        # ------------------------------------------------------------
+        # 8. Construct standards-based DICOM PM
+        #
+        # highdicom uses Volume geometry to match the PM frames
+        # against source DICOM frames/images.
+        # ------------------------------------------------------------
+        pm = hd.pm.ParametricMap(
+            source_images=constructor_source_images,
+
+            pixel_array=parametric_volume,
+
+            series_instance_uid=hd.UID(),
+
+            series_number=int(series_number),
+
+            sop_instance_uid=hd.UID(),
+
+            instance_number=1,
+
+            manufacturer="SlicerDynamicPET",
+
+            manufacturer_model_name=
+                "SlicerDynamicPET",
+
+            software_versions="development",
+
+            device_serial_number=
+                "SlicerDynamicPET",
+
+            contains_recognizable_visual_features=False,
+
+            real_world_value_mappings=[
+                mapping
+            ],
+
+            voi_lut_transformations=[
+                hd.VOILUTTransformation(
+                    window_center=
+                        window_center,
+                    window_width=
+                        window_width
+                )
+            ],
+
+            series_description=
+                str(series_description)[:64]
+        )
+
+        # ------------------------------------------------------------
+        # Enhanced dynamic PET:
+        #
+        # highdicom required one multiframe instance for geometric
+        # PM construction, but the kinetic result was derived from
+        # ALL temporal Enhanced PET instances.
+        #
+        # Record all of those source SOP instances at image level.
+        # ------------------------------------------------------------
+
+        if (
+            has_multiframe_sources
+            and len(source_images) > 1
+        ):
+            from pydicom.dataset import Dataset
+            from pydicom.sequence import Sequence
+
+            source_references = []
+
+            for source in source_images:
+
+                reference = Dataset()
+
+                reference.ReferencedSOPClassUID = (
+                    source.SOPClassUID
+                )
+
+                reference.ReferencedSOPInstanceUID = (
+                    source.SOPInstanceUID
+                )
+
+                source_references.append(
+                    reference
+                )
+
+            pm.SourceImageSequence = Sequence(
+                source_references
+            )
+
+        # Keep model provenance human-readable.
+        pm.DerivationDescription = (
+            "SlicerDynamicPET "
+            + str(method_meaning)
+            + " "
+            + str(quantity_meaning)
+        )[:1024]
+
+        # ------------------------------------------------------------
+        # 9. Write PM file
+        # ------------------------------------------------------------
+        output_path = os.path.abspath(
+            str(output_path)
+        )
+
+        os.makedirs(
+            os.path.dirname(output_path),
+            exist_ok=True
+        )
+
+        if os.path.isfile(output_path):
+            os.remove(output_path)
+
+        pm.save_as(
+            output_path,
+            enforce_file_format=True
+        )
+
+        if not os.path.isfile(output_path):
+            return {
+                "ok": False,
+                "error":
+                    "Parametric Map construction completed "
+                    "but no DICOM file was written."
+            }
+
+        return {
+            "ok": True,
+
+            "path":
+                output_path,
+
+            "source_count":
+                len(source_images),
+
+            "source_sop_class":
+                str(first_source.SOPClassUID),
+
+            "pm_frames":
+                int(pm.NumberOfFrames),
+
+            "study_uid":
+                str(pm.StudyInstanceUID),
+
+            "frame_of_reference_uid":
+                str(pm.FrameOfReferenceUID)
+        }
+
+    except Exception as exc:
+        import traceback
+
+        return {
+            "ok": False,
+            "error":
+                str(exc)
+                + "\n\n"
+                + traceback.format_exc()
+        }
 )PYTHON");
 
   for (const QString& name : q->ModelsNamesMTGA)
@@ -1020,7 +1694,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       if (requiredModality=="PT")
-        q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+        this->setPETItemID(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID);
       q->enableTACbutton();
     }
     return;
@@ -1038,7 +1712,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       if (requiredModality=="PT")
-        q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+        this->setPETItemID(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID);
       q->enableTACbutton();
     }
     return;
@@ -1056,7 +1730,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       if (requiredModality=="PT")
-        q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+        this->setPETItemID(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID);
       q->enableTACbutton();
     }
     return;
@@ -1123,7 +1797,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
     if (requiredModality=="CT")
       q->ctID = passonID;
     if (requiredModality=="PT")
-      q->petID = passonID;
+      this->setPETItemID(passonID);
     q->enableTACbutton();
   }
 }
@@ -1338,9 +2012,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg() {
   this->timeOffsetSliderImg->setMaximum(q->numberOfTimepoints);
   this->timeOffsetSliderImg->setValue(1);
 
-  frameEdit->setReadOnly(true);
-  timeSecEdit->setReadOnly(true);
-  timeMinEdit->setReadOnly(true);
+  this->frameEditImg->setReadOnly(true);
+  this->timeSecEditImg->setReadOnly(true);
+  this->timeMinEditImg->setReadOnly(true);
   q->onSliderImgChanged(1);
 
   QObject::connect( this->timeOffsetSliderImg, SIGNAL(valueChanged(int)),
@@ -2422,6 +3096,1094 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOptimizationUI()
           saveReady);
 }
 
+void qSlicerDynamicPETModuleWidgetPrivate::
+outputMTGAParametricResult(
+    const std::string& modelID,
+    vtkSlicerDynamicPETLogic* logic,
+    vtkMRMLScalarVolumeNode* refPETNode,
+    vtkMRMLSubjectHierarchyNode* shNode,
+    vtkIdType refPetID)
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  if (!logic || !refPETNode || !shNode)
+  {
+    return;
+  }
+
+  auto resultIt =
+      q->MTGAImgOutcomes.find(modelID);
+
+  if (resultIt == q->MTGAImgOutcomes.end() ||
+      resultIt->second.empty())
+  {
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Show in Slicer
+  // ------------------------------------------------------------------------
+  std::vector<std::string> fields;
+
+  if (modelID == "Patlak")
+  {
+    fields =
+    {
+      "Ki",
+      "Intercept",
+      "AIC",
+      "MASE",
+      "R2",
+      "chi2"
+    };
+  }
+  else if (modelID == "Logan" ||
+           modelID == "RE")
+  {
+    fields =
+    {
+      "DV",
+      "Intercept",
+      "AIC",
+      "MASE",
+      "R2",
+      "chi2"
+    };
+  }
+  else
+  {
+    qWarning()
+        << "Unknown MTGA model:"
+        << QString::fromStdString(modelID);
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Show in Slicer
+  // ------------------------------------------------------------------------
+  if (this->MTGAShowInSlicerCheckBoxImg->isChecked())
+  {
+    q->ProgressBar->setMinimum(0);
+    q->ProgressBar->setMaximum(0);
+
+    q->ProgressBar->setFormat(
+        "Creating " +
+        QString::fromStdString(modelID) +
+        " maps in Slicer...");
+
+    QApplication::processEvents();
+
+    logic->CreateMTGAParametricImages(
+        resultIt->second,
+        q->PETdims,
+        fields,
+        modelID,
+        refPETNode,
+        shNode,
+        refPetID);
+  }
+
+  if (this->MTGASaveDICOMCheckBoxImg->isChecked())
+  {
+    const QString outputDirectory =
+        this->MTGADICOMDirectoryImg
+            ->currentPath()
+            .trimmed();
+
+    int modelIndex = 0;
+
+    if (modelID == "Patlak")      modelIndex = 0;
+    else if (modelID == "Logan")  modelIndex = 1;
+    else if (modelID == "RE")     modelIndex = 2;
+
+    const double framingNorm =
+        this->framingNormEditImg
+            ->text()
+            .toDouble();
+
+    for (int fieldIndex = 0;
+         fieldIndex <
+             static_cast<int>(fields.size());
+         ++fieldIndex)
+    {
+      const std::string& field =
+          fields[fieldIndex];
+
+      QString unitCode = "1";
+      QString unitMeaning = "1";
+
+      bool requiresNormalizedTimeUnit = false;
+
+      // Patlak slope Ki has inverse normalized-time units.
+      if (modelID == "Patlak" &&
+          field == "Ki")
+      {
+        requiresNormalizedTimeUnit = true;
+
+        if (std::abs(
+                framingNorm - 60.0) < 1e-9)
+        {
+          unitCode = "/min";
+          unitMeaning = "per minute";
+        }
+        else if (std::abs(
+                     framingNorm - 1.0) < 1e-9)
+        {
+          unitCode = "/s";
+          unitMeaning = "per second";
+        }
+      }
+
+      // Logan/RE regression intercept is a time quantity.
+      if ((modelID == "Logan" ||
+           modelID == "RE") &&
+          field == "Intercept")
+      {
+        requiresNormalizedTimeUnit = true;
+
+        if (std::abs(
+                framingNorm - 60.0) < 1e-9)
+        {
+          unitCode = "min";
+          unitMeaning = "min";
+        }
+        else if (std::abs(
+                     framingNorm - 1.0) < 1e-9)
+        {
+          unitCode = "s";
+          unitMeaning = "s";
+        }
+      }
+
+      if (requiresNormalizedTimeUnit &&
+          std::abs(framingNorm - 60.0) >= 1e-9 &&
+          std::abs(framingNorm - 1.0) >= 1e-9)
+      {
+        QMessageBox::warning(
+            q,
+            QObject::tr("DICOM PMAP export"),
+            QObject::tr(
+                "%1 - %2 was not exported because "
+                "Framing Norm is %3 s.\n\n"
+                "Its physical unit therefore cannot be "
+                "represented honestly as seconds or minutes "
+                "without rescaling the numerical values.")
+                .arg(
+                    QString::fromStdString(modelID),
+                    QString::fromStdString(field))
+                .arg(framingNorm));
+
+        continue;
+      }
+
+      const std::vector<double> values =
+          logic->ExtractParameter(
+              resultIt->second,
+              field);
+
+      const int seriesNumber =
+          7100 +
+          modelIndex * 20 +
+          fieldIndex;
+
+      q->ProgressBar->setMinimum(0);
+      q->ProgressBar->setMaximum(0);
+
+      q->ProgressBar->setFormat(
+          "Saving DICOM PMAP: " +
+          QString::fromStdString(modelID) +
+          " - " +
+          QString::fromStdString(field) +
+          "...");
+
+      QApplication::processEvents();
+
+      q->ProgressBar->setMinimum(0);
+      q->ProgressBar->setMaximum(0);
+
+      if (!this->exportParametricMapDICOM(
+              refPETNode,
+              values,
+              "MTGA",
+              modelID,
+              field,
+              outputDirectory,
+              seriesNumber,
+              unitCode,
+              unitMeaning))
+      {
+        break;
+      }
+    }
+  }
+}
+
+bool qSlicerDynamicPETModuleWidgetPrivate::
+exportParametricMapDICOM(
+    vtkMRMLScalarVolumeNode* refPETNode,
+    const std::vector<double>& values,
+    const std::string& method,
+    const std::string& modelID,
+    const std::string& field,
+    const QString& outputDirectory,
+    int seriesNumber,
+    const QString& unitCode,
+    const QString& unitMeaning)
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  if (!refPETNode ||
+      values.empty() ||
+      outputDirectory.trimmed().isEmpty())
+  {
+    return false;
+  }
+
+  const size_t expectedSize =
+      static_cast<size_t>(q->PETdims[0]) *
+      static_cast<size_t>(q->PETdims[1]) *
+      static_cast<size_t>(q->PETdims[2]);
+
+  if (values.size() != expectedSize)
+  {
+    QMessageBox::warning(
+        q,
+        QObject::tr("DICOM PMAP export"),
+        QObject::tr(
+            "Cannot export %1 - %2:\n"
+            "voxel count does not match PET geometry.")
+            .arg(
+                QString::fromStdString(modelID),
+                QString::fromStdString(field)));
+
+    return false;
+  }
+
+  // ------------------------------------------------------------------------
+  // Find DICOM source instance UIDs.
+  //
+  // Prefer the first actual PET sequence frame, because the displayed
+  // proxy node may or may not carry the original DICOM attributes.
+  // ------------------------------------------------------------------------
+
+  QStringList sourceUIDList;
+  QSet<QString> sourceUIDSet;
+
+  // Collect source SOP Instance UIDs from ALL dynamic PET frames.
+  //
+  // Enhanced PET:
+  //   every Slicer time point may refer to the same multiframe SOP,
+  //   therefore QSet collapses it to one UID.
+  //
+  // Classic single-frame PET:
+  //   each dynamic frame may contain many slice SOPs,
+  //   therefore all temporal frames are accumulated.
+  if (q->sequencePETNode)
+  {
+    const int numberOfFrames =
+        q->sequencePETNode->GetNumberOfDataNodes();
+
+    for (int frameIndex = 0;
+         frameIndex < numberOfFrames;
+         ++frameIndex)
+    {
+      vtkMRMLNode* frameNode =
+          q->sequencePETNode->GetNthDataNode(
+              frameIndex);
+
+      if (!frameNode)
+      {
+        continue;
+      }
+
+      const char* attr =
+          frameNode->GetAttribute(
+              "DICOM.instanceUIDs");
+
+      if (!attr)
+      {
+        continue;
+      }
+
+      const QStringList frameUIDs =
+          QString::fromUtf8(attr)
+              .split(
+                  QRegularExpression("\\s+"),
+                  Qt::SkipEmptyParts);
+
+      for (const QString& uid : frameUIDs)
+      {
+        if (!sourceUIDSet.contains(uid))
+        {
+          sourceUIDSet.insert(uid);
+          sourceUIDList.append(uid);
+        }
+      }
+    }
+  }
+
+  if (sourceUIDList.isEmpty())
+  {
+    const char* attr =
+        refPETNode->GetAttribute(
+            "DICOM.instanceUIDs");
+
+    if (attr)
+    {
+      const QStringList proxyUIDs =
+          QString::fromUtf8(attr)
+              .split(
+                  QRegularExpression("\\s+"),
+                  Qt::SkipEmptyParts);
+
+      for (const QString& uid : proxyUIDs)
+      {
+        if (!sourceUIDSet.contains(uid))
+        {
+          sourceUIDSet.insert(uid);
+          sourceUIDList.append(uid);
+        }
+      }
+    }
+  }
+
+  const QString instanceUIDs =
+      sourceUIDList.join(" ");
+
+  if (instanceUIDs.isEmpty())
+  {
+    QMessageBox::warning(
+        q,
+        QObject::tr("DICOM PMAP export"),
+        QObject::tr(
+            "The source PET does not contain "
+            "DICOM.instanceUIDs.\n\n"
+            "A standards-based DICOM Parametric Map needs "
+            "the original DICOM patient/study context, "
+            "therefore this map was not exported."));
+
+    return false;
+  }
+
+  // ------------------------------------------------------------------------
+  // Quantity semantics.
+  //
+  // These are intentionally LOCAL/private codes under 99SDPET.
+  // ------------------------------------------------------------------------
+
+  QString quantityCode;
+  QString quantityMeaning;
+
+  if (field == "K1")
+  {
+    quantityCode = "SDP_K1";
+    quantityMeaning = "K1";
+  }
+  else if (field == "k2")
+  {
+    quantityCode = "SDP_K2";
+    quantityMeaning = "k2";
+  }
+  else if (field == "k3")
+  {
+    quantityCode = "SDP_K3";
+    quantityMeaning = "k3";
+  }
+  else if (field == "k4")
+  {
+    quantityCode = "SDP_K4";
+    quantityMeaning = "k4";
+  }
+  else if (field == "vb")
+  {
+    quantityCode = "SDP_VB";
+    quantityMeaning = "Blood volume fraction";
+  }
+  else if (field == "td")
+  {
+    quantityCode = "SDP_TD";
+    quantityMeaning = "Time delay";
+  }
+  else if (field == "Ki")
+  {
+    quantityCode = "SDP_KI";
+    quantityMeaning = "Net influx rate";
+  }
+  else if (field == "DV")
+  {
+    quantityCode = "SDP_DV";
+    quantityMeaning = "Distribution volume";
+  }
+  else if (field == "Intercept")
+  {
+    quantityCode = "SDP_INT";
+    quantityMeaning = "Regression intercept";
+  }
+  else if (field == "AIC")
+  {
+    quantityCode = "SDP_AIC";
+    quantityMeaning = "Akaike information criterion";
+  }
+  else if (field == "BIC")
+  {
+    quantityCode = "SDP_BIC";
+    quantityMeaning = "Bayesian information criterion";
+  }
+  else if (field == "MASE")
+  {
+    quantityCode = "SDP_MASE";
+    quantityMeaning = "Mean absolute scaled error";
+  }
+  else if (field == "R2")
+  {
+    quantityCode = "SDP_R2";
+    quantityMeaning = "Coefficient of determination";
+  }
+  else if (field == "chi2")
+  {
+    quantityCode = "SDP_CHI2";
+    quantityMeaning = "Chi-square statistic";
+  }
+  else
+  {
+    qWarning()
+        << "No DICOM PMAP quantity mapping for"
+        << QString::fromStdString(field);
+
+    return false;
+  }
+
+  // ------------------------------------------------------------------------
+  // Measurement method semantics.
+  // Also intentionally private/local codes.
+  // ------------------------------------------------------------------------
+
+  QString methodCode;
+
+  if (modelID == "Patlak")
+    methodCode = "SDP_PATLAK";
+  else if (modelID == "Logan")
+    methodCode = "SDP_LOGAN";
+  else if (modelID == "RE")
+    methodCode = "SDP_RE";
+  else if (modelID == "1TCM")
+    methodCode = "SDP_1TCM";
+  else if (modelID == "1TdCM")
+    methodCode = "SDP_1TDCM";
+  else if (modelID == "1TiCM")
+    methodCode = "SDP_1TICM";
+  else if (modelID == "1TidCM")
+    methodCode = "SDP_1TIDCM";
+  else if (modelID == "2TCM")
+    methodCode = "SDP_2TCM";
+  else if (modelID == "2dTCM")
+    methodCode = "SDP_2DTCM";
+  else if (modelID == "2TiCM")
+    methodCode = "SDP_2TICM";
+  else if (modelID == "2TidCM")
+    methodCode = "SDP_2TIDCM";
+  else
+  {
+    qWarning()
+        << "No DICOM PMAP method mapping for"
+        << QString::fromStdString(modelID);
+
+    return false;
+  }
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene)
+  {
+    return false;
+  }
+
+  // ------------------------------------------------------------------------
+  // Temporary scalar volume.
+  //
+  // No display node is created. This exists only long enough to save the
+  // NRRD that dcmqi consumes.
+  // ------------------------------------------------------------------------
+
+  vtkNew<vtkImageData> image;
+
+  image->SetDimensions(
+      q->PETdims[0],
+      q->PETdims[1],
+      q->PETdims[2]);
+
+  image->AllocateScalars(
+      VTK_DOUBLE,
+      1);
+
+  double* destination =
+      static_cast<double*>(
+          image->GetScalarPointer());
+
+  if (!destination)
+  {
+    return false;
+  }
+
+  std::copy(
+      values.begin(),
+      values.end(),
+      destination);
+
+  vtkMRMLScalarVolumeNode* tempNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->AddNewNodeByClass(
+              "vtkMRMLScalarVolumeNode"));
+
+  if (!tempNode)
+  {
+    return false;
+  }
+
+  tempNode->SetName(
+      "SlicerDynamicPET_PMAP_Temporary");
+
+  tempNode->SetAndObserveImageData(
+      image.GetPointer());
+
+  // Exact spatial geometry of the source PET.
+  tempNode->CopyOrientation(refPETNode);
+  tempNode->SetSpacing(
+      refPETNode->GetSpacing());
+  tempNode->SetOrigin(
+      refPETNode->GetOrigin());
+
+  // ------------------------------------------------------------------------
+  // Output directory / filename.
+  // ------------------------------------------------------------------------
+
+  if (!QDir(outputDirectory).exists() &&
+      !QDir().mkpath(outputDirectory))
+  {
+    scene->RemoveNode(tempNode);
+
+    QMessageBox::warning(
+        q,
+        QObject::tr("DICOM PMAP export"),
+        QObject::tr(
+            "Could not create the DICOM output directory:\n%1")
+            .arg(outputDirectory));
+
+    return false;
+  }
+
+  QDir outputDir(outputDirectory);
+
+  const QString methodQString =
+      QString::fromStdString(method);
+
+  const QString modelQString =
+      QString::fromStdString(modelID);
+
+  const QString fieldQString =
+      QString::fromStdString(field);
+
+  const QString outputPath =
+      outputDir.filePath(
+          QString(
+              "SlicerDynamicPET_%1_%2_%3.dcm")
+              .arg(
+                  methodQString,
+                  modelQString,
+                  fieldQString));
+
+  const QString seriesDescription =
+      QString(
+          "SlicerDynamicPET %1 %2 %3")
+          .arg(
+              methodQString,
+              modelQString,
+              fieldQString);
+
+  const QString methodMeaning =
+      QString(
+          "SlicerDynamicPET %1")
+          .arg(modelQString);
+
+  // ------------------------------------------------------------------------
+  // dcmqi conversion.
+  // ------------------------------------------------------------------------
+
+  PythonQtObjectPtr mainContext =
+      PythonQt::self()->getMainModule();
+
+  QVariant result =
+      mainContext.call(
+          "DPE_export_parametric_map",
+          QVariantList{
+              QString::fromUtf8(
+                  tempNode->GetID()),
+              instanceUIDs,
+              outputPath,
+              seriesDescription,
+              seriesNumber,
+              quantityCode,
+              quantityMeaning,
+              methodCode,
+              methodMeaning,
+              unitCode,
+              unitMeaning
+          });
+
+  // Save-only must not leave anything in the MRML scene.
+  scene->RemoveNode(tempNode);
+
+  const QVariantMap resultMap =
+      result.toMap();
+
+  const bool ok =
+      resultMap.value("ok").toBool();
+
+  if (!ok)
+  {
+    const QString error =
+        resultMap.value("error").toString();
+
+    QMessageBox::warning(
+        q,
+        QObject::tr("DICOM PMAP export"),
+        QObject::tr(
+            "Could not export %1 - %2.\n\n%3")
+            .arg(
+                modelQString,
+                fieldQString,
+                error));
+
+    return false;
+  }
+
+  qDebug()
+      << "DICOM PMAP exported:"
+      << resultMap.value("path").toString();
+
+  return true;
+}
+
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+outputTCMParametricResult(
+    const std::string& modelID,
+    vtkSlicerDynamicPETLogic* logic,
+    vtkMRMLScalarVolumeNode* refPETNode,
+    vtkMRMLSubjectHierarchyNode* shNode,
+    vtkIdType refPetID)
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  if (!logic || !refPETNode || !shNode)
+  {
+    return;
+  }
+
+  auto resultIt =
+      q->TCMImgOutcomes.find(modelID);
+
+  if (resultIt == q->TCMImgOutcomes.end() ||
+      resultIt->second.empty())
+  {
+    return;
+  }
+
+  std::vector<std::string> fields;
+
+  if (modelID == "1TCM")
+  {
+    fields =
+    {
+      "K1", "k2", "vb",
+      "Ki", "DV",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "1TdCM")
+  {
+    fields =
+    {
+      "K1", "k2", "vb", "td",
+      "Ki", "DV",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "1TiCM")
+  {
+    fields =
+    {
+      "K1", "vb", "Ki",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "1TidCM")
+  {
+    fields =
+    {
+      "K1", "vb", "td", "Ki",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "2TCM")
+  {
+    fields =
+    {
+      "K1", "k2", "k3", "k4", "vb",
+      "Ki", "DV",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "2dTCM")
+  {
+    fields =
+    {
+      "K1", "k2", "k3", "k4", "vb", "td",
+      "Ki", "DV",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "2TiCM")
+  {
+    fields =
+    {
+      "K1", "k2", "k3", "vb",
+      "Ki",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else if (modelID == "2TidCM")
+  {
+    fields =
+    {
+      "K1", "k2", "k3", "vb", "td",
+      "Ki",
+      "AIC", "MASE", "BIC", "chi2"
+    };
+  }
+  else
+  {
+    qWarning()
+        << "Unknown TCM model:"
+        << QString::fromStdString(modelID);
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Show in Slicer
+  // ------------------------------------------------------------------------
+  if (this->TCMShowInSlicerCheckBoxImg->isChecked())
+  {
+    q->ProgressBar->setMinimum(0);
+    q->ProgressBar->setMaximum(0);
+
+    q->ProgressBar->setFormat(
+        "Creating " +
+        QString::fromStdString(modelID) +
+        " maps in Slicer...");
+
+    QApplication::processEvents();
+
+    logic->CreateTCMParametricImages(
+        resultIt->second,
+        q->PETdims,
+        fields,
+        modelID,
+        refPETNode,
+        shNode,
+        refPetID);
+  }
+
+  if (this->TCMSaveDICOMCheckBoxImg->isChecked())
+  {
+    const QString outputDirectory =
+        this->TCMDICOMDirectoryImg
+            ->currentPath()
+            .trimmed();
+
+    int modelIndex = 0;
+
+    if (modelID == "1TCM")        modelIndex = 0;
+    else if (modelID == "1TdCM")  modelIndex = 1;
+    else if (modelID == "1TiCM")  modelIndex = 2;
+    else if (modelID == "1TidCM") modelIndex = 3;
+    else if (modelID == "2TCM")   modelIndex = 4;
+    else if (modelID == "2dTCM")  modelIndex = 5;
+    else if (modelID == "2TiCM")  modelIndex = 6;
+    else if (modelID == "2TidCM") modelIndex = 7;
+
+    for (int fieldIndex = 0;
+         fieldIndex <
+             static_cast<int>(fields.size());
+         ++fieldIndex)
+    {
+      const std::string& field =
+          fields[fieldIndex];
+
+      QString unitCode = "1";
+      QString unitMeaning = "1";
+
+      // TCM calculations use seconds as their time base.
+      if (field == "K1" ||
+          field == "k2" ||
+          field == "k3" ||
+          field == "k4" ||
+          field == "Ki")
+      {
+        unitCode = "/s";
+        unitMeaning = "per second";
+      }
+      else if (field == "td")
+      {
+        unitCode = "s";
+        unitMeaning = "s";
+      }
+
+      const std::vector<double> values =
+          logic->ExtractParameter(
+              resultIt->second,
+              field);
+
+      const int seriesNumber =
+          7200 +
+          modelIndex * 20 +
+          fieldIndex;
+
+      q->ProgressBar->setMinimum(0);
+      q->ProgressBar->setMaximum(0);
+
+      q->ProgressBar->setFormat(
+          "Saving DICOM PMAP: " +
+          QString::fromStdString(modelID) +
+          " - " +
+          QString::fromStdString(field) +
+          "...");
+
+      QApplication::processEvents();
+
+      if (!this->exportParametricMapDICOM(
+              refPETNode,
+              values,
+              "TCM",
+              modelID,
+              field,
+              outputDirectory,
+              seriesNumber,
+              unitCode,
+              unitMeaning))
+      {
+        // Avoid producing one error dialog for every
+        // remaining parameter if dcmqi/source DICOM
+        // itself is unavailable.
+        break;
+      }
+    }
+  }
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+invalidateParametricVoxelSelection()
+{
+  this->parametricVoxelMask.clear();
+  this->parametricFitVoxelIndices.clear();
+
+  this->parametricVoxelSelectionPETID =
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+}
+
+bool qSlicerDynamicPETModuleWidgetPrivate::
+ensureParametricVoxelSelection()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  if (q->petID ==
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    return false;
+  }
+
+  if (q->PET_flatten_values.empty())
+  {
+    return false;
+  }
+
+  const size_t numberOfVoxels =
+      q->PET_flatten_values.size();
+
+  // Already computed for this PET.
+  if (this->parametricVoxelSelectionPETID ==
+          q->petID &&
+      this->parametricVoxelMask.size() ==
+          numberOfVoxels)
+  {
+    return true;
+  }
+
+  this->parametricVoxelMask.assign(
+      numberOfVoxels,
+      static_cast<unsigned char>(0));
+
+  this->parametricFitVoxelIndices.clear();
+  this->parametricFitVoxelIndices.reserve(
+      numberOfVoxels);
+
+  size_t excludedCount = 0;
+
+  for (size_t v = 0;
+       v < numberOfVoxels;
+       ++v)
+  {
+    const auto& tac =
+        q->PET_flatten_values[v];
+
+    if (tac.empty())
+    {
+      ++excludedCount;
+      continue;
+    }
+
+    // Current policy:
+    // exclude only an exactly-zero dynamic TAC.
+    const bool allZero =
+        std::all_of(
+            tac.begin(),
+            tac.end(),
+            [](double value)
+            {
+              return value == 0.0;
+            });
+
+    if (allZero)
+    {
+      ++excludedCount;
+      continue;
+    }
+
+    this->parametricVoxelMask[v] =
+        static_cast<unsigned char>(1);
+
+    this->parametricFitVoxelIndices.push_back(
+        static_cast<int>(v));
+  }
+
+  this->parametricVoxelSelectionPETID =
+      q->petID;
+
+  qDebug()
+      << "Parametric voxel selection:"
+      << this->parametricFitVoxelIndices.size()
+      << "/"
+      << numberOfVoxels
+      << "voxels eligible;"
+      << excludedCount
+      << "excluded.";
+
+  return true;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+resetParametricImagingSelections()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  // ------------------------------------------------------------------------
+  // MTGA model selection
+  // ------------------------------------------------------------------------
+  q->modelsMTGAImgID.clear();
+
+  for (int i = 0;
+       i < this->ModelsCheckLayoutMTGAImg->count();
+       ++i)
+  {
+    QLayoutItem* item =
+        this->ModelsCheckLayoutMTGAImg->itemAt(i);
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(item->widget());
+
+    if (!cb)
+    {
+      continue;
+    }
+
+    cb->blockSignals(true);
+    cb->setChecked(false);
+    cb->blockSignals(false);
+  }
+
+  // ------------------------------------------------------------------------
+  // TCM model selection
+  // ------------------------------------------------------------------------
+  q->modelsTCMImgID.clear();
+
+  for (int i = 0;
+       i < this->ModelsCheckLayoutTCMImg->count();
+       ++i)
+  {
+    QLayoutItem* item =
+        this->ModelsCheckLayoutTCMImg->itemAt(i);
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(item->widget());
+
+    if (!cb)
+    {
+      continue;
+    }
+
+    cb->blockSignals(true);
+    cb->setChecked(false);
+    cb->blockSignals(false);
+  }
+
+  // Model-selection results.
+  q->TCMImgOutcomes.clear();
+  q->MTGAImgOutcomes.clear();
+
+  this->TCMImgFitSignatures.clear();
+  this->MTGAImgFitSignatures.clear();
+
+  this->populateTCMOptimizationModels();
+  this->updateMTGAOptimizationUI();
+
+  // Explicitly disable them now.
+  this->FITbuttonTCMImg->setEnabled(false);
+  this->FITbuttonMTGAImg->setEnabled(false);
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+setPETItemID(vtkIdType newPetID)
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  if (newPetID == q->petID)
+  {
+    return;
+  }
+
+  // Everything below belongs to the previous PET.
+  this->invalidateParametricVoxelSelection();
+
+  q->PET_flatten_values.clear();
+
+  q->sequencePETNode = nullptr;
+  q->sequenceBrowserPETNode = nullptr;
+  q->segSequenceNode = nullptr;
+
+  if (q->SegWatcher)
+  {
+    q->SegWatcher->browser = nullptr;
+  }
+
+  q->durations.clear();
+  q->timePoints.clear();
+  q->suvFactors.clear();
+
+  q->numberOfTimepoints = 0;
+
+  q->petID = newPetID;
+}
 
 
 //-----------------------------------------------------------------------------
@@ -2716,11 +4478,17 @@ void qSlicerDynamicPETModuleWidget::resetPETSelection()
                           "vtkMRMLSegmentationNode",
                           ""
                           );
+  d->invalidateParametricVoxelSelection();
 }
 
 void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerDynamicPETModuleWidget);
-  this->petID = d->PETSelector->itemData(index).value<vtkIdType>();
+  const vtkIdType newPetID =
+      d->PETSelector
+          ->itemData(index)
+          .value<vtkIdType>();
+
+  d->setPETItemID(newPetID);
 
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
@@ -3132,14 +4900,8 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
   this->segmentkeep4TCMfits.clear();
   this->segmentTCMfits.clear();
 
-  // Parametric imaging results
-  this->TCMImgOutcomes.clear();
-  this->MTGAImgOutcomes.clear();
-  d->TCMImgFitSignatures.clear();
-  d->MTGAImgFitSignatures.clear();
-
-  d->updateMTGAOptimizationUI();
-  d->populateTCMOptimizationModels();
+  // Parametric imaging state is patient/TAC dependent.
+  d->resetParametricImagingSelections();
 
   // Plot nodes
   this->RemoveExistingPlotChartAndTable();
@@ -5132,6 +6894,26 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     return;
   }
 
+  if (!d->ensureParametricVoxelSelection())
+  {
+    QMessageBox::warning(
+        nullptr,
+        tr("Parametric imaging"),
+        tr("Could not determine eligible PET voxels."));
+
+    return;
+  }
+
+  if (d->parametricFitVoxelIndices.empty())
+  {
+    QMessageBox::warning(
+        nullptr,
+        tr("Parametric imaging"),
+        tr("No PET voxels are eligible for fitting."));
+
+    return;
+  }
+
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
     return;
@@ -5478,6 +7260,23 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
           << "Reusing existing TCM voxelwise fit:"
           << QString::fromStdString(modelID);
 
+      this->ProgressBar->setMinimum(0);
+      this->ProgressBar->setMaximum(0);
+
+      this->ProgressBar->setFormat(
+          "Creating " +
+          QString::fromStdString(modelID) +
+          " maps in Slicer...");
+
+      QApplication::processEvents();
+
+      d->outputTCMParametricResult(
+          modelID,
+          logic,
+          refPETNode,
+          shNode,
+          this->petID);
+
       continue;
     }
 
@@ -5490,12 +7289,12 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
         signature;
   }
 
+  d->populateTCMOptimizationModels();
+
   if (modelsToFit.empty())
   {
     qDebug()
         << "All requested TCM models already have valid fits.";
-
-    d->populateTCMOptimizationModels();
     return;
   }
 
@@ -5511,6 +7310,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
     Cp_flatten,
     framing_flatten,
     modelsToFit,
+    d->parametricFitVoxelIndices,
     vbInit, vbLower, vbUpper,
     k1Init, k1Lower, k1Upper,
     k2Init, k2Lower, k2Upper,
@@ -5529,13 +7329,28 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   this->ProgressBar->setMaximum(100);
   this->ProgressBar->setValue(0);
 
-  QObject::connect(worker, &TCMWorker::modelStarted, this, [this](const QString& modelID){
-      this->ProgressBar->setFormat("Fitting " + modelID + " (%p%)");
-      this->ProgressBar->setVisible(true);
-      this->ProgressBar->setValue(0);
-      this->stopButton->setVisible(true);
-      this->stopButton->show();
-  });
+  QObject::connect(
+      worker,
+      &TCMWorker::modelStarted,
+      this,
+      [this](const QString& modelID)
+      {
+        this->ProgressBar->setMinimum(0);
+        this->ProgressBar->setMaximum(100);
+        this->ProgressBar->setValue(0);
+
+        this->ProgressBar->setFormat(
+            "Fitting " +
+            modelID +
+            " (%p%)");
+
+        this->ProgressBar->setVisible(true);
+
+        this->stopButton->setEnabled(true);
+        this->stopButton->setText("Stop");
+        this->stopButton->setVisible(true);
+        this->stopButton->show();
+      });
 
   QObject::connect(worker, &TCMWorker::progressChanged, this, [this](int value){
       this->ProgressBar->setValue(value);
@@ -5593,38 +7408,27 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 
       d->populateTCMOptimizationModels();
 
-      auto getModelfields = [](const std::string& modelID) -> std::vector<std::string> {
-          if (modelID == "1TCM")
-              return {"K1", "k2", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "1TdCM")
-              return {"K1", "k2", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "1TiCM")
-              return {"K1", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "1TidCM")
-              return {"K1", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "2TCM")
-              return {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "2dTCM")
-              return {"K1", "k2", "k3", "k4", "vb", "td", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "2TiCM")
-              return {"K1", "k2", "k3", "vb", "Ki", "AIC", "MASE", "BIC", "chi2"};
-          else if (modelID == "2TidCM")
-              return {"K1", "k2", "k3", "vb", "td", "Ki", "AIC", "MASE", "BIC", "chi2"};
-          else
-              return {}; // unknown model
-      };
+      this->ProgressBar->setMinimum(0);
+      this->ProgressBar->setMaximum(0);
 
-      auto modelfields = getModelfields(modelID.toStdString());
+      this->ProgressBar->setFormat(
+          "Preparing " +
+          modelID +
+          " parametric outputs...");
 
-      logic->CreateTCMParametricImages(
-          this->TCMImgOutcomes[modelID.toStdString()],
-          this->PETdims,
-          modelfields,
-          modelID.toStdString(),
-          refPETNodeWeak,
-          shNodeWeak,
-          refPetID
-      );
+      this->ProgressBar->setVisible(true);
+
+      this->stopButton->setEnabled(false);
+      this->stopButton->setText("Finalizing");
+
+      QApplication::processEvents();
+
+      d->outputTCMParametricResult(
+          id,
+          logic,
+          refPETNodeWeak.GetPointer(),
+          shNodeWeak.GetPointer(),
+          refPetID);
   }, Qt::BlockingQueuedConnection);
 
   // connect(this->stopButton, &QPushButton::clicked, this, [this](){
@@ -5638,7 +7442,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       [this]()
       {
         Q_D(qSlicerDynamicPETModuleWidget);
-        
+
         this->ProgressBar->setVisible(false);
 
         this->stopButton->setVisible(false);
@@ -5879,6 +7683,26 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
     return;
   }
 
+  if (!d->ensureParametricVoxelSelection())
+  {
+    QMessageBox::warning(
+        nullptr,
+        tr("Parametric imaging"),
+        tr("Could not determine eligible PET voxels."));
+
+    return;
+  }
+
+  if (d->parametricFitVoxelIndices.empty())
+  {
+    QMessageBox::warning(
+        nullptr,
+        tr("Parametric imaging"),
+        tr("No PET voxels are eligible for fitting."));
+
+    return;
+  }
+
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
     return;
@@ -5951,6 +7775,18 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           << std::endl;
       return;
   }
+
+  const bool showInSlicer =
+      d->MTGAShowInSlicerCheckBoxImg
+          ->isChecked();
+
+  const bool saveDICOM =
+      d->MTGASaveDICOMCheckBoxImg
+          ->isChecked();
+
+  const QString dicomOutputDirectory =
+      d->MTGADICOMDirectoryImg
+          ->currentPath();
 
   const long Nframe = timePoints.size();
 
@@ -6115,6 +7951,13 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           << "Reusing existing MTGA voxelwise fit:"
           << QString::fromStdString(modelID);
 
+      d->outputMTGAParametricResult(
+          modelID,
+          logic,
+          refPETNode,
+          shNode,
+          this->petID);
+
       continue;
     }
 
@@ -6131,13 +7974,14 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
         fitSignature;
   }
 
+  d->updateMTGAOptimizationUI();
+
   if (modelsToFit.empty())
   {
     qDebug()
         << "All requested MTGA models "
            "already have valid fits.";
 
-    d->updateMTGAOptimizationUI();
     return;
   }
 
@@ -6157,6 +8001,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           Cp_flatten,
           framing_flatten,
           modelsToFit,
+          d->parametricFitVoxelIndices,
           wgt,
           timeOffset,
           framingNorm,
@@ -6262,40 +8107,28 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
               signatureIt->second;
         }
 
-        std::vector<std::string> fields;
+        // Fitting is complete.  Output creation/export is a
+        // separate synchronous phase and may take noticeable time.
+        this->ProgressBar->setMinimum(0);
+        this->ProgressBar->setMaximum(0);
 
-        if (id == "Patlak")
-        {
-          fields =
-          {
-            "Ki",
-            "Intercept",
-            "AIC",
-            "MASE",
-            "R2",
-            "chi2"
-          };
-        }
-        else
-        {
-          fields =
-          {
-            "DV",
-            "Intercept",
-            "AIC",
-            "MASE",
-            "R2",
-            "chi2"
-          };
-        }
+        this->ProgressBar->setFormat(
+            "Preparing " +
+            modelID +
+            " parametric outputs...");
 
-        logic->CreateMTGAParametricImages(
-            this->MTGAImgOutcomes[id],
-            this->PETdims,
-            fields,
+        this->ProgressBar->setVisible(true);
+
+        this->stopButton->setEnabled(false);
+        this->stopButton->setText("Finalizing");
+
+        QApplication::processEvents();
+
+        d->outputMTGAParametricResult(
             id,
-            refPETNodeWeak,
-            shNodeWeak,
+            logic,
+            refPETNodeWeak.GetPointer(),
+            shNodeWeak.GetPointer(),
             refPetID);
 
         d->updateMTGAOptimizationUI();

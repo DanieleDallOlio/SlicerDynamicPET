@@ -2140,6 +2140,7 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     double tol,
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
+    const std::vector<int>& fitVoxelIndices,
     std::atomic<bool>& stopRequested,
     int numThreads,
     std::function<void(int)> progressCallback)
@@ -2386,6 +2387,7 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
     double tol,
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
+    const std::vector<int>& fitVoxelIndices,
     std::atomic<bool>& stopRequested,
     int numThreads,
     std::function<void(int)> progressCallback)
@@ -2622,6 +2624,7 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     double tol,
     int max_iter,
     std::vector<MTGAParameters>& outputParams,
+    const std::vector<int>& fitVoxelIndices,
     std::atomic<bool>& stopRequested,
     int numThreads,
     std::function<void(int)> progressCallback)
@@ -2898,9 +2901,93 @@ void vtkSlicerDynamicPETLogic::CreateMTGAParametricImages(
   )
 {
 
+  vtkMRMLScene* scene =
+      this->GetMRMLScene();
+
+  if (!scene)
+  {
+    std::cerr
+        << "CreateMTGAParametricImages: "
+           "MRML scene is null."
+        << std::endl;
+    return;
+  }
+
   for (const auto& field : fields)
   {
     std::vector<double> flatten = this->ExtractParameter(outputParams, field);
+    vtkMRMLScalarVolumeNode* existingNode = nullptr;
+
+    const int numberOfVolumes =
+        scene->GetNumberOfNodesByClass(
+            "vtkMRMLScalarVolumeNode");
+
+    for (int i = 0;
+         i < numberOfVolumes;
+         ++i)
+    {
+      vtkMRMLScalarVolumeNode* candidate =
+          vtkMRMLScalarVolumeNode::SafeDownCast(
+              scene->GetNthNodeByClass(
+                  i,
+                  "vtkMRMLScalarVolumeNode"));
+
+      if (!candidate)
+      {
+        continue;
+      }
+
+      const char* resultType =
+          candidate->GetAttribute(
+              "SlicerDynamicPET.ResultType");
+
+      const char* method =
+          candidate->GetAttribute(
+              "SlicerDynamicPET.Method");
+
+      const char* model =
+          candidate->GetAttribute(
+              "SlicerDynamicPET.Model");
+
+      const char* parameter =
+          candidate->GetAttribute(
+              "SlicerDynamicPET.Parameter");
+
+      const char* sourceNodeID =
+          candidate->GetAttribute(
+              "SlicerDynamicPET.SourceNodeID");
+
+      if (!resultType ||
+          !method ||
+          !model ||
+          !parameter ||
+          !sourceNodeID ||
+          !refNode->GetID())
+      {
+        continue;
+      }
+
+      if (std::string(resultType) ==
+              "ParametricMap" &&
+          std::string(method) ==
+              "MTGA" &&                // TCM below: use "TCM"
+          std::string(model) ==
+              modelID &&
+          std::string(parameter) ==
+              field &&
+          std::string(sourceNodeID) ==
+              refNode->GetID())
+      {
+        existingNode = candidate;
+        break;
+      }
+    }
+
+    if (existingNode)
+    {
+      scene->RemoveNode(existingNode);
+    }
+
     vtkMRMLScalarVolumeNode* node =
         this->Flatten2Image(
             flatten,
@@ -2915,6 +3002,26 @@ void vtkSlicerDynamicPETLogic::CreateMTGAParametricImages(
           << std::endl;
       return;
     }
+
+    node->SetAttribute(
+        "SlicerDynamicPET.ResultType",
+        "ParametricMap");
+
+    node->SetAttribute(
+        "SlicerDynamicPET.Method",
+        "MTGA");
+
+    node->SetAttribute(
+        "SlicerDynamicPET.Model",
+        modelID.c_str());
+
+    node->SetAttribute(
+        "SlicerDynamicPET.Parameter",
+        field.c_str());
+
+    node->SetAttribute(
+        "SlicerDynamicPET.SourceNodeID",
+        refNode->GetID());
 
     node->CopyOrientation(refNode);
     node->SetSpacing(refNode->GetSpacing());
@@ -2948,7 +3055,8 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     const int n_tc,
     std::vector<TCMParameters>& outputParams,
     const std::string& modelID,
-    std::atomic<bool>& stopRequested /*= false*/,
+    const std::vector<int>& fitVoxelIndices,
+    std::atomic<bool>& stopRequested,
     const std::vector<double>* wgt_global /*= nullptr*/,
     int numThreads /*= 0 */,
     std::function<void(int)> progressCallback, /*= nullptr*/
@@ -2972,7 +3080,19 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
 
     // ---------- 1) Weights ----------
     std::vector<double> wt(Nframe, 1.0);
-    if (wgt_global) wt = *wgt_global;
+    if (wgt_global)
+    {
+        if (wgt_global->size() !=
+            static_cast<size_t>(Nframe))
+        {
+            std::cerr
+                << "callTCMImg: weight vector size mismatch."
+                << std::endl;
+            return;
+        }
+
+        wt = *wgt_global;
+    }
     std::vector<bool> keep(Nframe);
     for (int i = 0; i < Nframe; ++i) keep[i] = (wt[i] != 0.0);
 
@@ -2995,6 +3115,11 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         scant[i][1] = cumsum[i];
         double t = 0.5*(scant[i][0]+scant[i][1]);
         double pbr = pbrp[0]*exp(-pbrp[1]*t/60.0)+pbrp[2];
+        if (std::abs(pbr) < EPS)
+        {
+            pbr =
+                (pbr < 0.0) ? -EPS : EPS;
+        }
         // std :: cout << "Cp[i] = " << Cp[i] << std :: endl;
         cwb[i] = Cp[i]/pbr;
     }
@@ -3041,44 +3166,42 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         params.chi2   = std::numeric_limits<double>::quiet_NaN();
         params.loglik = std::numeric_limits<double>::quiet_NaN();
     };
-
-    std::vector<int> fitVoxelIndices;
-    fitVoxelIndices.reserve(Nvox);
-
-    int zeroVoxelCount = 0;
-
-    for (int v = 0; v < Nvox; ++v)
+    // All voxels start excluded.
+    // Only voxels present in fitVoxelIndices will receive fitted values.
+    for (TCMParameters& params : outputParams)
     {
-        const auto& tac = voxels[v];
-
-        const bool allZero = std::all_of(
-            tac.begin(),
-            tac.end(),
-            [](double value)
-            {
-                return value == 0.0;
-            });
-
-        if (allZero)
-        {
-            markInvalidVoxel(outputParams[v]);
-            ++zeroVoxelCount;
-        }
-        else
-        {
-            fitVoxelIndices.push_back(v);
-        }
+        markInvalidVoxel(params);
     }
 
-    const int Nfit = static_cast<int>(fitVoxelIndices.size());
+    const int Nfit =
+        static_cast<int>(fitVoxelIndices.size());
 
     std::cout
         << "TCM fitting: "
         << Nfit << " / " << Nvox
-        << " voxels will be fitted; "
-        << zeroVoxelCount << " zero TACs skipped."
+        << " voxels eligible for fitting; "
+        << (Nvox - Nfit)
+        << " excluded by the common voxel mask."
         << std::endl;
 
+    if (Nfit == 0)
+    {
+        if (progressCallback)
+        {
+            progressCallback(100);
+        }
+
+        // Clean allocations performed above.
+        for (double* frame : scant)
+        {
+            delete[] frame;
+        }
+
+        delete[] Cp_new;
+        delete[] cwb_new;
+
+        return;
+    }
 
     // ---------- 6) KMODEL_T ----------
     double * scant_flatten = new double[Nframe*2];
@@ -3103,6 +3226,25 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     std::atomic<int> voxProcessed(0);
     const int progressUpdateInterval = std::max(1, Nfit / 200);
 
+    auto reportVoxelProcessed =
+        [&]()
+        {
+            const int done = ++voxProcessed;
+
+            if (progressCallback &&
+                (done % progressUpdateInterval == 0 ||
+                 done == Nfit))
+            {
+                const int progress =
+                    static_cast<int>(
+                        100LL * done / Nfit);
+
+                progressCallback(progress);
+            }
+        };
+
+    std::atomic<int> guardHitCount(0);
+
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
     #ifdef HAVE_OPENMP
     #pragma omp parallel
@@ -3120,107 +3262,124 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             if (stopRequested.load(std::memory_order_relaxed) ||
                 (stopCallback && stopCallback()))
             {
-              continue;
+                continue;
             }
-            const int v = fitVoxelIndices[fitIndex];
+
+            const int v =
+                fitVoxelIndices[fitIndex];
+
+            if (v < 0 || v >= Nvox)
+            {
+                continue;
+            }
 
             TCMParameters params;
 
             for (int i = 0; i < Nframe; ++i) cfit_local[i] = voxels[v][i];
             if (check_if_constant(cfit_local)) {
-              // std :: cout << "Constant" << std :: endl;
-              markInvalidVoxel(outputParams[v]);
-            } else {
-
-              for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
-
-              for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
-
-              LevmarStats stx{};
-
-              // ---------- Fit voxel ----------
-              KMODEL_T km = km_template;
-              kmap_levmar_stats(
-                  cfit_local.data(), wt.data(), Nframe,
-                  pinit_local.data(), num_par,
-                  &km, tac_eval, jac_eval,
-                  lb, ub, psens_local.data(), maxiter,
-                  fitted_local.data(),
-                  &stx
-              );
-
-              if (stopRequested.load(std::memory_order_relaxed) ||
-                  (stopCallback && stopCallback()))
-              {
-                continue;
-              }
-
-              if (v == 0 || v == 99 || v == 999 || v == 9999) {
-                std::cout
-                  << "v=" << v
-                  << " loops=" << stx.n_loops
-                  << " acc=" << stx.it_accept
-                  << " rej=" << stx.it_reject
-                  << " guard=" << stx.hit_guard
-                  << " nan_ct=" << stx.nan_ct
-                  << " nan_st=" << stx.nan_st
-                  << " last_rho=" << stx.last_rho
-                  << " last_mu=" << stx.last_mu
-                  << "\n";
-              }
-              // ---------- Fill TCMParameters ----------
-              if (n_tc==1) {
-                  params.vb = pinit_local[0];
-                  params.K1 = pinit_local[1];
-                  params.k2 = pinit_local[2];
-                  params.td = pinit_local[3];
-                  params.Ki = params.K1;
-                  params.DV = params.K1/(params.k2+EPS);
-              } else if (n_tc==2) {
-                  params.vb = pinit_local[0];
-                  params.K1 = pinit_local[1];
-                  params.k2 = pinit_local[2];
-                  params.k3 = pinit_local[3];
-                  params.k4 = pinit_local[4];
-                  params.td = pinit_local[5];
-                  params.Ki = params.K1*params.k3/(params.k2+params.k3+EPS);
-                  params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
-              }
-
-              // Residuals
-              params.r.resize(Nframe);
-              for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
-
-              params.weights = wt;
-              params.keep = keep;
-              params.dof = dof_fixed;
-              //
-              // // // Statistics
-              params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
-              params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
-              params.MASE = this->MASE(cfit_local, fitted_local, &wt);
-              params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
-              params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
-
-              outputParams[v] = std::move(params);
+              reportVoxelProcessed();
+              continue;
             }
-            // ---------- Progress update ----------
-            if (progressCallback)
+
+            for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
+
+            for (int i = 0; i < num_par; ++i) psens_local[i] = static_cast<int>(sens[i]);
+
+            LevmarStats stx{};
+
+            // ---------- Fit voxel ----------
+            KMODEL_T km = km_template;
+            kmap_levmar_stats(
+                cfit_local.data(), wt.data(), Nframe,
+                pinit_local.data(), num_par,
+                &km, tac_eval, jac_eval,
+                lb, ub, psens_local.data(), maxiter,
+                fitted_local.data(),
+                &stx
+            );
+
+            if (stopRequested.load(std::memory_order_relaxed) ||
+                (stopCallback && stopCallback()))
             {
-                int done = ++voxProcessed;
-
-                if (done % progressUpdateInterval == 0 || done == Nfit)
-                {
-                    int progress =
-                        static_cast<int>(100LL * done / Nfit);
-
-                    progressCallback(progress);
-                }
+              continue;
             }
 
+            if (stx.hit_guard > 0)
+            {
+                ++guardHitCount;
+                reportVoxelProcessed();
+                continue;
+            }
+
+            if (v == 0 || v == 99 || v == 999 || v == 9999) {
+              std::cout
+                << "v=" << v
+                << " loops=" << stx.n_loops
+                << " acc=" << stx.it_accept
+                << " rej=" << stx.it_reject
+                << " guard=" << stx.hit_guard
+                << " nan_ct=" << stx.nan_ct
+                << " nan_st=" << stx.nan_st
+                << " last_rho=" << stx.last_rho
+                << " last_mu=" << stx.last_mu
+                << "\n";
+            }
+            // ---------- Fill TCMParameters ----------
+            if (n_tc==1) {
+                params.vb = pinit_local[0];
+                params.K1 = pinit_local[1];
+                params.k2 = pinit_local[2];
+                params.td = pinit_local[3];
+                params.Ki = params.K1;
+                params.DV = params.K1/(params.k2+EPS);
+            } else if (n_tc==2) {
+                params.vb = pinit_local[0];
+                params.K1 = pinit_local[1];
+                params.k2 = pinit_local[2];
+                params.k3 = pinit_local[3];
+                params.k4 = pinit_local[4];
+                params.td = pinit_local[5];
+                params.Ki = params.K1*params.k3/(params.k2+params.k3+EPS);
+                params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
+            }
+
+            // Residuals
+            params.r.resize(Nframe);
+            for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
+
+            params.weights = wt;
+            params.keep = keep;
+            params.dof = dof_fixed;
+            //
+            // // // Statistics
+            params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
+            params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
+            params.MASE = this->MASE(cfit_local, fitted_local, &wt);
+            params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
+            params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
+
+            outputParams[v] = std::move(params);
+            reportVoxelProcessed();
         }
     }
 
+    if (guardHitCount.load() > 0)
+    {
+        std::cout
+            << "TCM fitting: "
+            << guardHitCount.load()
+            << " voxels failed to converge "
+               "(LM iteration guard reached)."
+            << std::endl;
+    }
+
+
+    for (double* frame : scant)
+    {
+        delete[] frame;
+    }
+
+    delete[] scant_flatten;
     delete[] Cp_new;
     delete[] cwb_new;
 }
@@ -3316,6 +3475,78 @@ void vtkSlicerDynamicPETLogic::CreateTCMParametricImages(
         std::vector<double> flatten =
             this->ExtractParameter(outputParams, field);
 
+        vtkMRMLScalarVolumeNode* existingNode = nullptr;
+
+        const int numberOfVolumes =
+            scene->GetNumberOfNodesByClass(
+                "vtkMRMLScalarVolumeNode");
+
+        for (int i = 0;
+             i < numberOfVolumes;
+             ++i)
+        {
+          vtkMRMLScalarVolumeNode* candidate =
+              vtkMRMLScalarVolumeNode::SafeDownCast(
+                  scene->GetNthNodeByClass(
+                      i,
+                      "vtkMRMLScalarVolumeNode"));
+
+          if (!candidate)
+          {
+            continue;
+          }
+
+          const char* resultType =
+              candidate->GetAttribute(
+                  "SlicerDynamicPET.ResultType");
+
+          const char* method =
+              candidate->GetAttribute(
+                  "SlicerDynamicPET.Method");
+
+          const char* model =
+              candidate->GetAttribute(
+                  "SlicerDynamicPET.Model");
+
+          const char* parameter =
+              candidate->GetAttribute(
+                  "SlicerDynamicPET.Parameter");
+
+          const char* sourceNodeID =
+              candidate->GetAttribute(
+                  "SlicerDynamicPET.SourceNodeID");
+
+          if (!resultType ||
+              !method ||
+              !model ||
+              !parameter ||
+              !sourceNodeID ||
+              !refNode->GetID())
+          {
+            continue;
+          }
+
+          if (std::string(resultType) ==
+                  "ParametricMap" &&
+              std::string(method) ==
+                  "TCM" &&
+              std::string(model) ==
+                  modelID &&
+              std::string(parameter) ==
+                  field &&
+              std::string(sourceNodeID) ==
+                  refNode->GetID())
+          {
+            existingNode = candidate;
+            break;
+          }
+        }
+
+        if (existingNode)
+        {
+          scene->RemoveNode(existingNode);
+        }
+
         vtkMRMLScalarVolumeNode* node =
             this->Flatten2Image(
                 flatten,
@@ -3330,6 +3561,26 @@ void vtkSlicerDynamicPETLogic::CreateTCMParametricImages(
                 << std::endl;
             return;
         }
+
+        node->SetAttribute(
+            "SlicerDynamicPET.ResultType",
+            "ParametricMap");
+
+        node->SetAttribute(
+            "SlicerDynamicPET.Method",
+            "TCM");
+
+        node->SetAttribute(
+            "SlicerDynamicPET.Model",
+            modelID.c_str());
+
+        node->SetAttribute(
+            "SlicerDynamicPET.Parameter",
+            field.c_str());
+
+        node->SetAttribute(
+            "SlicerDynamicPET.SourceNodeID",
+            refNode->GetID());
 
         node->CopyOrientation(refNode);
 

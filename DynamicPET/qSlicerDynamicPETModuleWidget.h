@@ -66,6 +66,14 @@
 #include <QtConcurrent/QtConcurrent>
 #include <QMetaType>
 #include <algorithm>
+#include <QDir>
+#include <QVariant>
+#include <QVariantMap>
+
+#include <vtkImageData.h>
+#include <vtkNew.h>
+#include <vtkMRMLNode.h>
+#include <QRegularExpression>
 #include "DynamicPETWidgetWorkers.h"
 
 

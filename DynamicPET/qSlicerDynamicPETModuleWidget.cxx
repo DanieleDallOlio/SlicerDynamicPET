@@ -33,6 +33,7 @@
 #include <iomanip>
 #include <QEventLoop>
 #include <vtkWeakPointer.h>
+#include <QStandardItemModel>
 
 // strptime replacement for Windows
 inline char* strptime(const char* s, const char* f, struct tm* tm) {
@@ -100,6 +101,8 @@ protected:
   qSlicerDynamicPETModuleWidget* const q_ptr;
   void setDoubleField(QLineEdit* le, double lo, double hi, int decimals);
   void setIntField(QLineEdit* le, int lo, int hi);
+  void previewParametricVoxelSelection();
+  void updateBodySupportUI();
   std::vector<unsigned char>
       MTGAOptimizedSelection;
 
@@ -157,7 +160,14 @@ public:
     Patlak = 1,
     Reversible = 2
   };
-
+  enum class BodySupportSource
+  {
+      Auto = 0,
+      CT = 1,
+      PET = 2,
+      Union = 3,
+      Intersection = 4
+  };
   void generateMTGAOptimizedResult();
 
   void refreshMTGAOptimizedRGB();
@@ -220,6 +230,15 @@ public:
   std::vector<unsigned char> parametricVoxelMask;
   std::vector<int> parametricFitVoxelIndices;
 
+  vtkSmartPointer<vtkOrientedImageData>
+      parametricBodySupportImage;
+
+  vtkSmartPointer<vtkOrientedImageData>
+      parametricFinalFitMaskImage;
+
+  vtkIdType parametricVoxelSelectionCTID{
+      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
+
   vtkIdType parametricVoxelSelectionPETID{
       vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
 
@@ -275,6 +294,189 @@ void qSlicerDynamicPETModuleWidgetPrivate::setIntField(QLineEdit* le, int lo, in
   });
 
   return ;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+previewParametricVoxelSelection()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->ensureParametricVoxelSelection())
+    {
+        QMessageBox::warning(
+            q,
+            QObject::tr("Patient support"),
+            QObject::tr(
+                "Could not create the parametric fitting support mask."));
+
+        return;
+    }
+
+    vtkMRMLScene* scene =
+        q->mrmlScene();
+
+    if (!scene)
+    {
+        return;
+    }
+
+    vtkMRMLSubjectHierarchyNode* shNode =
+        vtkMRMLSubjectHierarchyNode::
+            GetSubjectHierarchyNode(scene);
+
+    if (!shNode)
+    {
+        return;
+    }
+
+    vtkMRMLScalarVolumeNode* petNode =
+        vtkMRMLScalarVolumeNode::SafeDownCast(
+            shNode->GetItemDataNode(
+                q->petID));
+
+    if (!petNode)
+    {
+        return;
+    }
+
+    vtkSlicerDynamicPETLogic* logic =
+        vtkSlicerDynamicPETLogic::SafeDownCast(
+            q->logic());
+
+    if (!logic)
+    {
+        return;
+    }
+
+    logic->CreateOrUpdateBodySupportPreview(
+        this->parametricFinalFitMaskImage,
+        petNode);
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+updateBodySupportUI()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    const bool hasCT =
+        q->ctID !=
+        vtkMRMLSubjectHierarchyNode::
+            INVALID_ITEM_ID;
+
+    const bool hasPET =
+        q->petID !=
+        vtkMRMLSubjectHierarchyNode::
+            INVALID_ITEM_ID;
+
+    const bool supportEnabled =
+        this->BodySupportEnabledCheckBoxImg->
+            isChecked();
+
+    int sourceMode =
+        this->BodySupportSourceImg->
+            currentIndex();
+
+    // If CT disappeared while a CT-dependent mode was selected,
+    // safely return to Auto.
+    if (!hasCT &&
+        (sourceMode == 1 ||
+         sourceMode == 3 ||
+         sourceMode == 4))
+    {
+        this->BodySupportSourceImg->
+            blockSignals(true);
+
+        this->BodySupportSourceImg->
+            setCurrentIndex(0);
+
+        this->BodySupportSourceImg->
+            blockSignals(false);
+
+        sourceMode = 0;
+
+        this->invalidateParametricVoxelSelection();
+    }
+
+    // Enable/disable individual source choices.
+    QStandardItemModel* model =
+        qobject_cast<QStandardItemModel*>(
+            this->BodySupportSourceImg->
+                model());
+
+    if (model)
+    {
+        if (model->item(0))
+            model->item(0)->setEnabled(hasPET); // Auto
+
+        if (model->item(1))
+            model->item(1)->setEnabled(hasPET && hasCT); // CT
+
+        if (model->item(2))
+            model->item(2)->setEnabled(hasPET); // PET
+
+        if (model->item(3))
+            model->item(3)->setEnabled(hasPET && hasCT); // Union
+
+        if (model->item(4))
+            model->item(4)->setEnabled(hasPET && hasCT); // Intersection
+    }
+
+    const bool sourceUsesCT =
+        supportEnabled &&
+        hasCT &&
+        (
+            sourceMode == 0 || // Auto -> CT if available
+            sourceMode == 1 || // CT
+            sourceMode == 3 || // Union
+            sourceMode == 4    // Intersection
+        );
+
+    const bool sourceUsesPET =
+        supportEnabled &&
+        hasPET &&
+        (
+            sourceMode == 2 || // PET
+            sourceMode == 3 || // Union
+            sourceMode == 4 || // Intersection
+            (sourceMode == 0 && !hasCT) // Auto without CT
+        );
+
+    this->BodySupportSourceImg->
+        setEnabled(
+            supportEnabled &&
+            hasPET);
+
+    this->BodySupportCTThresholdLabelImg->
+        setEnabled(sourceUsesCT);
+
+    this->BodySupportCTThresholdImg->
+        setEnabled(sourceUsesCT);
+
+    this->BodySupportMarginLabelImg->
+        setEnabled(sourceUsesCT);
+
+    this->BodySupportMarginImg->
+        setEnabled(sourceUsesCT);
+
+    this->BodySupportPETCompositeLabelImg->
+        setEnabled(sourceUsesPET);
+
+    this->BodySupportPETCompositeImg->
+        setEnabled(sourceUsesPET);
+
+    // Shared CT/PET operation.
+    this->BodySupportFillHolesCheckBoxImg->
+        setEnabled(
+            supportEnabled &&
+            hasPET);
+
+    this->BodySupportAdvancedCollapsibleButtonImg->
+        setEnabled(
+            supportEnabled &&
+            hasPET);
+
+    this->BodySupportPreviewButtonImg->
+        setEnabled(hasPET);
 }
 
 //-----------------------------------------------------------------------------
@@ -1574,6 +1776,77 @@ def DPE_export_parametric_map(
   this->updateMTGAOptimizationUI();
   this->populateTCMOptimizationModels();
 
+  QObject::connect(
+      this->BodySupportPreviewButtonImg,
+      &QPushButton::clicked,
+      q,
+      [this]()
+      {
+          this->previewParametricVoxelSelection();
+      });
+
+  QObject::connect(
+      this->BodySupportCTThresholdImg,
+      QOverload<double>::of(
+          &QDoubleSpinBox::valueChanged),
+      q,
+      [this](double)
+      {
+          this->invalidateParametricVoxelSelection();
+      });
+
+  QObject::connect(
+      this->BodySupportMarginImg,
+      QOverload<double>::of(
+          &QDoubleSpinBox::valueChanged),
+      q,
+      [this](double)
+      {
+          this->invalidateParametricVoxelSelection();
+      });
+
+  QObject::connect(
+      this->BodySupportFillHolesCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+          this->invalidateParametricVoxelSelection();
+      });
+  QObject::connect(
+      this->BodySupportSourceImg,
+      QOverload<int>::of(
+          &QComboBox::currentIndexChanged),
+      q,
+      [this](int)
+      {
+          this->invalidateParametricVoxelSelection();
+          this->updateBodySupportUI();
+      });
+
+  QObject::connect(
+      this->BodySupportEnabledCheckBoxImg,
+      &QCheckBox::toggled,
+      q,
+      [this](bool)
+      {
+          this->invalidateParametricVoxelSelection();
+          this->updateBodySupportUI();
+      });
+
+  QObject::connect(
+      this->BodySupportPETCompositeImg,
+      QOverload<int>::of(
+          &QComboBox::currentIndexChanged),
+      q,
+      [this](int)
+      {
+          this->invalidateParametricVoxelSelection();
+      });
+
+  // Initialize enabled/disabled states once setupUi() and all
+  // connections are complete.
+  this->updateBodySupportUI();
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::populatePatientComboBox() {
@@ -1882,30 +2155,76 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
   std::function<void(vtkIdType)> collectItems;
   collectItems = [&](vtkIdType itemID)
   {
-    vtkMRMLNode* dataNode = shNode->GetItemDataNode(itemID);
-    if (dataNode && dataNode->IsA(requiredNodeType))
+    vtkMRMLNode* dataNode =
+        shNode->GetItemDataNode(itemID);
+
+    if (dataNode &&
+        dataNode->IsA(requiredNodeType))
     {
+        const char* internalAttribute =
+            dataNode->GetAttribute(
+                "SlicerDynamicPET.InternalNode");
 
-      bool hasatt = shNode->HasItemAttribute(itemID, "DICOM.Modality");
-      std :: string modalityAttr = hasatt ? shNode->GetItemAttribute(itemID, "DICOM.Modality") : "";
-      bool modalityMatches = requiredModality=="" || requiredModality == modalityAttr;
+        const bool isInternalDynamicPETNode =
+            internalAttribute &&
+            std::string(internalAttribute) == "1";
 
-      if (requiredModality=="PT") {
-        std::vector< std::string > pt_attributes = dataNode->GetAttributeNames();
-        auto hasseq = find(pt_attributes.begin(), pt_attributes.end(), "Sequences.BaseName");
-        modalityMatches = modalityMatches && hasseq!=pt_attributes.end();
-      }
-
-      if (modalityMatches)
-      {
-        std::string name = shNode->GetItemName(itemID);
-        comboBox->addItem(QString::fromStdString(name), QVariant::fromValue(itemID));
-
-        if (itemID == currentSelectedItemID)
+        if (!isInternalDynamicPETNode)
         {
-          restoredIndex = comboBox->count() - 1;
+            bool hasatt =
+                shNode->HasItemAttribute(
+                    itemID,
+                    "DICOM.Modality");
+
+            std::string modalityAttr =
+                hasatt
+                ? shNode->GetItemAttribute(
+                      itemID,
+                      "DICOM.Modality")
+                : "";
+
+            bool modalityMatches =
+                requiredModality.empty() ||
+                requiredModality ==
+                    modalityAttr;
+
+            if (requiredModality == "PT")
+            {
+                std::vector<std::string>
+                    pt_attributes =
+                        dataNode->
+                            GetAttributeNames();
+
+                auto hasseq =
+                    std::find(
+                        pt_attributes.begin(),
+                        pt_attributes.end(),
+                        "Sequences.BaseName");
+
+                modalityMatches =
+                    modalityMatches &&
+                    hasseq !=
+                        pt_attributes.end();
+            }
+
+            if (modalityMatches)
+            {
+                std::string name =
+                    shNode->GetItemName(
+                        itemID);
+
+                comboBox->addItem(
+                    QString::fromStdString(name),
+                    QVariant::fromValue(itemID));
+
+                if (itemID ==
+                    currentSelectedItemID)
+                {
+                    restoredIndex =
+                        comboBox->count() - 1;
+                }
+            }
         }
-      }
     }
 
     std::vector<vtkIdType> children;
@@ -6629,101 +6948,505 @@ outputTCMParametricResult(
 void qSlicerDynamicPETModuleWidgetPrivate::
 invalidateParametricVoxelSelection()
 {
-  this->parametricVoxelMask.clear();
-  this->parametricFitVoxelIndices.clear();
+    this->parametricVoxelMask.clear();
+    this->parametricFitVoxelIndices.clear();
 
-  this->parametricVoxelSelectionPETID =
-      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    this->parametricBodySupportImage = nullptr;
+    this->parametricFinalFitMaskImage = nullptr;
+
+    this->parametricVoxelSelectionPETID =
+        vtkMRMLSubjectHierarchyNode::
+            INVALID_ITEM_ID;
+
+    this->parametricVoxelSelectionCTID =
+        vtkMRMLSubjectHierarchyNode::
+            INVALID_ITEM_ID;
+
+    // A changed support mask means old voxelwise fits no longer represent
+    // the current analysis domain.
+    this->MTGAImgFitSignatures.clear();
+    this->TCMImgFitSignatures.clear();
+
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    q->MTGAImgOutcomes.clear();
+    q->TCMImgOutcomes.clear();
 }
 
 bool qSlicerDynamicPETModuleWidgetPrivate::
 ensureParametricVoxelSelection()
 {
-  Q_Q(qSlicerDynamicPETModuleWidget);
+    Q_Q(qSlicerDynamicPETModuleWidget);
 
-  if (q->petID ==
-      vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-  {
-    return false;
-  }
-
-  if (q->PET_flatten_values.empty())
-  {
-    return false;
-  }
-
-  const size_t numberOfVoxels =
-      q->PET_flatten_values.size();
-
-  // Already computed for this PET.
-  if (this->parametricVoxelSelectionPETID ==
-          q->petID &&
-      this->parametricVoxelMask.size() ==
-          numberOfVoxels)
-  {
-    return true;
-  }
-
-  this->parametricVoxelMask.assign(
-      numberOfVoxels,
-      static_cast<unsigned char>(0));
-
-  this->parametricFitVoxelIndices.clear();
-  this->parametricFitVoxelIndices.reserve(
-      numberOfVoxels);
-
-  size_t excludedCount = 0;
-
-  for (size_t v = 0;
-       v < numberOfVoxels;
-       ++v)
-  {
-    const auto& tac =
-        q->PET_flatten_values[v];
-
-    if (tac.empty())
+    if (q->petID ==
+            vtkMRMLSubjectHierarchyNode::
+                INVALID_ITEM_ID)
     {
-      ++excludedCount;
-      continue;
+        return false;
     }
 
-    // Current policy:
-    // exclude only an exactly-zero dynamic TAC.
-    const bool allZero =
-        std::all_of(
-            tac.begin(),
-            tac.end(),
-            [](double value)
+    if (q->PET_flatten_values.empty())
+    {
+        return false;
+    }
+
+    const size_t numberOfVoxels =
+        q->PET_flatten_values.size();
+
+    // Cache valid for current PET + CT.
+    if (this->parametricVoxelSelectionPETID ==
+            q->petID &&
+        this->parametricVoxelSelectionCTID ==
+            q->ctID &&
+        this->parametricVoxelMask.size() ==
+            numberOfVoxels &&
+        this->parametricFinalFitMaskImage)
+    {
+        return true;
+    }
+
+    vtkMRMLScene* scene =
+        q->mrmlScene();
+
+    if (!scene)
+    {
+        return false;
+    }
+
+    vtkMRMLSubjectHierarchyNode* shNode =
+        vtkMRMLSubjectHierarchyNode::
+            GetSubjectHierarchyNode(scene);
+
+    if (!shNode)
+    {
+        return false;
+    }
+
+    vtkMRMLScalarVolumeNode* petNode =
+        vtkMRMLScalarVolumeNode::SafeDownCast(
+            shNode->GetItemDataNode(
+                q->petID));
+
+    vtkMRMLScalarVolumeNode* ctNode =
+        nullptr;
+
+    if (q->ctID !=
+        vtkMRMLSubjectHierarchyNode::
+            INVALID_ITEM_ID)
+    {
+        ctNode =
+            vtkMRMLScalarVolumeNode::SafeDownCast(
+                shNode->GetItemDataNode(
+                    q->ctID));
+    }
+
+    if (!petNode)
+    {
+        return false;
+    }
+
+    vtkSlicerDynamicPETLogic* logic =
+        vtkSlicerDynamicPETLogic::SafeDownCast(
+            q->logic());
+
+    if (!logic)
+    {
+        return false;
+    }
+
+    // For now these are fixed defaults.
+    const double ctThresholdHU =
+        this->BodySupportCTThresholdImg->
+            value();
+
+    const double ctBodyMarginMm =
+        this->BodySupportMarginImg->
+            value();
+
+    const bool fillHoles =
+        this->BodySupportFillHolesCheckBoxImg->
+            isChecked();
+
+    const bool supportEnabled =
+        this->BodySupportEnabledCheckBoxImg->
+            isChecked();
+
+    const BodySupportSource requestedSource =
+        static_cast<BodySupportSource>(
+            this->BodySupportSourceImg->
+                currentIndex());
+
+    BodySupportSource effectiveSource =
+        requestedSource;
+
+    if (requestedSource ==
+        BodySupportSource::Auto)
+    {
+        effectiveSource =
+            ctNode
+            ? BodySupportSource::CT
+            : BodySupportSource::PET;
+    }
+
+    // PET composite choice.
+    const PETCompositeMode compositeMode =
+        this->BodySupportPETCompositeImg->
+            currentIndex() == 1
+            ? PETCompositeMode::DurationWeightedSum
+            : PETCompositeMode::UnweightedSum;
+
+    vtkSmartPointer<vtkOrientedImageData> ctMask;
+    vtkSmartPointer<vtkOrientedImageData> petMask;
+
+
+    // ------------------------------------------------------------------
+    // Body-support enabled
+    // ------------------------------------------------------------------
+
+    if (supportEnabled)
+    {
+        // --------------------------------------------------------------
+        // CT mask if required.
+        // --------------------------------------------------------------
+
+        const bool needCT =
+            effectiveSource ==
+                BodySupportSource::CT ||
+            effectiveSource ==
+                BodySupportSource::Union ||
+            effectiveSource ==
+                BodySupportSource::Intersection;
+
+        if (needCT)
+        {
+            if (!ctNode)
             {
-              return value == 0.0;
-            });
+                std::cerr
+                    << "Patient support requires CT, "
+                       "but no CT is selected."
+                    << std::endl;
 
-    if (allZero)
+                return false;
+            }
+
+            ctMask =
+                logic->CreateCTBodySupportMask(
+                    ctNode,
+                    petNode,
+                    ctThresholdHU,
+                    ctBodyMarginMm,
+                    fillHoles);
+
+            if (!ctMask)
+            {
+                std::cerr
+                    << "Could not create CT body-support mask."
+                    << std::endl;
+
+                return false;
+            }
+        }
+
+
+        // --------------------------------------------------------------
+        // PET mask if required.
+        // --------------------------------------------------------------
+
+        const bool needPET =
+            effectiveSource ==
+                BodySupportSource::PET ||
+            effectiveSource ==
+                BodySupportSource::Union ||
+            effectiveSource ==
+                BodySupportSource::Intersection;
+
+        if (needPET)
+        {
+            double petThreshold =
+                std::numeric_limits<double>::
+                    quiet_NaN();
+
+            bool usedOtsuFallback =
+                false;
+
+            petMask =
+                logic->CreatePETBodySupportMask(
+                    q->PET_flatten_values,
+                    q->PETdims,
+                    petNode,
+                    q->durations,
+                    compositeMode,
+
+                    // PET is already in PET geometry.
+                    // Keep no extra PET dilation for now.
+                    0.0,
+
+                    fillHoles,
+
+                    // Keep components >= 1% of largest.
+                    // Make this Advanced later.
+                    0.01,
+
+                    &petThreshold,
+                    &usedOtsuFallback);
+
+            if (!petMask)
+            {
+                std::cerr
+                    << "Could not create PET body-support mask."
+                    << std::endl;
+
+                return false;
+            }
+
+            qDebug()
+                << "PET patient support:"
+                << "threshold ="
+                << petThreshold
+                << ", threshold method ="
+                << (usedOtsuFallback
+                        ? "log-Otsu fallback"
+                        : "multiscale log-histogram")
+                << ", composite ="
+                << (compositeMode ==
+                        PETCompositeMode::
+                            DurationWeightedSum
+                        ? "duration-weighted"
+                        : "unweighted");
+        }
+
+
+        // --------------------------------------------------------------
+        // Select / combine final support.
+        // --------------------------------------------------------------
+
+        switch (effectiveSource)
+        {
+            case BodySupportSource::CT:
+            {
+                this->parametricBodySupportImage =
+                    ctMask;
+
+                break;
+            }
+
+            case BodySupportSource::PET:
+            {
+                this->parametricBodySupportImage =
+                    petMask;
+
+                break;
+            }
+
+            case BodySupportSource::Union:
+            {
+                this->parametricBodySupportImage =
+                    logic->CombineBodySupportMasks(
+                        ctMask,
+                        petMask,
+                        BodySupportCombination::Union);
+
+                break;
+            }
+
+            case BodySupportSource::Intersection:
+            {
+                this->parametricBodySupportImage =
+                    logic->CombineBodySupportMasks(
+                        ctMask,
+                        petMask,
+                        BodySupportCombination::Intersection);
+
+                break;
+            }
+
+            default:
+            {
+                return false;
+            }
+        }
+    }
+    else
     {
-      ++excludedCount;
-      continue;
+        // No anatomical patient-support restriction.
+        // Numerical finite/non-zero TAC filtering below still applies.
+        this->parametricBodySupportImage =
+            logic->CreateFullPETSupportMask(
+                petNode);
     }
 
-    this->parametricVoxelMask[v] =
-        static_cast<unsigned char>(1);
+    if (!this->parametricBodySupportImage)
+    {
+        return false;
+    }
 
-    this->parametricFitVoxelIndices.push_back(
-        static_cast<int>(v));
-  }
+    vtkDataArray* supportArray =
+        this->parametricBodySupportImage
+            ->GetPointData()
+            ->GetScalars();
 
-  this->parametricVoxelSelectionPETID =
-      q->petID;
+    if (!supportArray)
+    {
+        return false;
+    }
 
-  qDebug()
-      << "Parametric voxel selection:"
-      << this->parametricFitVoxelIndices.size()
-      << "/"
-      << numberOfVoxels
-      << "voxels eligible;"
-      << excludedCount
-      << "excluded.";
+    if (static_cast<size_t>(
+            supportArray->GetNumberOfTuples()) !=
+        numberOfVoxels)
+    {
+        std::cerr
+            << "Body support mask size mismatch: "
+            << supportArray->GetNumberOfTuples()
+            << " vs "
+            << numberOfVoxels
+            << std::endl;
 
-  return true;
+        return false;
+    }
+
+    this->parametricVoxelMask.assign(
+        numberOfVoxels,
+        static_cast<unsigned char>(0));
+
+    this->parametricFitVoxelIndices.clear();
+
+    this->parametricFitVoxelIndices.reserve(
+        numberOfVoxels);
+
+    // Start from the anatomical support image and turn off voxels that
+    // fail the numerical TAC sanity checks.
+    this->parametricFinalFitMaskImage =
+        vtkSmartPointer<vtkOrientedImageData>::New();
+
+    this->parametricFinalFitMaskImage->DeepCopy(
+        this->parametricBodySupportImage);
+
+    vtkDataArray* finalMaskArray =
+        this->parametricFinalFitMaskImage
+            ->GetPointData()
+            ->GetScalars();
+
+    if (!finalMaskArray)
+    {
+        return false;
+    }
+
+    size_t outsideBodyCount = 0;
+    size_t nonFiniteCount = 0;
+    size_t zeroTacCount = 0;
+
+    for (size_t v = 0;
+         v < numberOfVoxels;
+         ++v)
+    {
+        const bool insideBody =
+            supportArray->GetComponent(
+                static_cast<vtkIdType>(v),
+                0) != 0.0;
+
+        if (!insideBody)
+        {
+            ++outsideBodyCount;
+
+            finalMaskArray->SetComponent(
+                static_cast<vtkIdType>(v),
+                0,
+                0.0);
+
+            continue;
+        }
+
+        const auto& tac =
+            q->PET_flatten_values[v];
+
+        if (tac.empty())
+        {
+            ++zeroTacCount;
+
+            finalMaskArray->SetComponent(
+                static_cast<vtkIdType>(v),
+                0,
+                0.0);
+
+            continue;
+        }
+
+        const bool allFinite =
+            std::all_of(
+                tac.begin(),
+                tac.end(),
+                [](double value)
+                {
+                    return std::isfinite(value);
+                });
+
+        if (!allFinite)
+        {
+            ++nonFiniteCount;
+
+            finalMaskArray->SetComponent(
+                static_cast<vtkIdType>(v),
+                0,
+                0.0);
+
+            continue;
+        }
+
+        const bool allZero =
+            std::all_of(
+                tac.begin(),
+                tac.end(),
+                [](double value)
+                {
+                    return value == 0.0;
+                });
+
+        if (allZero)
+        {
+            ++zeroTacCount;
+
+            finalMaskArray->SetComponent(
+                static_cast<vtkIdType>(v),
+                0,
+                0.0);
+
+            continue;
+        }
+
+        this->parametricVoxelMask[v] =
+            static_cast<unsigned char>(1);
+
+        this->parametricFitVoxelIndices.push_back(
+            static_cast<int>(v));
+
+        finalMaskArray->SetComponent(
+            static_cast<vtkIdType>(v),
+            0,
+            1.0);
+    }
+
+    this->parametricFinalFitMaskImage->Modified();
+
+    this->parametricVoxelSelectionPETID =
+        q->petID;
+
+    this->parametricVoxelSelectionCTID =
+        q->ctID;
+
+    qDebug()
+        << "Parametric fitting support:"
+        << this->parametricFitVoxelIndices.size()
+        << "/"
+        << numberOfVoxels
+        << "voxels eligible;"
+        << outsideBodyCount
+        << "outside body,"
+        << nonFiniteCount
+        << "non-finite,"
+        << zeroTacCount
+        << "zero TAC.";
+
+    return true;
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::
@@ -6841,6 +7564,8 @@ setPETItemID(vtkIdType newPetID)
   q->numberOfTimepoints = 0;
 
   q->petID = newPetID;
+
+  this->updateBodySupportUI();
 }
 
 
@@ -7103,10 +7828,19 @@ void qSlicerDynamicPETModuleWidget::onStuChanged (int index) {
 }
 
 
-void qSlicerDynamicPETModuleWidget::onCTChanged (int index) {
-  Q_D(qSlicerDynamicPETModuleWidget);
-  this->ctID = d->CTSelector->itemData(index).value<vtkIdType>();
-  this->enableTACbutton();
+void qSlicerDynamicPETModuleWidget::onCTChanged(int index)
+{
+    Q_D(qSlicerDynamicPETModuleWidget);
+
+    this->ctID =
+        d->CTSelector
+            ->itemData(index)
+            .value<vtkIdType>();
+
+    d->updateBodySupportUI();
+    d->invalidateParametricVoxelSelection();
+
+    this->enableTACbutton();
 }
 
 void qSlicerDynamicPETModuleWidget::resetPETSelection()
@@ -7444,6 +8178,19 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index) {
 
     scene->AddNode(newSeqNode);
 
+    std::cout
+        << "[DynamicPET] About to synchronize segmentation sequence\n"
+        << "  PET index name = '" << this->sequencePETNode->GetIndexName() << "'\n"
+        << "  PET index unit = '" << this->sequencePETNode->GetIndexUnit() << "'\n"
+        << "  PET index type = " << this->sequencePETNode->GetIndexType() << "\n"
+        << "  SEG index name = '" << newSeqNode->GetIndexName() << "'\n"
+        << "  SEG index unit = '" << newSeqNode->GetIndexUnit() << "'\n"
+        << "  SEG index type = " << newSeqNode->GetIndexType()
+        << std::endl;
+
+    newSeqNode->CopySequenceIndex(
+        this->sequencePETNode);
+
     this->sequenceBrowserPETNode->AddProxyNode(
       segNode,
       newSeqNode,
@@ -7592,11 +8339,6 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
 
 void qSlicerDynamicPETModuleWidget::enableTACbutton() {
   Q_D(qSlicerDynamicPETModuleWidget);
-  if (this->ctID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
-    d->TACbutton->setEnabled(false);
-    this->clearTACdata();
-    return;
-  }
   if (this->petID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
     this->clearTACdata();

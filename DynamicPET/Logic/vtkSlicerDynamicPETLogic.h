@@ -62,6 +62,8 @@
 #include <atomic>
 #include <QMetaObject>
 #include <QPushButton>
+#include <vtkSmartPointer.h>
+#include <vtkImageLogic.h>
 
 struct VoxelStatistics
 {
@@ -127,6 +129,10 @@ struct ModelComparisonResult
 enum class VuongCorrection { None, AIC, BIC };
 
 enum class Tail { TwoSided, Model1Greater, Model2Greater };
+
+enum class PETCompositeMode { UnweightedSum, DurationWeightedSum };
+
+enum class BodySupportCombination { Union, Intersection };
 
 class VTK_SLICER_DYNAMICPET_MODULE_LOGIC_EXPORT vtkSlicerDynamicPETLogic :
   public vtkSlicerModuleLogic
@@ -262,6 +268,39 @@ public:
        QPushButton* stopButton,
        std::atomic<bool>& stopRequested
       );
+  vtkSmartPointer<vtkOrientedImageData>
+  CreateFullPETSupportMask(
+      vtkMRMLScalarVolumeNode* referencePETNode);
+  vtkSmartPointer<vtkOrientedImageData>
+  CreateCTBodySupportMask(
+      vtkMRMLScalarVolumeNode* ctNode,
+      vtkMRMLScalarVolumeNode* referencePETNode,
+      double ctThresholdHU = -500.0,
+      double bodyMarginMm = 5.0,
+      bool fillHoles = true);
+  vtkSmartPointer<vtkOrientedImageData>
+  CreatePETBodySupportMask(
+      const std::vector<std::vector<double>>& voxels,
+      const int dims[3],
+      vtkMRMLScalarVolumeNode* referencePETNode,
+      const std::vector<double>& frameDurations,
+      PETCompositeMode compositeMode,
+      double bodyMarginMm,
+      bool fillHoles,
+      double minComponentFractionOfLargest,
+      double* thresholdOut = nullptr,
+      bool* usedOtsuFallbackOut = nullptr);
+  vtkMRMLSegmentationNode*
+  CreateOrUpdateBodySupportPreview(
+      vtkOrientedImageData* mask,
+      vtkMRMLScalarVolumeNode* referencePETNode,
+      const std::string& nodeName =
+          "SlicerDynamicPET - Fitting Support");
+  vtkSmartPointer<vtkOrientedImageData>
+  CombineBodySupportMasks(
+      vtkOrientedImageData* firstMask,
+      vtkOrientedImageData* secondMask,
+      BodySupportCombination combination);
   vtkMRMLScalarVolumeNode* Flatten2Image(
       const std::vector<double>& flatten_values,
       const int dims[3],

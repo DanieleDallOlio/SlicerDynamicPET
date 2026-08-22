@@ -1653,6 +1653,182 @@
               </layout>
             </item>
 
+            <item>
+              <widget class="ctkCollapsibleButton" name="BodySupportCollapsibleButtonImg">
+                <property name="text">
+                  <string>Patient Support</string>
+                </property>
+                <property name="collapsed">
+                  <bool>false</bool>
+                </property>
+
+                <layout class="QGridLayout" name="BodySupportLayoutImg">
+
+                  <item row="0" column="0" colspan="2">
+                    <widget class="QCheckBox" name="BodySupportEnabledCheckBoxImg">
+                      <property name="text">
+                        <string>Restrict voxelwise fitting to patient body</string>
+                      </property>
+                      <property name="checked">
+                        <bool>true</bool>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="1" column="0" colspan="2">
+                    <widget class="QPushButton" name="BodySupportPreviewButtonImg">
+                      <property name="text">
+                        <string>Preview fitting support</string>
+                      </property>
+                      <property name="toolTip">
+                        <string>Show the voxels that will be included in voxelwise kinetic fitting as a segmentation overlay.</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="2" column="0" colspan="2">
+                    <widget class="ctkCollapsibleButton" name="BodySupportAdvancedCollapsibleButtonImg">
+                      <property name="text">
+                        <string>Advanced</string>
+                      </property>
+                      <property name="collapsed">
+                        <bool>true</bool>
+                      </property>
+
+                      <layout class="QGridLayout" name="BodySupportAdvancedLayoutImg">
+                        <item row="0" column="0">
+                          <widget class="QLabel" name="BodySupportSourceLabelImg">
+                            <property name="text">
+                              <string>Mask source</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="0" column="1">
+                          <widget class="QComboBox" name="BodySupportSourceImg">
+                            <item>
+                              <property name="text">
+                                <string>Auto (CT preferred)</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>CT</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>PET</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>CT + PET - Union</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>CT + PET - Intersection</string>
+                              </property>
+                            </item>
+                          </widget>
+                        </item>
+
+                        <item row="1" column="0">
+                          <widget class="QLabel" name="BodySupportCTThresholdLabelImg">
+                            <property name="text">
+                              <string>CT body threshold</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="1" column="1">
+                          <widget class="QDoubleSpinBox" name="BodySupportCTThresholdImg">
+                            <property name="minimum">
+                              <double>-1024.000000000000000</double>
+                            </property>
+                            <property name="maximum">
+                              <double>3000.000000000000000</double>
+                            </property>
+                            <property name="value">
+                              <double>-500.000000000000000</double>
+                            </property>
+                            <property name="suffix">
+                              <string> HU</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="2" column="0">
+                          <widget class="QLabel" name="BodySupportMarginLabelImg">
+                            <property name="text">
+                              <string>CT body margin</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="2" column="1">
+                          <widget class="QDoubleSpinBox" name="BodySupportMarginImg">
+                            <property name="minimum">
+                              <double>0.000000000000000</double>
+                            </property>
+                            <property name="maximum">
+                              <double>20.000000000000000</double>
+                            </property>
+                            <property name="singleStep">
+                              <double>1.000000000000000</double>
+                            </property>
+                            <property name="value">
+                              <double>5.000000000000000</double>
+                            </property>
+                            <property name="suffix">
+                              <string> mm</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="3" column="0">
+                          <widget class="QLabel" name="BodySupportPETCompositeLabelImg">
+                            <property name="text">
+                              <string>PET composite</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="3" column="1">
+                          <widget class="QComboBox" name="BodySupportPETCompositeImg">
+                            <item>
+                              <property name="text">
+                                <string>Unweighted frame sum</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>Duration-weighted integral</string>
+                              </property>
+                            </item>
+                          </widget>
+                        </item>
+
+                        <item row="4" column="0" colspan="2">
+                          <widget class="QCheckBox" name="BodySupportFillHolesCheckBoxImg">
+                            <property name="text">
+                              <string>Fill enclosed internal cavities</string>
+                            </property>
+                            <property name="checked">
+                              <bool>true</bool>
+                            </property>
+                          </widget>
+                        </item>
+
+                      </layout>
+                    </widget>
+                  </item>
+
+                </layout>
+              </widget>
+            </item>
+
             <!-- Tabs for MTGA and TCM -->
             <item>
               <widget class="QTabWidget" name="ModelsTabWidgetImg">

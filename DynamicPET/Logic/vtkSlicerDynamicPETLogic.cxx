@@ -33,6 +33,22 @@
 #include <Eigen/Dense>
 #include <QThread>
 
+#include <vtkImageThreshold.h>
+#include <vtkImageConnectivityFilter.h>
+#include <vtkImageDilateErode3D.h>
+#include <vtkMatrix4x4.h>
+#include <vtkMRMLSegmentationDisplayNode.h>
+#include <vtkMRMLTransformNode.h>
+#include <vtkAlgorithmOutput.h>
+
+#include <vtkImageOpenClose3D.h>
+#include <vtkIdTypeArray.h>
+
+#include <array>
+#include <cmath>
+#include <numeric>
+#include <limits>
+
 // define M_PI in case of Win
 #ifdef _WIN32
     #ifndef M_PI
@@ -40,6 +56,549 @@
     #endif
 #endif
 
+
+namespace
+{
+
+std::vector<double> GaussianSmooth1D(
+    const std::vector<double>& input,
+    double sigma)
+{
+    if (input.empty() || sigma <= 0.0)
+    {
+        return input;
+    }
+
+    const int radius =
+        std::max(
+            1,
+            static_cast<int>(
+                std::ceil(3.0 * sigma)));
+
+    std::vector<double> kernel(
+        2 * radius + 1);
+
+    double kernelSum = 0.0;
+
+    for (int k = -radius;
+         k <= radius;
+         ++k)
+    {
+        const double x =
+            static_cast<double>(k) /
+            sigma;
+
+        const double value =
+            std::exp(-0.5 * x * x);
+
+        kernel[k + radius] =
+            value;
+
+        kernelSum += value;
+    }
+
+    for (double& value : kernel)
+    {
+        value /= kernelSum;
+    }
+
+    std::vector<double> output(
+        input.size(),
+        0.0);
+
+    const int n =
+        static_cast<int>(
+            input.size());
+
+    for (int i = 0; i < n; ++i)
+    {
+        double value = 0.0;
+
+        for (int k = -radius;
+             k <= radius;
+             ++k)
+        {
+            const int index =
+                std::max(
+                    0,
+                    std::min(
+                        n - 1,
+                        i + k));
+
+            value +=
+                kernel[k + radius] *
+                input[index];
+        }
+
+        output[i] = value;
+    }
+
+    return output;
+}
+
+
+std::vector<int> FindSignificantPeaks(
+    const std::vector<double>& values,
+    double minimumRelativeHeight)
+{
+    std::vector<int> peaks;
+
+    if (values.size() < 3)
+    {
+        return peaks;
+    }
+
+    const double maximum =
+        *std::max_element(
+            values.begin(),
+            values.end());
+
+    if (!(maximum > 0.0))
+    {
+        return peaks;
+    }
+
+    const double minimumHeight =
+        minimumRelativeHeight *
+        maximum;
+
+    for (size_t i = 1;
+         i + 1 < values.size();
+         ++i)
+    {
+        if (values[i] >= minimumHeight &&
+            values[i] > values[i - 1] &&
+            values[i] >= values[i + 1])
+        {
+            peaks.push_back(
+                static_cast<int>(i));
+        }
+    }
+
+    return peaks;
+}
+
+
+std::vector<int> FindLocalMinima(
+    const std::vector<double>& values)
+{
+    std::vector<int> minima;
+
+    for (size_t i = 1;
+         i + 1 < values.size();
+         ++i)
+    {
+        if (values[i] <= values[i - 1] &&
+            values[i] < values[i + 1])
+        {
+            minima.push_back(
+                static_cast<int>(i));
+        }
+    }
+
+    return minima;
+}
+
+
+int FindValleyBetween(
+    const std::vector<double>& values,
+    int leftPeak,
+    int rightPeak)
+{
+    if (leftPeak < 0 ||
+        rightPeak <= leftPeak + 1 ||
+        rightPeak >=
+            static_cast<int>(values.size()))
+    {
+        return -1;
+    }
+
+    int bestIndex =
+        leftPeak + 1;
+
+    double bestValue =
+        values[bestIndex];
+
+    for (int i = leftPeak + 2;
+         i < rightPeak;
+         ++i)
+    {
+        if (values[i] < bestValue)
+        {
+            bestValue =
+                values[i];
+
+            bestIndex =
+                i;
+        }
+    }
+
+    return bestIndex;
+}
+
+
+int ComputeOtsuHistogramThreshold(
+    const std::vector<double>& histogram)
+{
+    if (histogram.empty())
+    {
+        return -1;
+    }
+
+    double total = 0.0;
+    double totalWeightedIndex = 0.0;
+
+    for (size_t i = 0;
+         i < histogram.size();
+         ++i)
+    {
+        total += histogram[i];
+
+        totalWeightedIndex +=
+            static_cast<double>(i) *
+            histogram[i];
+    }
+
+    if (!(total > 0.0))
+    {
+        return -1;
+    }
+
+    double backgroundWeight = 0.0;
+    double backgroundWeightedIndex = 0.0;
+
+    double bestVariance = -1.0;
+    int bestThreshold = -1;
+
+    for (size_t i = 0;
+         i + 1 < histogram.size();
+         ++i)
+    {
+        backgroundWeight +=
+            histogram[i];
+
+        if (backgroundWeight <= 0.0)
+        {
+            continue;
+        }
+
+        const double foregroundWeight =
+            total -
+            backgroundWeight;
+
+        if (foregroundWeight <= 0.0)
+        {
+            break;
+        }
+
+        backgroundWeightedIndex +=
+            static_cast<double>(i) *
+            histogram[i];
+
+        const double backgroundMean =
+            backgroundWeightedIndex /
+            backgroundWeight;
+
+        const double foregroundMean =
+            (totalWeightedIndex -
+             backgroundWeightedIndex) /
+            foregroundWeight;
+
+        const double delta =
+            backgroundMean -
+            foregroundMean;
+
+        const double betweenClassVariance =
+            backgroundWeight *
+            foregroundWeight *
+            delta *
+            delta;
+
+        if (betweenClassVariance >
+            bestVariance)
+        {
+            bestVariance =
+                betweenClassVariance;
+
+            bestThreshold =
+                static_cast<int>(i);
+        }
+    }
+
+    return bestThreshold;
+}
+
+
+bool ComputeMultiscaleLogPETThreshold(
+    const std::vector<double>& composite,
+    double& threshold,
+    bool& usedOtsuFallback)
+{
+    constexpr int numberOfBins = 512;
+
+    // This small peak-height criterion prevents tiny histogram
+    // fluctuations from becoming anatomical modes.
+    constexpr double minimumPeakFraction = 0.005;
+
+    const std::array<double, 5> sigmaLevels =
+    {
+        16.0,
+        8.0,
+        4.0,
+        2.0,
+        1.0
+    };
+
+    double minimumLog =
+        std::numeric_limits<double>::infinity();
+
+    double maximumLog =
+        -std::numeric_limits<double>::infinity();
+
+    size_t positiveFiniteCount = 0;
+
+    // First pass: determine log-intensity range.
+    for (double value : composite)
+    {
+        if (!std::isfinite(value) ||
+            value <= 0.0)
+        {
+            continue;
+        }
+
+        const double logValue =
+            std::log(value);
+
+        minimumLog =
+            std::min(
+                minimumLog,
+                logValue);
+
+        maximumLog =
+            std::max(
+                maximumLog,
+                logValue);
+
+        ++positiveFiniteCount;
+    }
+
+    if (positiveFiniteCount < 2 ||
+        !std::isfinite(minimumLog) ||
+        !std::isfinite(maximumLog) ||
+        maximumLog <= minimumLog)
+    {
+        return false;
+    }
+
+    const double binWidth =
+        (maximumLog - minimumLog) /
+        static_cast<double>(
+            numberOfBins);
+
+    if (!(binWidth > 0.0))
+    {
+        return false;
+    }
+
+    std::vector<double> histogram(
+        numberOfBins,
+        0.0);
+
+    // Second pass: histogram of log-positive composite values.
+    for (double value : composite)
+    {
+        if (!std::isfinite(value) ||
+            value <= 0.0)
+        {
+            continue;
+        }
+
+        const double logValue =
+            std::log(value);
+
+        int bin =
+            static_cast<int>(
+                (logValue - minimumLog) /
+                binWidth);
+
+        bin =
+            std::max(
+                0,
+                std::min(
+                    numberOfBins - 1,
+                    bin));
+
+        histogram[bin] += 1.0;
+    }
+
+    // Always prepare a valid fallback.
+    const int otsuBin =
+        ComputeOtsuHistogramThreshold(
+            histogram);
+
+    if (otsuBin < 0)
+    {
+        return false;
+    }
+
+    const double otsuLogThreshold =
+        minimumLog +
+        (static_cast<double>(otsuBin) +
+         0.5) *
+        binWidth;
+
+    int trackedValley = -1;
+
+    std::vector<int>
+        trackedValleys;
+
+    for (double sigma :
+         sigmaLevels)
+    {
+        const std::vector<double> smoothed =
+            GaussianSmooth1D(
+                histogram,
+                sigma);
+
+        const std::vector<int> peaks =
+            FindSignificantPeaks(
+                smoothed,
+                minimumPeakFraction);
+
+        if (trackedValley < 0)
+        {
+            if (peaks.size() < 2)
+            {
+                continue;
+            }
+
+            // The leftmost persistent mode is treated as
+            // reconstructed background, the next as patient signal.
+            const int backgroundPeak =
+                peaks[0];
+
+            const int tissuePeak =
+                peaks[1];
+
+            const int candidate =
+                FindValleyBetween(
+                    smoothed,
+                    backgroundPeak,
+                    tissuePeak);
+
+            if (candidate < 0)
+            {
+                continue;
+            }
+
+            // Reject an almost-flat "valley".
+            const double surroundingPeakHeight =
+                std::min(
+                    smoothed[backgroundPeak],
+                    smoothed[tissuePeak]);
+
+            if (!(smoothed[candidate] <
+                  0.95 *
+                  surroundingPeakHeight))
+            {
+                continue;
+            }
+
+            trackedValley =
+                candidate;
+
+            trackedValleys.push_back(
+                candidate);
+
+            continue;
+        }
+
+        // Follow the valley trajectory as the scale becomes finer.
+        const std::vector<int> minima =
+            FindLocalMinima(
+                smoothed);
+
+        int bestCandidate = -1;
+        int bestDistance =
+            std::numeric_limits<int>::max();
+
+        const int maximumShift =
+            std::max(
+                4,
+                static_cast<int>(
+                    std::ceil(
+                        2.5 * sigma)));
+
+        for (int candidate : minima)
+        {
+            const int distance =
+                std::abs(
+                    candidate -
+                    trackedValley);
+
+            if (distance <=
+                    maximumShift &&
+                distance <
+                    bestDistance)
+            {
+                bestDistance =
+                    distance;
+
+                bestCandidate =
+                    candidate;
+            }
+        }
+
+        if (bestCandidate >= 0)
+        {
+            trackedValley =
+                bestCandidate;
+
+            trackedValleys.push_back(
+                bestCandidate);
+        }
+    }
+
+    // Require persistence over several scales.
+    if (trackedValleys.size() >= 3)
+    {
+        std::sort(
+            trackedValleys.begin(),
+            trackedValleys.end());
+
+        const int medianBin =
+            trackedValleys[
+                trackedValleys.size() / 2];
+
+        const double logThreshold =
+            minimumLog +
+            (static_cast<double>(medianBin) +
+             0.5) *
+            binWidth;
+
+        threshold =
+            std::exp(logThreshold);
+
+        usedOtsuFallback =
+            false;
+
+        return std::isfinite(threshold) &&
+               threshold > 0.0;
+    }
+
+    // No sufficiently stable scale-space trajectory.
+    threshold =
+        std::exp(
+            otsuLogThreshold);
+
+    usedOtsuFallback =
+        true;
+
+    return std::isfinite(threshold) &&
+           threshold > 0.0;
+}
+
+} // end anonymous namespace
 
 static const std::map<std::string, std::set<std::string>> MODEL_PARAMS = {
   {"1TiCM",  {"K1", "vb"}},
@@ -1886,6 +2445,1078 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
   }
 }
 
+vtkSmartPointer<vtkOrientedImageData>
+vtkSlicerDynamicPETLogic::
+CreateFullPETSupportMask(
+    vtkMRMLScalarVolumeNode* referencePETNode)
+{
+    if (!referencePETNode)
+    {
+        return nullptr;
+    }
+
+    vtkMRMLTransformNode* referenceParentTransform =
+        referencePETNode->
+            GetParentTransformNode();
+
+    vtkSmartPointer<vtkOrientedImageData> petOriented =
+        vtkSmartPointer<vtkOrientedImageData>::Take(
+            vtkSlicerSegmentationsModuleLogic::
+                CreateOrientedImageDataFromVolumeNode(
+                    referencePETNode,
+                    referenceParentTransform));
+
+    if (!petOriented)
+    {
+        return nullptr;
+    }
+
+    vtkSmartPointer<vtkOrientedImageData> mask =
+        vtkSmartPointer<vtkOrientedImageData>::New();
+
+    mask->SetExtent(
+        petOriented->GetExtent());
+
+    mask->AllocateScalars(
+        VTK_UNSIGNED_CHAR,
+        1);
+
+    vtkNew<vtkMatrix4x4> imageToWorld;
+
+    petOriented->GetImageToWorldMatrix(
+        imageToWorld);
+
+    mask->SetImageToWorldMatrix(
+        imageToWorld);
+
+    const vtkIdType numberOfVoxels =
+        mask->GetNumberOfPoints();
+
+    unsigned char* ptr =
+        static_cast<unsigned char*>(
+            mask->GetScalarPointer());
+
+    if (!ptr)
+    {
+        return nullptr;
+    }
+
+    std::fill(
+        ptr,
+        ptr + numberOfVoxels,
+        static_cast<unsigned char>(1));
+
+    mask->Modified();
+
+    return mask;
+}
+
+vtkSmartPointer<vtkOrientedImageData>
+vtkSlicerDynamicPETLogic::CreateCTBodySupportMask(
+    vtkMRMLScalarVolumeNode* ctNode,
+    vtkMRMLScalarVolumeNode* referencePETNode,
+    double ctThresholdHU,
+    double bodyMarginMm,
+    bool fillHoles)
+{
+    if (!ctNode || !referencePETNode)
+    {
+        std::cerr
+            << "CreateCTBodySupportMask: missing CT or PET node."
+            << std::endl;
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------
+    // 1. Convert both MRML volumes to oriented image data in the same
+    //    parent-transform coordinate system.
+    // ---------------------------------------------------------------------
+
+    vtkMRMLTransformNode* referenceParentTransform =
+        referencePETNode->GetParentTransformNode();
+
+    vtkSmartPointer<vtkOrientedImageData> ctOriented =
+        vtkSmartPointer<vtkOrientedImageData>::Take(
+            vtkSlicerSegmentationsModuleLogic::
+                CreateOrientedImageDataFromVolumeNode(
+                    ctNode,
+                    referenceParentTransform));
+
+    vtkSmartPointer<vtkOrientedImageData> petOriented =
+        vtkSmartPointer<vtkOrientedImageData>::Take(
+            vtkSlicerSegmentationsModuleLogic::
+                CreateOrientedImageDataFromVolumeNode(
+                    referencePETNode,
+                    referenceParentTransform));
+
+    if (!ctOriented || !petOriented)
+    {
+        std::cerr
+            << "CreateCTBodySupportMask: "
+               "could not create oriented image data."
+            << std::endl;
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------
+    // 2. Resample CT onto the PET voxel grid.
+    //
+    // CT is continuous data, therefore use linear interpolation.
+    //
+    // IMPORTANT: background is -1000 HU, not 0 HU.
+    // Using 0 would accidentally classify areas outside the CT FOV as body
+    // when applying a -500 HU threshold.
+    // ---------------------------------------------------------------------
+
+    vtkNew<vtkOrientedImageData> ctOnPETGrid;
+
+    const bool resampleOK =
+        vtkOrientedImageDataResample::
+            ResampleOrientedImageToReferenceOrientedImage(
+                ctOriented,
+                petOriented,
+                ctOnPETGrid,
+                true,       // linear interpolation
+                false,      // no padding beyond PET geometry
+                nullptr,
+                -1000.0);   // outside-CT value in HU
+
+    if (!resampleOK)
+    {
+        std::cerr
+            << "CreateCTBodySupportMask: CT-to-PET resampling failed."
+            << std::endl;
+        return nullptr;
+    }
+
+    // ---------------------------------------------------------------------
+    // 3. CT body candidate:
+    //
+    //       HU >= threshold -> 1
+    //       otherwise       -> 0
+    // ---------------------------------------------------------------------
+
+    vtkNew<vtkImageThreshold> threshold;
+
+    threshold->SetInputData(ctOnPETGrid);
+    threshold->ThresholdByUpper(ctThresholdHU);
+
+    threshold->SetInValue(1);
+    threshold->SetOutValue(0);
+
+    threshold->SetOutputScalarType(VTK_UNSIGNED_CHAR);
+
+    threshold->ReplaceInOn();
+    threshold->ReplaceOutOn();
+
+    threshold->Update();
+
+    // ---------------------------------------------------------------------
+    // 4. Keep the dominant connected body component.
+    //
+    // This removes most disconnected table/hardware/background structures.
+    //
+    // Note: if a table is physically connected to the body mask then a pure
+    // connected-component approach cannot separate it. For our conservative
+    // fitting-support purpose, keeping a few such false-positive voxels is
+    // preferable to removing real anatomy.
+    // ---------------------------------------------------------------------
+
+    vtkNew<vtkImageConnectivityFilter> bodyConnectivity;
+
+    bodyConnectivity->SetInputConnection(
+        threshold->GetOutputPort());
+
+    bodyConnectivity->SetScalarRange(
+        1.0,
+        1.0);
+
+    bodyConnectivity->
+        SetExtractionModeToLargestRegion();
+
+    bodyConnectivity->
+        SetLabelModeToConstantValue();
+
+    bodyConnectivity->
+        SetLabelConstantValue(1);
+
+    bodyConnectivity->Update();
+
+    vtkAlgorithmOutput* currentMaskPort =
+        bodyConnectivity->GetOutputPort();
+
+    // ---------------------------------------------------------------------
+    // 5. Fill enclosed holes.
+    //
+    // Do this using connectivity rather than hand-written flood filling:
+    //
+    // body         = 1
+    // background   = 0
+    //
+    // invert -> find largest connected background (outside air)
+    //        -> invert that result
+    //
+    // Any background cavity that is NOT connected to external air becomes
+    // foreground, thereby recovering lung/internal cavities.
+    // ---------------------------------------------------------------------
+
+    vtkNew<vtkImageThreshold> invertBody;
+
+    vtkNew<vtkImageConnectivityFilter> exteriorBackground;
+
+    vtkNew<vtkImageThreshold> filledBody;
+
+    if (fillHoles)
+    {
+        invertBody->SetInputConnection(
+            bodyConnectivity->GetOutputPort());
+
+        // Original zero-valued background becomes one.
+        invertBody->ThresholdByLower(0.0);
+        invertBody->SetInValue(1);
+        invertBody->SetOutValue(0);
+        invertBody->SetOutputScalarType(
+            VTK_UNSIGNED_CHAR);
+        invertBody->ReplaceInOn();
+        invertBody->ReplaceOutOn();
+
+        exteriorBackground->SetInputConnection(
+            invertBody->GetOutputPort());
+
+        exteriorBackground->SetScalarRange(
+            1.0,
+            1.0);
+
+        exteriorBackground->
+            SetExtractionModeToLargestRegion();
+
+        exteriorBackground->
+            SetLabelModeToConstantValue();
+
+        exteriorBackground->
+            SetLabelConstantValue(1);
+
+        // Invert exterior background:
+        //
+        // external air 1 -> 0
+        // body          0 -> 1
+        // internal hole 0 -> 1
+        filledBody->SetInputConnection(
+            exteriorBackground->GetOutputPort());
+
+        filledBody->ThresholdByLower(0.0);
+        filledBody->SetInValue(1);
+        filledBody->SetOutValue(0);
+        filledBody->SetOutputScalarType(
+            VTK_UNSIGNED_CHAR);
+        filledBody->ReplaceInOn();
+        filledBody->ReplaceOutOn();
+
+        filledBody->Update();
+
+        currentMaskPort =
+            filledBody->GetOutputPort();
+    }
+
+    // ---------------------------------------------------------------------
+    // 6. Dilate by physical margin.
+    //
+    // vtkImageDilateErode3D uses voxel kernel dimensions, therefore convert
+    // millimetres separately for X/Y/Z.
+    // ---------------------------------------------------------------------
+
+    vtkNew<vtkImageDilateErode3D> dilate;
+
+    if (bodyMarginMm > 0.0)
+    {
+        const double* spacing =
+            petOriented->GetSpacing();
+
+        int radius[3] = {0, 0, 0};
+
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            const double safeSpacing =
+                std::max(spacing[axis], 1e-6);
+
+            radius[axis] =
+                static_cast<int>(
+                    std::ceil(
+                        bodyMarginMm /
+                        safeSpacing));
+        }
+
+        dilate->SetInputConnection(
+            currentMaskPort);
+
+        dilate->SetDilateValue(1);
+        dilate->SetErodeValue(0);
+
+        dilate->SetKernelSize(
+            2 * radius[0] + 1,
+            2 * radius[1] + 1,
+            2 * radius[2] + 1);
+
+        dilate->Update();
+
+        currentMaskPort =
+            dilate->GetOutputPort();
+    }
+
+    // ---------------------------------------------------------------------
+    // 7. Convert back to vtkOrientedImageData and restore PET geometry.
+    // ---------------------------------------------------------------------
+
+    vtkAlgorithm* finalAlgorithm =
+        currentMaskPort->GetProducer();
+
+    finalAlgorithm->Update();
+
+    vtkImageData* finalImage =
+        vtkImageData::SafeDownCast(
+            finalAlgorithm->GetOutputDataObject(0));
+
+    if (!finalImage)
+    {
+        std::cerr
+            << "CreateCTBodySupportMask: "
+               "final binary image is invalid."
+            << std::endl;
+        return nullptr;
+    }
+
+    vtkSmartPointer<vtkOrientedImageData> result =
+        vtkSmartPointer<vtkOrientedImageData>::New();
+
+    result->DeepCopy(finalImage);
+
+    vtkNew<vtkMatrix4x4> petImageToWorld;
+
+    petOriented->GetImageToWorldMatrix(
+        petImageToWorld);
+
+    result->SetImageToWorldMatrix(
+        petImageToWorld);
+
+    return result;
+}
+
+vtkSmartPointer<vtkOrientedImageData>
+vtkSlicerDynamicPETLogic::
+CreatePETBodySupportMask(
+    const std::vector<std::vector<double>>& voxels,
+    const int dims[3],
+    vtkMRMLScalarVolumeNode* referencePETNode,
+    const std::vector<double>& frameDurations,
+    PETCompositeMode compositeMode,
+    double bodyMarginMm,
+    bool fillHoles,
+    double minComponentFractionOfLargest,
+    double* thresholdOut,
+    bool* usedOtsuFallbackOut)
+{
+    if (!referencePETNode ||
+        voxels.empty())
+    {
+        return nullptr;
+    }
+
+    const size_t numberOfVoxels =
+        voxels.size();
+
+    const size_t numberOfFrames =
+        voxels.front().size();
+
+    const size_t expectedVoxels =
+        static_cast<size_t>(dims[0]) *
+        static_cast<size_t>(dims[1]) *
+        static_cast<size_t>(dims[2]);
+
+    if (numberOfVoxels != expectedVoxels ||
+        numberOfFrames == 0)
+    {
+        std::cerr
+            << "CreatePETBodySupportMask: "
+               "invalid PET dimensions."
+            << std::endl;
+
+        return nullptr;
+    }
+
+    const bool durationWeighted =
+        compositeMode ==
+        PETCompositeMode::
+            DurationWeightedSum;
+
+    if (durationWeighted &&
+        frameDurations.size() !=
+            numberOfFrames)
+    {
+        std::cerr
+            << "CreatePETBodySupportMask: "
+               "duration vector does not match "
+               "the number of PET frames."
+            << std::endl;
+
+        return nullptr;
+    }
+
+    // ------------------------------------------------------------------
+    // 1. Composite PET.
+    //
+    // Maroy/Zbib default:
+    //     sum_t PET(v,t)
+    //
+    // Optional SlicerDynamicPET variant:
+    //     sum_t PET(v,t) * duration(t)
+    // ------------------------------------------------------------------
+
+    std::vector<double> composite(
+        numberOfVoxels,
+        0.0);
+
+#ifdef HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (vtkIdType v = 0;
+         v <
+         static_cast<vtkIdType>(
+             numberOfVoxels);
+         ++v)
+    {
+        const auto& tac =
+            voxels[
+                static_cast<size_t>(v)];
+
+        double sum = 0.0;
+
+        const size_t usableFrames =
+            std::min(
+                numberOfFrames,
+                tac.size());
+
+        for (size_t frame = 0;
+             frame < usableFrames;
+             ++frame)
+        {
+            const double value =
+                tac[frame];
+
+            if (!std::isfinite(value))
+            {
+                continue;
+            }
+
+            if (durationWeighted)
+            {
+                sum +=
+                    value *
+                    frameDurations[frame];
+            }
+            else
+            {
+                sum += value;
+            }
+        }
+
+        composite[
+            static_cast<size_t>(v)] =
+            sum;
+    }
+
+    // ------------------------------------------------------------------
+    // 2. Maroy/Zbib-style multiscale threshold.
+    //    Fall back to log-domain Otsu if scale-space tracking fails.
+    // ------------------------------------------------------------------
+
+    double threshold =
+        std::numeric_limits<double>::
+            quiet_NaN();
+
+    bool usedOtsuFallback =
+        false;
+
+    if (!ComputeMultiscaleLogPETThreshold(
+            composite,
+            threshold,
+            usedOtsuFallback))
+    {
+        std::cerr
+            << "CreatePETBodySupportMask: "
+               "could not determine a PET body threshold."
+            << std::endl;
+
+        return nullptr;
+    }
+
+    if (thresholdOut)
+    {
+        *thresholdOut =
+            threshold;
+    }
+
+    if (usedOtsuFallbackOut)
+    {
+        *usedOtsuFallbackOut =
+            usedOtsuFallback;
+    }
+
+    std::cout
+        << "PET body-support threshold = "
+        << threshold
+        << " ("
+        << (usedOtsuFallback
+                ? "log-Otsu fallback"
+                : "multiscale log-histogram")
+        << ", "
+        << (durationWeighted
+                ? "duration-weighted sum"
+                : "unweighted sum")
+        << ")"
+        << std::endl;
+
+    // ------------------------------------------------------------------
+    // 3. Obtain PET physical geometry.
+    // ------------------------------------------------------------------
+
+    vtkMRMLTransformNode*
+        referenceParentTransform =
+            referencePETNode->
+                GetParentTransformNode();
+
+    vtkSmartPointer<vtkOrientedImageData>
+        petOriented =
+            vtkSmartPointer<
+                vtkOrientedImageData>::Take(
+                vtkSlicerSegmentationsModuleLogic::
+                    CreateOrientedImageDataFromVolumeNode(
+                        referencePETNode,
+                        referenceParentTransform));
+
+    if (!petOriented)
+    {
+        return nullptr;
+    }
+
+    vtkNew<vtkOrientedImageData>
+        candidateMask;
+
+    candidateMask->SetExtent(
+        petOriented->GetExtent());
+
+    candidateMask->AllocateScalars(
+        VTK_UNSIGNED_CHAR,
+        1);
+
+    vtkNew<vtkMatrix4x4>
+        petImageToWorld;
+
+    petOriented->
+        GetImageToWorldMatrix(
+            petImageToWorld);
+
+    candidateMask->
+        SetImageToWorldMatrix(
+            petImageToWorld);
+
+    unsigned char* maskPointer =
+        static_cast<unsigned char*>(
+            candidateMask->
+                GetScalarPointer());
+
+    if (!maskPointer)
+    {
+        return nullptr;
+    }
+
+#ifdef HAVE_OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+    for (vtkIdType v = 0;
+         v <
+         static_cast<vtkIdType>(
+             numberOfVoxels);
+         ++v)
+    {
+        const double value =
+            composite[
+                static_cast<size_t>(v)];
+
+        maskPointer[v] =
+            (std::isfinite(value) &&
+             value >= threshold)
+                ? static_cast<unsigned char>(1)
+                : static_cast<unsigned char>(0);
+    }
+
+    candidateMask->Modified();
+
+    // ------------------------------------------------------------------
+    // 4. Small 3-D closing.
+    //
+    // vtkImageOpenClose3D performs proper binary closing using the VTK
+    // implementation instead of hand-coded morphology.
+    // ------------------------------------------------------------------
+
+    vtkNew<vtkImageOpenClose3D>
+        closing;
+
+    closing->SetInputData(
+        candidateMask);
+
+    closing->SetKernelSize(
+        3,
+        3,
+        3);
+
+    closing->SetCloseValue(1);
+    closing->SetOpenValue(0);
+
+    closing->Update();
+
+    // ------------------------------------------------------------------
+    // 5. Measure connected-component sizes.
+    // ------------------------------------------------------------------
+
+    vtkNew<vtkImageConnectivityFilter>
+        inspectComponents;
+
+    inspectComponents->SetInputConnection(
+        closing->GetOutputPort());
+
+    inspectComponents->SetScalarRange(
+        1.0,
+        1.0);
+
+    inspectComponents->
+        SetExtractionModeToAllRegions();
+
+    inspectComponents->
+        SetLabelModeToSizeRank();
+
+    inspectComponents->Update();
+
+    vtkIdTypeArray* regionSizes =
+        inspectComponents->
+            GetExtractedRegionSizes();
+
+    if (!regionSizes ||
+        regionSizes->GetNumberOfValues() == 0)
+    {
+        return nullptr;
+    }
+
+    vtkIdType largestRegionSize = 0;
+
+    for (vtkIdType i = 0;
+         i <
+         regionSizes->GetNumberOfValues();
+         ++i)
+    {
+        largestRegionSize =
+            std::max(
+                largestRegionSize,
+                regionSizes->GetValue(i));
+    }
+
+    const double safeFraction =
+        std::max(
+            0.0,
+            std::min(
+                1.0,
+                minComponentFractionOfLargest));
+
+    const vtkIdType minimumRegionSize =
+        std::max<vtkIdType>(
+            1,
+            static_cast<vtkIdType>(
+                std::ceil(
+                    safeFraction *
+                    static_cast<double>(
+                        largestRegionSize))));
+
+    // ------------------------------------------------------------------
+    // 6. Retain all sufficiently large components.
+    //
+    // This is intentionally NOT "largest component only": disconnected
+    // arms/hands can therefore survive.
+    // ------------------------------------------------------------------
+
+    vtkNew<vtkImageConnectivityFilter>
+        bodyComponents;
+
+    bodyComponents->SetInputConnection(
+        closing->GetOutputPort());
+
+    bodyComponents->SetScalarRange(
+        1.0,
+        1.0);
+
+    bodyComponents->
+        SetExtractionModeToAllRegions();
+
+    bodyComponents->SetSizeRange(
+        minimumRegionSize,
+        std::numeric_limits<
+            vtkIdType>::max());
+
+    bodyComponents->
+        SetLabelModeToConstantValue();
+
+    bodyComponents->
+        SetLabelConstantValue(1);
+
+    bodyComponents->Update();
+
+    vtkAlgorithmOutput* currentMaskPort =
+        bodyComponents->
+            GetOutputPort();
+
+    // ------------------------------------------------------------------
+    // 7. Fill enclosed cavities.
+    // ------------------------------------------------------------------
+
+    vtkNew<vtkImageThreshold>
+        invertBody;
+
+    vtkNew<vtkImageConnectivityFilter>
+        exteriorBackground;
+
+    vtkNew<vtkImageThreshold>
+        filledBody;
+
+    if (fillHoles)
+    {
+        invertBody->SetInputConnection(
+            currentMaskPort);
+
+        invertBody->ThresholdByLower(
+            0.0);
+
+        invertBody->SetInValue(1);
+        invertBody->SetOutValue(0);
+
+        invertBody->SetOutputScalarType(
+            VTK_UNSIGNED_CHAR);
+
+        invertBody->ReplaceInOn();
+        invertBody->ReplaceOutOn();
+
+        exteriorBackground->
+            SetInputConnection(
+                invertBody->
+                    GetOutputPort());
+
+        exteriorBackground->
+            SetScalarRange(
+                1.0,
+                1.0);
+
+        exteriorBackground->
+            SetExtractionModeToLargestRegion();
+
+        exteriorBackground->
+            SetLabelModeToConstantValue();
+
+        exteriorBackground->
+            SetLabelConstantValue(1);
+
+        filledBody->SetInputConnection(
+            exteriorBackground->
+                GetOutputPort());
+
+        filledBody->ThresholdByLower(
+            0.0);
+
+        filledBody->SetInValue(1);
+        filledBody->SetOutValue(0);
+
+        filledBody->SetOutputScalarType(
+            VTK_UNSIGNED_CHAR);
+
+        filledBody->ReplaceInOn();
+        filledBody->ReplaceOutOn();
+
+        filledBody->Update();
+
+        currentMaskPort =
+            filledBody->GetOutputPort();
+    }
+
+    // ------------------------------------------------------------------
+    // 8. Optional physical margin.
+    // ------------------------------------------------------------------
+
+    vtkNew<vtkImageDilateErode3D>
+        dilate;
+
+    if (bodyMarginMm > 0.0)
+    {
+        const double* spacing =
+            petOriented->GetSpacing();
+
+        int radius[3] =
+        {
+            0,
+            0,
+            0
+        };
+
+        for (int axis = 0;
+             axis < 3;
+             ++axis)
+        {
+            const double safeSpacing =
+                std::max(
+                    spacing[axis],
+                    1e-6);
+
+            radius[axis] =
+                static_cast<int>(
+                    std::ceil(
+                        bodyMarginMm /
+                        safeSpacing));
+        }
+
+        dilate->SetInputConnection(
+            currentMaskPort);
+
+        dilate->SetDilateValue(1);
+        dilate->SetErodeValue(0);
+
+        dilate->SetKernelSize(
+            2 * radius[0] + 1,
+            2 * radius[1] + 1,
+            2 * radius[2] + 1);
+
+        dilate->Update();
+
+        currentMaskPort =
+            dilate->GetOutputPort();
+    }
+
+    vtkAlgorithm* finalAlgorithm =
+        currentMaskPort->
+            GetProducer();
+
+    finalAlgorithm->Update();
+
+    vtkImageData* finalImage =
+        vtkImageData::SafeDownCast(
+            finalAlgorithm->
+                GetOutputDataObject(0));
+
+    if (!finalImage)
+    {
+        return nullptr;
+    }
+
+    vtkSmartPointer<
+        vtkOrientedImageData> result =
+            vtkSmartPointer<
+                vtkOrientedImageData>::New();
+
+    result->DeepCopy(
+        finalImage);
+
+    result->SetImageToWorldMatrix(
+        petImageToWorld);
+
+    return result;
+}
+
+vtkMRMLSegmentationNode*
+vtkSlicerDynamicPETLogic::CreateOrUpdateBodySupportPreview(
+    vtkOrientedImageData* mask,
+    vtkMRMLScalarVolumeNode* referencePETNode,
+    const std::string& nodeName)
+{
+    if (!mask || !referencePETNode)
+    {
+        return nullptr;
+    }
+
+    vtkMRMLScene* scene =
+        this->GetMRMLScene();
+
+    if (!scene)
+    {
+        return nullptr;
+    }
+
+    // Remove previous debug/preview node.
+    vtkMRMLSegmentationNode* previous =
+        vtkMRMLSegmentationNode::SafeDownCast(
+            scene->GetFirstNodeByName(
+                nodeName.c_str()));
+
+    if (previous)
+    {
+        scene->RemoveNode(previous);
+    }
+
+    vtkMRMLSegmentationNode* segmentationNode =
+        vtkMRMLSegmentationNode::SafeDownCast(
+            scene->AddNewNodeByClass(
+                "vtkMRMLSegmentationNode",
+                nodeName.c_str()));
+
+    if (!segmentationNode)
+    {
+        return nullptr;
+    }
+
+    segmentationNode->SetAttribute(
+        "SlicerDynamicPET.InternalNode",
+        "1");
+
+    segmentationNode->
+        SetReferenceImageGeometryParameterFromVolumeNode(
+            referencePETNode);
+
+    segmentationNode->CreateDefaultDisplayNodes();
+
+    double color[3] =
+    {
+        0.2,
+        0.9,
+        0.3
+    };
+
+    const std::string segmentID =
+        segmentationNode->
+            AddSegmentFromBinaryLabelmapRepresentation(
+                mask,
+                "Fitting support",
+                color);
+
+    if (segmentID.empty())
+    {
+        scene->RemoveNode(
+            segmentationNode);
+
+        return nullptr;
+    }
+
+    vtkMRMLSegmentationDisplayNode* displayNode =
+        vtkMRMLSegmentationDisplayNode::SafeDownCast(
+            segmentationNode->GetDisplayNode());
+
+    if (displayNode)
+    {
+        // Transparent body overlay + strong contour.
+        displayNode->SetSegmentOpacity2DFill(
+            segmentID,
+            0.20);
+
+        displayNode->SetSegmentOpacity2DOutline(
+            segmentID,
+            1.0);
+
+        // Do not automatically generate/use a 3-D body surface.
+        displayNode->SetSegmentVisibility3D(
+            segmentID,
+            false);
+    }
+
+    // Put the preview beside the source PET in Subject Hierarchy.
+    vtkMRMLSubjectHierarchyNode* shNode =
+        vtkMRMLSubjectHierarchyNode::
+            GetSubjectHierarchyNode(scene);
+
+    if (shNode)
+    {
+        const vtkIdType petItem =
+            shNode->GetItemByDataNode(
+                referencePETNode);
+
+        const vtkIdType supportItem =
+            shNode->GetItemByDataNode(
+                segmentationNode);
+
+        if (petItem !=
+                vtkMRMLSubjectHierarchyNode::
+                    INVALID_ITEM_ID &&
+            supportItem !=
+                vtkMRMLSubjectHierarchyNode::
+                    INVALID_ITEM_ID)
+        {
+            shNode->SetItemParent(
+                supportItem,
+                shNode->GetItemParent(
+                    petItem));
+        }
+    }
+
+    return segmentationNode;
+}
+
+vtkSmartPointer<vtkOrientedImageData>
+vtkSlicerDynamicPETLogic::
+CombineBodySupportMasks(
+    vtkOrientedImageData* firstMask,
+    vtkOrientedImageData* secondMask,
+    BodySupportCombination combination)
+{
+    if (!firstMask || !secondMask)
+    {
+        return nullptr;
+    }
+
+    if (!vtkOrientedImageDataResample::
+            DoGeometriesMatch(
+                firstMask,
+                secondMask))
+    {
+        std::cerr
+            << "CombineBodySupportMasks: "
+               "mask geometries do not match."
+            << std::endl;
+
+        return nullptr;
+    }
+
+    vtkNew<vtkImageLogic> imageLogic;
+
+    imageLogic->SetInput1Data(
+        firstMask);
+
+    imageLogic->SetInput2Data(
+        secondMask);
+
+    if (combination ==
+        BodySupportCombination::Union)
+    {
+        imageLogic->SetOperationToOr();
+    }
+    else
+    {
+        imageLogic->SetOperationToAnd();
+    }
+
+    imageLogic->SetOutputTrueValue(1.0);
+    imageLogic->Update();
+
+    vtkSmartPointer<vtkOrientedImageData>
+        result =
+            vtkSmartPointer<
+                vtkOrientedImageData>::New();
+
+    result->DeepCopy(
+        imageLogic->GetOutput());
+
+    vtkNew<vtkMatrix4x4>
+        imageToWorld;
+
+    firstMask->GetImageToWorldMatrix(
+        imageToWorld);
+
+    result->SetImageToWorldMatrix(
+        imageToWorld);
+
+    return result;
+}
+
 void vtkSlicerDynamicPETLogic::Image2Flatten(
     vtkIdType petID,
     std::vector<std::vector<double>>& flatten_voxels_values,
@@ -2229,11 +3860,25 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
         Eigen::Vector2d coeff;
         Eigen::VectorXd coeff_vec(2);
 
+        const int nFit =
+            static_cast<int>(
+                fitVoxelIndices.size());
+
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (int v = 0; v < nVoxels; ++v)
+        for (int fitIndex = 0;
+             fitIndex < nFit;
+             ++fitIndex)
         {
+            const int v =
+                fitVoxelIndices[fitIndex];
+
+            if (v < 0 ||
+                static_cast<size_t>(v) >= nVoxels)
+            {
+                continue;
+            }
             if (stopRequested.load(
                     std::memory_order_relaxed))
             {
@@ -2350,24 +3995,26 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Update progress bar safely ----------
-            size_t done = ++voxProcessed;
+            const size_t done =
+                ++voxProcessed;
 
             const size_t updateInterval =
                 std::max(
                     static_cast<size_t>(1),
-                    std::min(
-                        nVoxels / 1000,
-                        static_cast<size_t>(10000)));
+                    static_cast<size_t>(
+                        std::max(1, nFit / 200)));
 
             if (progressCallback &&
                 (done % updateInterval == 0 ||
-                 done == nVoxels))
+                 done == static_cast<size_t>(nFit)))
             {
-              const int progress =
-                  static_cast<int>(
-                      100 * done / nVoxels);
+                const int progress =
+                    static_cast<int>(
+                        100LL *
+                        done /
+                        static_cast<size_t>(nFit));
 
-              progressCallback(progress);
+                progressCallback(progress);
             }
 
         }
@@ -2446,11 +4093,25 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
         Eigen::Vector2d coeff;
         Eigen::VectorXd coeff_vec(2);
 
+        const int nFit =
+            static_cast<int>(
+                fitVoxelIndices.size());
+
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (int v = 0; v < nVoxels; ++v)
+        for (int fitIndex = 0;
+             fitIndex < nFit;
+             ++fitIndex)
         {
+            const int v =
+                fitVoxelIndices[fitIndex];
+
+            if (v < 0 ||
+                static_cast<size_t>(v) >= nVoxels)
+            {
+                continue;
+            }
             if (stopRequested.load(
                     std::memory_order_relaxed))
             {
@@ -2587,24 +4248,26 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Progress bar ----------
-            size_t done = ++voxProcessed;
+            const size_t done =
+                ++voxProcessed;
 
             const size_t updateInterval =
                 std::max(
                     static_cast<size_t>(1),
-                    std::min(
-                        nVoxels / 1000,
-                        static_cast<size_t>(10000)));
+                    static_cast<size_t>(
+                        std::max(1, nFit / 200)));
 
             if (progressCallback &&
                 (done % updateInterval == 0 ||
-                 done == nVoxels))
+                 done == static_cast<size_t>(nFit)))
             {
-              const int progress =
-                  static_cast<int>(
-                      100 * done / nVoxels);
+                const int progress =
+                    static_cast<int>(
+                        100LL *
+                        done /
+                        static_cast<size_t>(nFit));
 
-              progressCallback(progress);
+                progressCallback(progress);
             }
         }
     }
@@ -2713,11 +4376,25 @@ void vtkSlicerDynamicPETLogic::RE4Img(
         Eigen::Vector2d coeff;
         Eigen::VectorXd coeff_vec(2);
 
+        const int nFit =
+            static_cast<int>(
+                fitVoxelIndices.size());
+
         #ifdef HAVE_OPENMP
         #pragma omp for schedule(dynamic)
         #endif
-        for (int v = 0; v < nVoxels; ++v)
+        for (int fitIndex = 0;
+             fitIndex < nFit;
+             ++fitIndex)
         {
+            const int v =
+                fitVoxelIndices[fitIndex];
+
+            if (v < 0 ||
+                static_cast<size_t>(v) >= nVoxels)
+            {
+                continue;
+            }
             if (stopRequested.load(
                     std::memory_order_relaxed))
             {
@@ -2844,24 +4521,26 @@ void vtkSlicerDynamicPETLogic::RE4Img(
             outputParams[v] = std::move(params);
 
             // ---------- Progress bar ----------
-            size_t done = ++voxProcessed;
+            const size_t done =
+                ++voxProcessed;
 
             const size_t updateInterval =
                 std::max(
                     static_cast<size_t>(1),
-                    std::min(
-                        nVoxels / 1000,
-                        static_cast<size_t>(10000)));
+                    static_cast<size_t>(
+                        std::max(1, nFit / 200)));
 
             if (progressCallback &&
                 (done % updateInterval == 0 ||
-                 done == nVoxels))
+                 done == static_cast<size_t>(nFit)))
             {
-              const int progress =
-                  static_cast<int>(
-                      100 * done / nVoxels);
+                const int progress =
+                    static_cast<int>(
+                        100LL *
+                        done /
+                        static_cast<size_t>(nFit));
 
-              progressCallback(progress);
+                progressCallback(progress);
             }
         }
     }
@@ -3156,8 +4835,8 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         params.DV = -1.0;
 
         params.r.clear();
-        params.weights = wt;
-        params.keep = keep;
+        params.weights.clear();
+        params.keep.clear();
         params.dof = dof_fixed;
 
         params.AIC    = std::numeric_limits<double>::quiet_NaN();

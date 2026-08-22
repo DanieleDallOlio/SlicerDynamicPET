@@ -74,6 +74,8 @@
 #include <vtkNew.h>
 #include <vtkMRMLNode.h>
 #include <QRegularExpression>
+#include <QStandardItem>
+
 #include "DynamicPETWidgetWorkers.h"
 
 

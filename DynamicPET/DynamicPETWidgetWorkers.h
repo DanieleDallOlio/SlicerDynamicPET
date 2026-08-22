@@ -358,7 +358,7 @@ private:
           init[0] = vbInit; init[1] = k1Init; init[2] = k2Init; init[3] = k3Init; init[4] = k4Init;
           modelfields = {"K1", "k2", "k3", "k4", "vb", "Ki", "DV", "AIC", "MASE", "BIC", "chi2"};
       }
-      else if (modelID == "2dTCM") {
+      else if (modelID == "2TdCM") {
           num_tc = 2;
           sens[0] = true; sens[1] = true; sens[2] = true; sens[3] = true; sens[4] = true; sens[5] = true;
           lb[0] = vbLower; lb[1] = k1Lower; lb[2] = k2Lower; lb[3] = k3Lower; lb[4] = k4Lower; lb[5] = tdLower;

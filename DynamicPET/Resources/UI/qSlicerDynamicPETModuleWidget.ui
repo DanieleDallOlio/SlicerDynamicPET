@@ -2058,7 +2058,9 @@
                         <property name="collapsed">
                           <bool>true</bool>
                         </property>
+
                         <layout class="QGridLayout" name="MTGAOptimizationLayoutImg">
+
                           <item row="0" column="0" colspan="2">
                             <widget class="QLabel" name="MTGAOptimizationInfoLabelImg">
                               <property name="wordWrap">
@@ -2069,6 +2071,7 @@
                               </property>
                             </widget>
                           </item>
+
                           <item row="1" column="0">
                             <widget class="QLabel" name="MTGAReversibleModelLabelImg">
                               <property name="text">
@@ -2076,19 +2079,25 @@
                               </property>
                             </widget>
                           </item>
+
                           <item row="1" column="1">
                             <widget class="QComboBox" name="MTGAReversibleModelComboImg">
                               <property name="toolTip">
-                                <string>Choose the reversible model to compare against Patlak. Availability will follow the fitted models.</string>
+                                <string>Choose the reversible model to compare against Patlak. Availability follows the fitted models.</string>
                               </property>
                               <item>
-                                <property name="text"><string>Logan</string></property>
+                                <property name="text">
+                                  <string>Logan</string>
+                                </property>
                               </item>
                               <item>
-                                <property name="text"><string>RE</string></property>
+                                <property name="text">
+                                  <string>RE</string>
+                                </property>
                               </item>
                             </widget>
                           </item>
+
                           <item row="2" column="0">
                             <widget class="QLabel" name="MTGASelectionCriterionLabelImg">
                               <property name="text">
@@ -2096,26 +2105,41 @@
                               </property>
                             </widget>
                           </item>
+
                           <item row="2" column="1">
                             <widget class="QComboBox" name="MTGASelectionCriterionComboImg">
                               <property name="toolTip">
                                 <string>R2: highest wins. AIC and MASE: lowest wins.</string>
                               </property>
-                              <item><property name="text"><string>R2</string></property></item>
-                              <item><property name="text"><string>AIC</string></property></item>
-                              <item><property name="text"><string>MASE</string></property></item>
+                              <item>
+                                <property name="text">
+                                  <string>R2</string>
+                                </property>
+                              </item>
+                              <item>
+                                <property name="text">
+                                  <string>AIC</string>
+                                </property>
+                              </item>
+                              <item>
+                                <property name="text">
+                                  <string>MASE</string>
+                                </property>
+                              </item>
                             </widget>
                           </item>
+
                           <item row="3" column="0" colspan="2">
                             <widget class="QCheckBox" name="MTGAUseVuongCheckBoxImg">
                               <property name="text">
                                 <string>Use Vuong test</string>
                               </property>
                               <property name="toolTip">
-                                <string>Use the voxelwise Vuong p-value to determine whether the two fitted models differ significantly.</string>
+                                <string>If enabled, the criterion-selected model is accepted only when the voxelwise comparison is statistically significant. Non-significant voxels are excluded.</string>
                               </property>
                             </widget>
                           </item>
+
                           <item row="4" column="0">
                             <widget class="QLabel" name="MTGAVuongAlphaLabelImg">
                               <property name="text">
@@ -2123,45 +2147,66 @@
                               </property>
                             </widget>
                           </item>
+
                           <item row="4" column="1">
                             <widget class="QDoubleSpinBox" name="MTGAVuongAlphaSpinBoxImg">
-                              <property name="enabled"><bool>false</bool></property>
-                              <property name="decimals"><number>3</number></property>
-                              <property name="minimum"><double>0.001000000000000</double></property>
-                              <property name="maximum"><double>0.500000000000000</double></property>
-                              <property name="singleStep"><double>0.010000000000000</double></property>
-                              <property name="value"><double>0.050000000000000</double></property>
-                            </widget>
-                          </item>
-                          <item row="5" column="0">
-                            <widget class="QLabel" name="MTGANonSignificantPolicyLabelImg">
-                              <property name="text">
-                                <string>Non-significant voxels</string>
+                              <property name="enabled">
+                                <bool>false</bool>
+                              </property>
+                              <property name="decimals">
+                                <number>3</number>
+                              </property>
+                              <property name="minimum">
+                                <double>0.001000000000000</double>
+                              </property>
+                              <property name="maximum">
+                                <double>0.500000000000000</double>
+                              </property>
+                              <property name="singleStep">
+                                <double>0.010000000000000</double>
+                              </property>
+                              <property name="value">
+                                <double>0.050000000000000</double>
                               </property>
                             </widget>
                           </item>
-                          <item row="5" column="1">
-                            <widget class="QComboBox" name="MTGANonSignificantPolicyComboImg">
-                              <property name="enabled"><bool>false</bool></property>
-                              <property name="toolTip">
-                                <string>When Vuong is enabled, either exclude non-significant voxels or retain both Ki and DV contributions.</string>
-                              </property>
-                              <item><property name="text"><string>Exclude</string></property></item>
-                              <item><property name="text"><string>Show both model contributions</string></property></item>
-                            </widget>
-                          </item>
-                          <item row="6" column="0" colspan="2">
+
+                          <item row="5" column="0" colspan="2">
                             <widget class="QLabel" name="MTGAChannelInfoLabelImg">
-                              <property name="wordWrap"><bool>true</bool></property>
-                              <property name="text"><string>Display scaling: Ki and DV are normalized independently; higher Ki is redder and higher DV is bluer. Quantitative channel values remain unchanged.</string></property>
+                              <property name="wordWrap">
+                                <bool>true</bool>
+                              </property>
+                              <property name="text">
+                                <string>Display scaling is initialized automatically from robust Ki and DV value ranges. Quantitative Ki and DV values are never rescaled. Adjust their display ranges in Slicer and refresh the RGB visualization if desired.</string>
+                              </property>
                             </widget>
                           </item>
-                          <item row="7" column="0" colspan="2">
+
+                          <item row="6" column="0" colspan="2">
                             <widget class="QPushButton" name="GenerateMTGAOptimizedImgButton">
-                              <property name="text"><string>Generate model-selected Ki/DV map</string></property>
-                              <property name="toolTip"><string>Create the two-channel Ki/DV map using the current output options above.</string></property>
+                              <property name="text">
+                                <string>Generate optimized Ki/DV + RGB</string>
+                              </property>
+                              <property name="toolTip">
+                                <string>Perform voxelwise model selection once, create quantitative optimized Ki and DV maps, and create the red/blue RGB visualization.</string>
+                              </property>
                             </widget>
                           </item>
+
+                          <item row="7" column="0" colspan="2">
+                            <widget class="QPushButton" name="RefreshMTGARGBButtonImg">
+                              <property name="enabled">
+                                <bool>false</bool>
+                              </property>
+                              <property name="text">
+                                <string>Refresh RGB from Ki/DV display ranges</string>
+                              </property>
+                              <property name="toolTip">
+                                <string>Rebuild the RGB visualization using the current Ki and DV window/level settings in Slicer. Model selection and statistical testing are not repeated.</string>
+                              </property>
+                            </widget>
+                          </item>
+
                         </layout>
                       </widget>
                     </item>
@@ -2606,7 +2651,9 @@
                           <item row="0" column="0" colspan="2">
                             <widget class="QLabel" name="TCMOptimizationInfoLabelImg">
                               <property name="wordWrap"><bool>true</bool></property>
-                              <property name="text"><string>Select fitted TCM models to compare voxel by voxel. The numerically best model is chosen first; optional statistical testing can then favor a statistically equivalent model with fewer free parameters.</string></property>
+                              <property name="text">
+                                <string>The selected criterion chooses the best fitted model at each voxel. With statistical testing enabled, nested models use LRT and non-nested models use Vuong. If a simpler model is not significantly different from the criterion-selected model, the simplest such model is preferred.</string>
+                              </property>
                             </widget>
                           </item>
                           <item row="1" column="0">
@@ -2681,8 +2728,12 @@
                           </item>
                           <item row="7" column="0" colspan="2">
                             <widget class="QPushButton" name="GenerateTCMOptimizedImgButton">
-                              <property name="text"><string>Generate optimized parameter maps</string></property>
-                              <property name="toolTip"><string>Generate one-channel quantitative parameter maps from the voxelwise selected TCM model using the current output options above.</string></property>
+                              <property name="text">
+                                <string>Generate optimized TCM maps</string>
+                              </property>
+                              <property name="toolTip">
+                                <string>Generate quantitative parameter maps and a model-selection visualization from the voxelwise selected TCM model.</string>
+                              </property>
                             </widget>
                           </item>
                         </layout>

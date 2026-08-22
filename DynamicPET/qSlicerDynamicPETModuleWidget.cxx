@@ -100,6 +100,22 @@ protected:
   qSlicerDynamicPETModuleWidget* const q_ptr;
   void setDoubleField(QLineEdit* le, double lo, double hi, int decimals);
   void setIntField(QLineEdit* le, int lo, int hi);
+  std::vector<unsigned char>
+      MTGAOptimizedSelection;
+
+  std::vector<double>
+      MTGAOptimizedKiValues;
+
+  std::vector<double>
+      MTGAOptimizedDVValues;
+
+  std::string MTGAOptimizedKiNodeID;
+  std::string MTGAOptimizedDVNodeID;
+  std::string MTGAOptimizedRGBNodeID;
+
+  std::vector<std::string> TCMOptimizedNodeIDs;
+  std::string TCMOptimizedModelSelectionNodeID;
+
 public:
   std::vector<std::string> segmentDisplayOrder;
   qSlicerDynamicPETModuleWidgetPrivate(qSlicerDynamicPETModuleWidget& object);
@@ -135,8 +151,39 @@ public:
   void updateMTGAOutputUI();
   void updateTCMOutputUI();
   void updateMTGAOptimizationUI();
+  enum class MTGAOptimizedClass : unsigned char
+  {
+    Excluded = 0,
+    Patlak = 1,
+    Reversible = 2
+  };
+
+  void generateMTGAOptimizedResult();
+
+  void refreshMTGAOptimizedRGB();
+
+  std::pair<double, double>
+  computeMTGARobustDisplayRange(
+      const std::vector<double>& values,
+      MTGAOptimizedClass selectedClass) const;
+
+  vtkMRMLScalarVolumeNode*
+  createMTGAOptimizedScalarVolume(
+      const std::vector<double>& values,
+      const QString& name,
+      vtkMRMLScalarVolumeNode* refPETNode,
+      vtkMRMLSubjectHierarchyNode* shNode,
+      vtkIdType refPetID,
+      double displayMinimum,
+      double displayMaximum);
+
+  void removeMTGAOptimizedSceneNodes();
+
   void populateTCMOptimizationModels();
   void updateTCMOptimizationUI();
+
+  void generateTCMOptimizedResult();
+  void removeTCMOptimizedSceneNodes();
 
   void outputMTGAParametricResult(
       const std::string& modelID,
@@ -161,7 +208,8 @@ public:
       const QString& outputDirectory,
       int seriesNumber,
       const QString& unitCode,
-      const QString& unitMeaning);
+      const QString& unitMeaning,
+      const QString& derivationDetails = QString());
 
   std::map<std::string, QString> MTGAImgFitSignatures;
   std::map<std::string, QString> TCMImgFitSignatures;
@@ -669,7 +717,8 @@ def DPE_export_parametric_map(
     method_code,
     method_meaning,
     unit_code,
-    unit_meaning
+    unit_meaning,
+    derivation_details
 ):
     import os
     import numpy as np
@@ -1172,11 +1221,19 @@ def DPE_export_parametric_map(
         )
 
         # Keep model provenance human-readable.
+        derivation_parts = [
+            str(method_meaning),
+            "methodCode=" + str(method_code),
+            "quantity=" + str(quantity_meaning),
+        ]
+
+        details = str(derivation_details).strip()
+
+        if details:
+            derivation_parts.append(details)
+
         pm.DerivationDescription = (
-            "SlicerDynamicPET "
-            + str(method_meaning)
-            + " "
-            + str(quantity_meaning)
+            "; ".join(derivation_parts)
         )[:1024]
 
         # ------------------------------------------------------------
@@ -1352,19 +1409,45 @@ def DPE_export_parametric_map(
         this->MTGAVuongAlphaSpinBoxImg
             ->setEnabled(checked);
 
-        this->MTGANonSignificantPolicyComboImg
-            ->setEnabled(checked);
-
         this->updateMTGAOptimizationUI();
       });
 
   QObject::connect(
       this->MTGAReversibleModelComboImg,
-      QOverload<int>::of(&QComboBox::currentIndexChanged),
+      QOverload<int>::of(
+          &QComboBox::currentIndexChanged),
       q,
       [this](int)
       {
         this->updateMTGAOptimizationUI();
+      });
+
+  QObject::connect(
+      this->MTGASelectionCriterionComboImg,
+      QOverload<int>::of(
+          &QComboBox::currentIndexChanged),
+      q,
+      [this](int)
+      {
+        this->updateMTGAOptimizationUI();
+      });
+
+  QObject::connect(
+      this->GenerateMTGAOptimizedImgButton,
+      &QPushButton::clicked,
+      q,
+      [this]()
+      {
+        this->generateMTGAOptimizedResult();
+      });
+
+  QObject::connect(
+      this->RefreshMTGARGBButtonImg,
+      &QPushButton::clicked,
+      q,
+      [this]()
+      {
+        this->refreshMTGAOptimizedRGB();
       });
 
 
@@ -1440,6 +1523,25 @@ def DPE_export_parametric_map(
         }
 
         this->updateTCMOptimizationUI();
+      });
+
+  QObject::connect(
+      this->TCMSelectionCriterionComboImg,
+      QOverload<int>::of(
+          &QComboBox::currentIndexChanged),
+      q,
+      [this](int)
+      {
+        this->updateTCMOptimizationUI();
+      });
+
+  QObject::connect(
+      this->GenerateTCMOptimizedImgButton,
+      &QPushButton::clicked,
+      q,
+      [this]()
+      {
+        this->generateTCMOptimizedResult();
       });
 
   const std::vector<QCheckBox*> tcmOptimizationParameterBoxes =
@@ -2849,26 +2951,34 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOutputUI()
   this->updateTCMOptimizationUI();
 }
 
-void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
+void qSlicerDynamicPETModuleWidgetPrivate::
+updateMTGAOptimizationUI()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
   auto hasResult =
       [&](const std::string& modelID)
       {
-        auto it = q->MTGAImgOutcomes.find(modelID);
+        auto it =
+            q->MTGAImgOutcomes.find(modelID);
 
         return
             it != q->MTGAImgOutcomes.end() &&
             !it->second.empty();
       };
 
-  const bool hasPatlak = hasResult("Patlak");
-  const bool hasLogan  = hasResult("Logan");
-  const bool hasRE     = hasResult("RE");
+  const bool hasPatlak =
+      hasResult("Patlak");
+
+  const bool hasLogan =
+      hasResult("Logan");
+
+  const bool hasRE =
+      hasResult("RE");
 
   const bool available =
-      hasPatlak && (hasLogan || hasRE);
+      hasPatlak &&
+      (hasLogan || hasRE);
 
   this->MTGAOptimizationCollapsibleButtonImg
       ->setEnabled(available);
@@ -2881,26 +2991,37 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
     this->GenerateMTGAOptimizedImgButton
         ->setEnabled(false);
 
+    this->RefreshMTGARGBButtonImg
+        ->setEnabled(false);
+
     return;
   }
 
-  // Preserve current reversible-model choice if possible.
+  // Preserve reversible-model selection if possible.
   const QString previousModel =
-      this->MTGAReversibleModelComboImg->currentText();
+      this->MTGAReversibleModelComboImg
+          ->currentText();
 
-  this->MTGAReversibleModelComboImg->blockSignals(true);
-  this->MTGAReversibleModelComboImg->clear();
+  this->MTGAReversibleModelComboImg
+      ->blockSignals(true);
+
+  this->MTGAReversibleModelComboImg
+      ->clear();
 
   if (hasLogan)
   {
     this->MTGAReversibleModelComboImg
-        ->addItem("Logan", "Logan");
+        ->addItem(
+            "Logan",
+            "Logan");
   }
 
   if (hasRE)
   {
     this->MTGAReversibleModelComboImg
-        ->addItem("RE", "RE");
+        ->addItem(
+            "RE",
+            "RE");
   }
 
   int restoredIndex =
@@ -2908,7 +3029,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
           ->findText(previousModel);
 
   if (restoredIndex < 0 &&
-      this->MTGAReversibleModelComboImg->count() > 0)
+      this->MTGAReversibleModelComboImg
+          ->count() > 0)
   {
     restoredIndex = 0;
   }
@@ -2919,22 +3041,23 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
         ->setCurrentIndex(restoredIndex);
   }
 
-  this->MTGAReversibleModelComboImg->blockSignals(false);
+  this->MTGAReversibleModelComboImg
+      ->blockSignals(false);
 
   const bool useVuong =
-      this->MTGAUseVuongCheckBoxImg->isChecked();
+      this->MTGAUseVuongCheckBoxImg
+          ->isChecked();
 
   this->MTGAVuongAlphaSpinBoxImg
       ->setEnabled(useVuong);
 
-  this->MTGANonSignificantPolicyComboImg
-      ->setEnabled(useVuong);
-
   const bool show =
-      this->MTGAShowInSlicerCheckBoxImg->isChecked();
+      this->MTGAShowInSlicerCheckBoxImg
+          ->isChecked();
 
   const bool save =
-      this->MTGASaveDICOMCheckBoxImg->isChecked();
+      this->MTGASaveDICOMCheckBoxImg
+          ->isChecked();
 
   const bool saveReady =
       !save ||
@@ -2948,6 +3071,1408 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateMTGAOptimizationUI()
           available &&
           (show || save) &&
           saveReady);
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  const bool rgbReady =
+      scene &&
+      !this->MTGAOptimizedKiNodeID.empty() &&
+      !this->MTGAOptimizedDVNodeID.empty() &&
+      scene->GetNodeByID(
+          this->MTGAOptimizedKiNodeID.c_str()) &&
+      scene->GetNodeByID(
+          this->MTGAOptimizedDVNodeID.c_str());
+
+  this->RefreshMTGARGBButtonImg
+      ->setEnabled(rgbReady);
+}
+
+std::pair<double, double>
+qSlicerDynamicPETModuleWidgetPrivate::
+computeMTGARobustDisplayRange(
+    const std::vector<double>& values,
+    MTGAOptimizedClass selectedClass) const
+{
+  std::vector<double> activeValues;
+
+  const unsigned char classValue =
+      static_cast<unsigned char>(
+          selectedClass);
+
+  const size_t count =
+      std::min(
+          values.size(),
+          this->MTGAOptimizedSelection.size());
+
+  activeValues.reserve(count);
+
+  for (size_t i = 0;
+       i < count;
+       ++i)
+  {
+    if (this->MTGAOptimizedSelection[i] !=
+        classValue)
+    {
+      continue;
+    }
+
+    const double value =
+        values[i];
+
+    if (std::isfinite(value))
+    {
+      activeValues.push_back(value);
+    }
+  }
+
+  if (activeValues.empty())
+  {
+    return {0.0, 1.0};
+  }
+
+  std::sort(
+      activeValues.begin(),
+      activeValues.end());
+
+  auto percentile =
+      [&](double fraction)
+      {
+        if (activeValues.size() == 1)
+        {
+          return activeValues.front();
+        }
+
+        const double position =
+            fraction *
+            static_cast<double>(
+                activeValues.size() - 1);
+
+        const size_t lowerIndex =
+            static_cast<size_t>(
+                std::floor(position));
+
+        const size_t upperIndex =
+            static_cast<size_t>(
+                std::ceil(position));
+
+        const double weight =
+            position -
+            static_cast<double>(
+                lowerIndex);
+
+        return
+            activeValues[lowerIndex] *
+                (1.0 - weight) +
+            activeValues[upperIndex] *
+                weight;
+      };
+
+  double low =
+      percentile(0.01);
+
+  double high =
+      percentile(0.99);
+
+  if (!std::isfinite(low) ||
+      !std::isfinite(high))
+  {
+    return {0.0, 1.0};
+  }
+
+  if (high <= low)
+  {
+    const double delta =
+        std::max(
+            std::abs(low) * 0.01,
+            1.0e-6);
+
+    low -= delta;
+    high += delta;
+  }
+
+  return {low, high};
+}
+
+vtkMRMLScalarVolumeNode*
+qSlicerDynamicPETModuleWidgetPrivate::
+createMTGAOptimizedScalarVolume(
+    const std::vector<double>& values,
+    const QString& name,
+    vtkMRMLScalarVolumeNode* refPETNode,
+    vtkMRMLSubjectHierarchyNode* shNode,
+    vtkIdType refPetID,
+    double displayMinimum,
+    double displayMaximum)
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene ||
+      !refPETNode ||
+      !shNode)
+  {
+    return nullptr;
+  }
+
+  const vtkIdType expectedSize =
+      static_cast<vtkIdType>(
+          q->PETdims[0]) *
+      static_cast<vtkIdType>(
+          q->PETdims[1]) *
+      static_cast<vtkIdType>(
+          q->PETdims[2]);
+
+  if (values.size() !=
+      static_cast<size_t>(expectedSize))
+  {
+    return nullptr;
+  }
+
+  vtkNew<vtkImageData> image;
+
+  image->SetDimensions(
+      q->PETdims[0],
+      q->PETdims[1],
+      q->PETdims[2]);
+
+  image->AllocateScalars(
+      VTK_DOUBLE,
+      1);
+
+  double* destination =
+      static_cast<double*>(
+          image->GetScalarPointer());
+
+  if (!destination)
+  {
+    return nullptr;
+  }
+
+  std::copy(
+      values.begin(),
+      values.end(),
+      destination);
+
+  vtkMRMLScalarVolumeNode* node =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->AddNewNodeByClass(
+              "vtkMRMLScalarVolumeNode",
+              name.toUtf8().constData()));
+
+  if (!node)
+  {
+    return nullptr;
+  }
+
+  node->SetAndObserveImageData(
+      image.GetPointer());
+
+  node->CopyOrientation(
+      refPETNode);
+
+  node->SetSpacing(
+      refPETNode->GetSpacing());
+
+  node->SetOrigin(
+      refPETNode->GetOrigin());
+
+  node->CreateDefaultDisplayNodes();
+
+  vtkMRMLScalarVolumeDisplayNode*
+      displayNode =
+          vtkMRMLScalarVolumeDisplayNode::
+              SafeDownCast(
+                  node->GetDisplayNode());
+
+  if (displayNode)
+  {
+    displayNode->AutoWindowLevelOff();
+
+    displayNode->SetWindowLevelMinMax(
+        displayMinimum,
+        displayMaximum);
+  }
+
+  const vtkIdType parentItemID =
+      shNode->GetItemParent(
+          refPetID);
+
+  const vtkIdType newItemID =
+      shNode->GetItemByDataNode(
+          node);
+
+  shNode->SetItemParent(
+      newItemID,
+      parentItemID);
+
+  return node;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+refreshMTGAOptimizedRGB()
+{
+  std::cout
+      << "[MTGA RGB] refresh START"
+      << std::endl;
+
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene)
+  {
+    return;
+  }
+
+  vtkMRMLScalarVolumeNode* kiNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->GetNodeByID(
+              this->MTGAOptimizedKiNodeID.c_str()));
+
+  vtkMRMLScalarVolumeNode* dvNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->GetNodeByID(
+              this->MTGAOptimizedDVNodeID.c_str()));
+
+  if (!kiNode || !dvNode)
+  {
+    this->RefreshMTGARGBButtonImg
+        ->setEnabled(false);
+
+    return;
+  }
+
+  std::cout
+      << "[MTGA RGB] Ki/DV nodes retrieved."
+      << std::endl;
+
+  vtkMRMLScalarVolumeDisplayNode*
+      kiDisplay =
+          vtkMRMLScalarVolumeDisplayNode::
+              SafeDownCast(
+                  kiNode->GetDisplayNode());
+
+  vtkMRMLScalarVolumeDisplayNode*
+      dvDisplay =
+          vtkMRMLScalarVolumeDisplayNode::
+              SafeDownCast(
+                  dvNode->GetDisplayNode());
+
+  if (!kiDisplay ||
+      !dvDisplay)
+  {
+    return;
+  }
+
+  std::cout
+      << "[MTGA RGB] Ki/DV display nodes retrieved."
+      << std::endl;
+
+  const double kiWindow =
+      std::max(
+          kiDisplay->GetWindow(),
+          1.0e-12);
+
+  const double kiLevel =
+      kiDisplay->GetLevel();
+
+  const double kiLow =
+      kiLevel -
+      0.5 * kiWindow;
+
+  const double kiHigh =
+      kiLevel +
+      0.5 * kiWindow;
+
+
+  const double dvWindow =
+      std::max(
+          dvDisplay->GetWindow(),
+          1.0e-12);
+
+  const double dvLevel =
+      dvDisplay->GetLevel();
+
+  const double dvLow =
+      dvLevel -
+      0.5 * dvWindow;
+
+  const double dvHigh =
+      dvLevel +
+      0.5 * dvWindow;
+
+
+  const vtkIdType numberOfVoxels =
+      static_cast<vtkIdType>(
+          q->PETdims[0]) *
+      static_cast<vtkIdType>(
+          q->PETdims[1]) *
+      static_cast<vtkIdType>(
+          q->PETdims[2]);
+
+  if (this->MTGAOptimizedSelection.size() !=
+          static_cast<size_t>(numberOfVoxels) ||
+      this->MTGAOptimizedKiValues.size() !=
+          static_cast<size_t>(numberOfVoxels) ||
+      this->MTGAOptimizedDVValues.size() !=
+          static_cast<size_t>(numberOfVoxels))
+  {
+    return;
+  }
+
+  std::cout
+      << "[MTGA RGB] Ki display: "
+      << kiLow << " -> " << kiHigh
+      << std::endl;
+
+  std::cout
+      << "[MTGA RGB] DV display: "
+      << dvLow << " -> " << dvHigh
+      << std::endl;
+
+
+  std::cout
+      << "[MTGA RGB] Allocating RGB vtkImageData..."
+      << std::endl;
+  vtkNew<vtkImageData> rgbImage;
+
+  rgbImage->SetDimensions(
+      q->PETdims[0],
+      q->PETdims[1],
+      q->PETdims[2]);
+
+  rgbImage->AllocateScalars(
+      VTK_UNSIGNED_CHAR,
+      3);
+
+  unsigned char* rgb =
+      static_cast<unsigned char*>(
+          rgbImage->GetScalarPointer());
+
+  if (!rgb)
+  {
+    return;
+  }
+
+  std::cout
+      << "[MTGA RGB] RGB buffer allocated."
+      << std::endl;
+  auto normalize =
+      [](double value,
+         double low,
+         double high)
+      {
+        if (!std::isfinite(value))
+        {
+          return 0.0;
+        }
+
+        const double width =
+            high - low;
+
+        if (width <= 0.0)
+        {
+          return 0.0;
+        }
+
+        return std::clamp(
+            (value - low) / width,
+            0.0,
+            1.0);
+      };
+
+
+  const unsigned char patlakClass =
+      static_cast<unsigned char>(
+          MTGAOptimizedClass::Patlak);
+
+  const unsigned char reversibleClass =
+      static_cast<unsigned char>(
+          MTGAOptimizedClass::Reversible);
+
+  std::cout
+      << "[MTGA RGB] Filling RGB buffer, voxels="
+      << numberOfVoxels
+      << std::endl;
+
+  for (vtkIdType i = 0;
+       i < numberOfVoxels;
+       ++i)
+  {
+    unsigned char red = 0;
+    unsigned char green = 0;
+    unsigned char blue = 0;
+
+    const unsigned char selected =
+        this->MTGAOptimizedSelection[
+            static_cast<size_t>(i)];
+
+    if (selected == patlakClass)
+    {
+      const double normalized =
+          normalize(
+              this->MTGAOptimizedKiValues[
+                  static_cast<size_t>(i)],
+              kiLow,
+              kiHigh);
+
+      red =
+          static_cast<unsigned char>(
+              std::lround(
+                  255.0 *
+                  normalized));
+    }
+    else if (selected ==
+             reversibleClass)
+    {
+      const double normalized =
+          normalize(
+              this->MTGAOptimizedDVValues[
+                  static_cast<size_t>(i)],
+              dvLow,
+              dvHigh);
+
+      blue =
+          static_cast<unsigned char>(
+              std::lround(
+                  255.0 *
+                  normalized));
+    }
+
+    rgb[3 * i + 0] = red;
+    rgb[3 * i + 1] = green;
+    rgb[3 * i + 2] = blue;
+  }
+
+  std::cout
+      << "[MTGA RGB] RGB buffer filled."
+      << std::endl;
+
+  std::cout
+      << "[MTGA RGB] Looking for existing RGB node..."
+      << std::endl;
+
+  vtkMRMLVolumeNode* rgbNode =
+      nullptr;
+
+  if (!this->MTGAOptimizedRGBNodeID.empty())
+  {
+    rgbNode =
+        vtkMRMLVolumeNode::SafeDownCast(
+            scene->GetNodeByID(
+                this->MTGAOptimizedRGBNodeID.c_str()));
+  }
+
+  if (!rgbNode)
+  {
+
+    std::cout
+        << "[MTGA RGB] Creating vtkMRMLVectorVolumeNode "
+           "through MRML factory..."
+        << std::endl;
+    QString rgbName =
+        QString::fromUtf8(
+            kiNode->GetName());
+
+    rgbName.replace(
+        "MTGA Optimized Ki",
+        "MTGA Selection RGB");
+
+    vtkMRMLNode* createdNode =
+        scene->AddNewNodeByClass(
+            "vtkMRMLVectorVolumeNode",
+            rgbName.toUtf8().constData());
+
+    std::cout
+        << "[MTGA RGB] AddNewNodeByClass returned: "
+        << (createdNode
+            ? createdNode->GetClassName()
+            : "NULL")
+        << std::endl;
+
+    rgbNode =
+        vtkMRMLVolumeNode::SafeDownCast(
+            createdNode);
+
+    std::cout
+        << "[MTGA RGB] vtkMRMLVolumeNode cast: "
+        << (rgbNode ? "OK" : "FAILED")
+        << std::endl;
+
+    if (!rgbNode)
+    {
+      if (createdNode)
+      {
+        scene->RemoveNode(createdNode);
+      }
+
+      qWarning()
+          << "Could not create "
+             "vtkMRMLVectorVolumeNode for "
+             "MTGA RGB visualization.";
+
+      return;
+    }
+
+    this->MTGAOptimizedRGBNodeID =
+        rgbNode->GetID();
+
+    rgbNode->CopyOrientation(
+        kiNode);
+
+    rgbNode->SetSpacing(
+        kiNode->GetSpacing());
+
+    rgbNode->SetOrigin(
+        kiNode->GetOrigin());
+
+    std::cout
+        << "[MTGA RGB] Setting VoxelVectorTypeColorRGB..."
+        << std::endl;
+
+    rgbNode->SetVoxelVectorType(
+        vtkMRMLVolumeNode::
+            VoxelVectorTypeColorRGB);
+
+    std::cout
+        << "[MTGA RGB] Voxel vector type set."
+        << std::endl;
+
+    rgbNode->CreateDefaultDisplayNodes();
+
+    vtkMRMLSubjectHierarchyNode* shNode =
+        vtkMRMLSubjectHierarchyNode::
+            GetSubjectHierarchyNode(scene);
+
+    if (shNode)
+    {
+      const vtkIdType kiItemID =
+          shNode->GetItemByDataNode(
+              kiNode);
+
+      const vtkIdType parentItemID =
+          shNode->GetItemParent(
+              kiItemID);
+
+      const vtkIdType rgbItemID =
+          shNode->GetItemByDataNode(
+              rgbNode);
+
+      shNode->SetItemParent(
+          rgbItemID,
+          parentItemID);
+    }
+  }
+
+  std::cout
+      << "[MTGA RGB] Assigning RGB vtkImageData..."
+      << std::endl;
+
+  rgbNode->SetAndObserveImageData(
+      rgbImage.GetPointer());
+
+  std::cout
+      << "[MTGA RGB] RGB vtkImageData assigned."
+      << std::endl;
+
+  rgbNode->Modified();
+
+  this->RefreshMTGARGBButtonImg
+      ->setEnabled(true);
+
+  std::cout
+      << "[MTGA RGB] refresh END"
+      << std::endl;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+generateMTGAOptimizedResult()
+{
+  std::cout
+      << "[MTGA OPT] generateMTGAOptimizedResult START"
+      << std::endl;
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene)
+  {
+    return;
+  }
+
+  vtkSlicerDynamicPETLogic* logic =
+      vtkSlicerDynamicPETLogic::SafeDownCast(
+          q->logic());
+
+  if (!logic)
+  {
+    return;
+  }
+
+  vtkMRMLSubjectHierarchyNode* shNode =
+      vtkMRMLSubjectHierarchyNode::
+          GetSubjectHierarchyNode(scene);
+
+  if (!shNode)
+  {
+    return;
+  }
+
+  vtkMRMLScalarVolumeNode* refPETNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          shNode->GetItemDataNode(
+              q->petID));
+
+  if (!refPETNode)
+  {
+    return;
+  }
+
+
+  // ------------------------------------------------------------------------
+  // Required fitted models
+  // ------------------------------------------------------------------------
+
+  auto patlakIt =
+      q->MTGAImgOutcomes.find(
+          "Patlak");
+
+  if (patlakIt ==
+          q->MTGAImgOutcomes.end() ||
+      patlakIt->second.empty())
+  {
+    return;
+  }
+
+
+  QString reversibleQString =
+      this->MTGAReversibleModelComboImg
+          ->currentData()
+          .toString();
+
+  if (reversibleQString.isEmpty())
+  {
+    reversibleQString =
+        this->MTGAReversibleModelComboImg
+            ->currentText();
+  }
+
+  const std::string reversibleModel =
+      reversibleQString.toStdString();
+
+
+  auto reversibleIt =
+      q->MTGAImgOutcomes.find(
+          reversibleModel);
+
+  if (reversibleIt ==
+          q->MTGAImgOutcomes.end() ||
+      reversibleIt->second.empty())
+  {
+    return;
+  }
+
+
+  const auto& patlak =
+      patlakIt->second;
+
+  const auto& reversible =
+      reversibleIt->second;
+
+
+  if (patlak.size() !=
+          reversible.size() ||
+      patlak.size() !=
+          q->PET_flatten_values.size())
+  {
+    QMessageBox::warning(
+        q,
+        QObject::tr("MTGA model selection"),
+        QObject::tr(
+            "The fitted MTGA result sizes do not match "
+            "the PET voxel count."));
+
+    return;
+  }
+
+  std::cout
+      << "[MTGA OPT] Cached models retrieved. "
+      << "Patlak voxels=" << patlak.size()
+      << ", " << reversibleModel
+      << " voxels=" << reversible.size()
+      << std::endl;
+
+  // ------------------------------------------------------------------------
+  // Selection settings
+  // ------------------------------------------------------------------------
+
+  const QString criterion =
+      this->MTGASelectionCriterionComboImg
+          ->currentText();
+
+  const bool useVuong =
+      this->MTGAUseVuongCheckBoxImg
+          ->isChecked();
+
+  const double alpha =
+      this->MTGAVuongAlphaSpinBoxImg
+          ->value();
+
+  QString optimizationSuffix =
+      reversibleQString +
+      " - " +
+      criterion;
+
+  if (useVuong)
+  {
+    optimizationSuffix +=
+        QString(
+            " - Vuong p<%1")
+            .arg(
+                alpha,
+                0,
+                'g',
+                3);
+  }
+
+
+  // ------------------------------------------------------------------------
+  // Allocate optimized outputs
+  // ------------------------------------------------------------------------
+
+  const size_t numberOfVoxels =
+      patlak.size();
+
+  this->MTGAOptimizedSelection.assign(
+      numberOfVoxels,
+      static_cast<unsigned char>(
+          MTGAOptimizedClass::Excluded));
+
+  this->MTGAOptimizedKiValues.assign(
+      numberOfVoxels,
+      0.0);
+
+  this->MTGAOptimizedDVValues.assign(
+      numberOfVoxels,
+      0.0);
+
+
+  auto metricValue =
+      [&](const MTGAParameters& parameters)
+      {
+        if (criterion == "R2")
+        {
+          return parameters.R2;
+        }
+
+        if (criterion == "AIC")
+        {
+          return parameters.AIC;
+        }
+
+        return parameters.MASE;
+      };
+
+
+  size_t patlakSelectedCount = 0;
+  size_t reversibleSelectedCount = 0;
+  size_t nonSignificantCount = 0;
+  size_t invalidCount = 0;
+
+
+  // ------------------------------------------------------------------------
+  // ONE voxelwise selection pass.
+  //
+  // Metric chooses candidate winner.
+  // Optional Vuong test only decides whether that choice is accepted.
+  // ------------------------------------------------------------------------
+
+  std::cout
+      << "[MTGA OPT] Starting voxelwise selection. "
+      << "Criterion=" << criterion.toStdString()
+      << ", reversible=" << reversibleModel
+      << ", Vuong=" << (useVuong ? "ON" : "OFF")
+      << ", alpha=" << alpha
+      << std::endl;
+
+  for (const int voxelIndex :
+       this->parametricFitVoxelIndices)
+  {
+    if (voxelIndex < 0 ||
+        static_cast<size_t>(
+            voxelIndex) >= numberOfVoxels)
+    {
+      continue;
+    }
+
+    const size_t v =
+        static_cast<size_t>(
+            voxelIndex);
+
+    const MTGAParameters& p =
+        patlak[v];
+
+    const MTGAParameters& r =
+        reversible[v];
+
+
+    // Empty fitted arrays mean that a valid fit was
+    // not produced for this voxel.
+    if (p.y.empty() ||
+        r.y.empty())
+    {
+      ++invalidCount;
+      continue;
+    }
+
+
+    const double pMetric =
+        metricValue(p);
+
+    const double rMetric =
+        metricValue(r);
+
+    if (!std::isfinite(pMetric) ||
+        !std::isfinite(rMetric))
+    {
+      ++invalidCount;
+      continue;
+    }
+
+
+    bool patlakWins = false;
+
+    if (criterion == "R2")
+    {
+      if (pMetric == rMetric)
+      {
+        ++invalidCount;
+        continue;
+      }
+
+      patlakWins =
+          pMetric > rMetric;
+    }
+    else
+    {
+      // AIC / MASE: lower is better.
+      if (pMetric == rMetric)
+      {
+        ++invalidCount;
+        continue;
+      }
+
+      patlakWins =
+          pMetric < rMetric;
+    }
+
+
+    // ------------------------------------------------------
+    // Optional significance gate.
+    //
+    // This is the ONLY place where Vuong is calculated.
+    // Refreshing RGB later never repeats this.
+    // ------------------------------------------------------
+
+    if (useVuong)
+    {
+      if (p.r.empty() ||
+          r.r.empty() ||
+          p.r.size() != r.r.size() ||
+          p.weights.size() !=
+              p.r.size() ||
+          r.weights.size() !=
+              r.r.size())
+      {
+        ++invalidCount;
+        continue;
+      }
+
+      std::vector<double> averageWeights(
+          p.weights.size(),
+          1.0);
+
+      for (size_t i = 0;
+           i < averageWeights.size();
+           ++i)
+      {
+        averageWeights[i] =
+            0.5 *
+            (
+              p.weights[i] +
+              r.weights[i]
+            );
+      }
+
+      const double pValue =
+          logic->computeVuongP(
+              p.r,
+              r.r,
+              &averageWeights,
+              p.dof,
+              r.dof,
+              VuongCorrection::BIC,
+              Tail::TwoSided);
+
+      if (!std::isfinite(pValue) ||
+          pValue >= alpha)
+      {
+        ++nonSignificantCount;
+        continue;
+      }
+    }
+
+
+    // ------------------------------------------------------
+    // Accept candidate model.
+    // ------------------------------------------------------
+
+    if (patlakWins)
+    {
+      if (!std::isfinite(p.Ki))
+      {
+        ++invalidCount;
+        continue;
+      }
+
+      this->MTGAOptimizedSelection[v] =
+          static_cast<unsigned char>(
+              MTGAOptimizedClass::Patlak);
+
+      this->MTGAOptimizedKiValues[v] =
+          p.Ki;
+
+      ++patlakSelectedCount;
+    }
+    else
+    {
+      if (!std::isfinite(r.DV))
+      {
+        ++invalidCount;
+        continue;
+      }
+
+      this->MTGAOptimizedSelection[v] =
+          static_cast<unsigned char>(
+              MTGAOptimizedClass::Reversible);
+
+      this->MTGAOptimizedDVValues[v] =
+          r.DV;
+
+      ++reversibleSelectedCount;
+    }
+  }
+
+
+  const size_t selectedCount =
+      patlakSelectedCount +
+      reversibleSelectedCount;
+
+  if (selectedCount == 0)
+  {
+    QMessageBox::warning(
+        q,
+        QObject::tr("MTGA model selection"),
+        QObject::tr(
+            "No voxel survived MTGA model selection."));
+
+    return;
+  }
+
+  std::cout
+      << "[MTGA OPT] Selection pass COMPLETE. "
+      << "Patlak=" << patlakSelectedCount
+      << ", reversible=" << reversibleSelectedCount
+      << ", non-significant=" << nonSignificantCount
+      << ", invalid=" << invalidCount
+      << std::endl;
+
+  qDebug()
+      << "MTGA optimized selection:"
+      << "criterion =" << criterion
+      << "| reversible ="
+      << reversibleQString
+      << "| Vuong =" << useVuong
+      << "| Patlak =" << patlakSelectedCount
+      << "| reversible ="
+      << reversibleSelectedCount
+      << "| non-significant ="
+      << nonSignificantCount
+      << "| invalid ="
+      << invalidCount;
+
+
+  // ------------------------------------------------------------------------
+  // Replace previous optimized visualization nodes.
+  // ------------------------------------------------------------------------
+
+  std::cout
+      << "[MTGA OPT] Removing previous optimized scene nodes..."
+      << std::endl;
+
+  this->removeMTGAOptimizedSceneNodes();
+
+  std::cout
+      << "[MTGA OPT] Previous nodes removed."
+      << std::endl;
+
+  // ------------------------------------------------------------------------
+  // Create scalar quantitative maps in Slicer.
+  // ------------------------------------------------------------------------
+
+  std::cout
+      << "[MTGA OPT] Computing robust Ki/DV display ranges..."
+      << std::endl;
+
+  if (this->MTGAShowInSlicerCheckBoxImg
+          ->isChecked())
+  {
+    const auto kiRange =
+        this->computeMTGARobustDisplayRange(
+            this->MTGAOptimizedKiValues,
+            MTGAOptimizedClass::Patlak);
+
+    const auto dvRange =
+        this->computeMTGARobustDisplayRange(
+            this->MTGAOptimizedDVValues,
+            MTGAOptimizedClass::Reversible);
+
+    std::cout
+        << "[MTGA OPT] Ki display range: "
+        << kiRange.first << " -> " << kiRange.second
+        << std::endl;
+
+    std::cout
+        << "[MTGA OPT] DV display range: "
+        << dvRange.first << " -> " << dvRange.second
+        << std::endl;
+
+
+    std::cout
+        << "[MTGA OPT] Creating optimized Ki scalar volume..."
+        << std::endl;
+    vtkMRMLScalarVolumeNode* kiNode =
+        this->createMTGAOptimizedScalarVolume(
+            this->MTGAOptimizedKiValues,
+            "MTGA Optimized Ki - " + optimizationSuffix,
+            refPETNode,
+            shNode,
+            q->petID,
+            kiRange.first,
+            kiRange.second);
+
+    std::cout
+        << "[MTGA OPT] Ki node created: "
+        << (kiNode ? kiNode->GetID() : "NULL")
+        << std::endl;
+
+    std::cout
+        << "[MTGA OPT] Creating optimized DV scalar volume..."
+        << std::endl;
+
+    vtkMRMLScalarVolumeNode* dvNode =
+        this->createMTGAOptimizedScalarVolume(
+            this->MTGAOptimizedDVValues,
+            "MTGA Optimized DV - " + optimizationSuffix,
+            refPETNode,
+            shNode,
+            q->petID,
+            dvRange.first,
+            dvRange.second);
+
+    std::cout
+        << "[MTGA OPT] DV node created: "
+        << (dvNode ? dvNode->GetID() : "NULL")
+        << std::endl;
+
+    if (kiNode)
+    {
+      this->MTGAOptimizedKiNodeID =
+          kiNode->GetID();
+    }
+
+    if (dvNode)
+    {
+      this->MTGAOptimizedDVNodeID =
+          dvNode->GetID();
+    }
+
+
+    auto setMetadata =
+        [&](vtkMRMLNode* node)
+        {
+          if (!node)
+          {
+            return;
+          }
+
+          node->SetAttribute(
+              "SlicerDynamicPET.MTGA.ReversibleModel",
+              reversibleQString
+                  .toUtf8()
+                  .constData());
+
+          node->SetAttribute(
+              "SlicerDynamicPET.MTGA.SelectionCriterion",
+              criterion
+                  .toUtf8()
+                  .constData());
+
+          node->SetAttribute(
+              "SlicerDynamicPET.MTGA.UseVuong",
+              useVuong
+                  ? "1"
+                  : "0");
+
+          if (useVuong)
+          {
+            node->SetAttribute(
+                "SlicerDynamicPET.MTGA.VuongAlpha",
+                QString::number(
+                    alpha,
+                    'g',
+                    8)
+                    .toUtf8()
+                    .constData());
+          }
+        };
+
+
+    setMetadata(kiNode);
+    setMetadata(dvNode);
+
+
+
+    if (kiNode && dvNode)
+    {
+      std::cout
+          << "[MTGA OPT] Calling refreshMTGAOptimizedRGB..."
+          << std::endl;
+
+      this->refreshMTGAOptimizedRGB();
+
+      std::cout
+          << "[MTGA OPT] refreshMTGAOptimizedRGB returned."
+          << std::endl;
+
+      vtkMRMLNode* rgbNode =
+          scene->GetNodeByID(
+              this->MTGAOptimizedRGBNodeID
+                  .c_str());
+
+      setMetadata(rgbNode);
+    }
+  }
+
+
+
+  // ------------------------------------------------------------------------
+  // DICOM PM export:
+  // only the QUANTITATIVE Ki and DV maps.
+  // RGB is intentionally not exported.
+  // ------------------------------------------------------------------------
+
+  if (this->MTGASaveDICOMCheckBoxImg
+          ->isChecked())
+  {
+    const QString outputDirectory =
+        this->MTGADICOMDirectoryImg
+            ->currentPath()
+            .trimmed();
+
+    const double framingNorm =
+        this->framingNormEditImg
+            ->text()
+            .toDouble();
+
+
+    QString kiUnitCode;
+    QString kiUnitMeaning;
+
+    bool kiUnitValid = true;
+
+    if (std::abs(
+            framingNorm - 60.0) <
+        1.0e-9)
+    {
+      kiUnitCode = "/min";
+      kiUnitMeaning =
+          "per minute";
+    }
+    else if (std::abs(
+                 framingNorm - 1.0) <
+             1.0e-9)
+    {
+      kiUnitCode = "/s";
+      kiUnitMeaning =
+          "per second";
+    }
+    else
+    {
+      kiUnitValid = false;
+    }
+
+
+    if (kiUnitValid)
+    {
+      q->ProgressBar->setMinimum(0);
+      q->ProgressBar->setMaximum(0);
+
+      q->ProgressBar->setFormat(
+          "Saving DICOM PMAP: "
+          "MTGA Optimized - Ki...");
+
+      q->ProgressBar->setVisible(true);
+
+      QApplication::processEvents();
+
+      this->exportParametricMapDICOM(
+          refPETNode,
+          this->MTGAOptimizedKiValues,
+          "MTGA",
+          "MTGAOptimized",
+          "Ki",
+          outputDirectory,
+          7160,
+          kiUnitCode,
+          kiUnitMeaning);
+    }
+    else
+    {
+      QMessageBox::warning(
+          q,
+          QObject::tr("DICOM PMAP export"),
+          QObject::tr(
+              "MTGA Optimized - Ki was not exported "
+              "because Framing Norm is %1 s.\n\n"
+              "Its physical unit cannot be represented "
+              "honestly as seconds or minutes without "
+              "rescaling the numerical values.")
+              .arg(framingNorm));
+    }
+
+
+    q->ProgressBar->setMinimum(0);
+    q->ProgressBar->setMaximum(0);
+
+    q->ProgressBar->setFormat(
+        "Saving DICOM PMAP: "
+        "MTGA Optimized - DV...");
+
+    q->ProgressBar->setVisible(true);
+
+    QApplication::processEvents();
+
+    this->exportParametricMapDICOM(
+        refPETNode,
+        this->MTGAOptimizedDVValues,
+        "MTGA",
+        "MTGAOptimized",
+        "DV",
+        outputDirectory,
+        7161,
+        "1",
+        "1");
+
+
+    q->ProgressBar->hide();
+
+    q->ProgressBar->setMinimum(0);
+    q->ProgressBar->setMaximum(100);
+    q->ProgressBar->setValue(0);
+    q->ProgressBar->setFormat("%p%");
+  }
+
+
+  this->updateMTGAOptimizationUI();
+
+  std::cout
+      << "[MTGA OPT] generateMTGAOptimizedResult END"
+      << std::endl;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+removeMTGAOptimizedSceneNodes()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  std::cout
+      << "[MTGA OPT CLEANUP] START"
+      << std::endl;
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene)
+  {
+    std::cout
+        << "[MTGA OPT CLEANUP] No MRML scene."
+        << std::endl;
+
+    return;
+  }
+
+  auto removeNode =
+      [&](std::string& nodeID)
+      {
+        if (nodeID.empty())
+        {
+          return;
+        }
+
+        std::cout
+            << "[MTGA OPT CLEANUP] Looking for node: "
+            << nodeID
+            << std::endl;
+
+        vtkMRMLNode* node =
+            scene->GetNodeByID(
+                nodeID.c_str());
+
+        if (node)
+        {
+          std::cout
+              << "[MTGA OPT CLEANUP] Removing node: "
+              << node->GetName()
+              << " ["
+              << node->GetID()
+              << "]"
+              << std::endl;
+
+          scene->RemoveNode(node);
+        }
+        else
+        {
+          std::cout
+              << "[MTGA OPT CLEANUP] Node no longer exists."
+              << std::endl;
+        }
+
+        nodeID.clear();
+      };
+
+  // Remove RGB first because it depends visually
+  // on the Ki/DV optimized volumes.
+  removeNode(
+      this->MTGAOptimizedRGBNodeID);
+
+  removeNode(
+      this->MTGAOptimizedKiNodeID);
+
+  removeNode(
+      this->MTGAOptimizedDVNodeID);
+
+  this->RefreshMTGARGBButtonImg
+      ->setEnabled(false);
+
+  std::cout
+      << "[MTGA OPT CLEANUP] END"
+      << std::endl;
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::populateTCMOptimizationModels()
@@ -3123,6 +4648,1049 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOptimizationUI()
           anyParameter &&
           (show || save) &&
           saveReady);
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+removeTCMOptimizedSceneNodes()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!scene)
+  {
+    return;
+  }
+
+  for (std::string& nodeID :
+       this->TCMOptimizedNodeIDs)
+  {
+    if (nodeID.empty())
+    {
+      continue;
+    }
+
+    vtkMRMLNode* node =
+        scene->GetNodeByID(
+            nodeID.c_str());
+
+    if (node)
+    {
+      scene->RemoveNode(node);
+    }
+  }
+
+  this->TCMOptimizedNodeIDs.clear();
+
+  if (!this->TCMOptimizedModelSelectionNodeID.empty())
+  {
+    vtkMRMLNode* node =
+        scene->GetNodeByID(
+            this->
+                TCMOptimizedModelSelectionNodeID
+                .c_str());
+
+    if (node)
+    {
+      scene->RemoveNode(node);
+    }
+
+    this->TCMOptimizedModelSelectionNodeID.clear();
+  }
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+generateTCMOptimizedResult()
+{
+  Q_Q(qSlicerDynamicPETModuleWidget);
+
+  std::cout
+      << "[TCM OPT] START"
+      << std::endl;
+
+  vtkSlicerDynamicPETLogic* logic =
+      vtkSlicerDynamicPETLogic::SafeDownCast(
+          q->logic());
+
+  vtkMRMLScene* scene =
+      q->mrmlScene();
+
+  if (!logic || !scene)
+  {
+    return;
+  }
+
+  vtkMRMLSubjectHierarchyNode* shNode =
+      vtkMRMLSubjectHierarchyNode::
+          GetSubjectHierarchyNode(scene);
+
+  if (!shNode)
+  {
+    return;
+  }
+
+  vtkMRMLScalarVolumeNode* refPETNode =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          shNode->GetItemDataNode(
+              q->petID));
+
+  if (!refPETNode)
+  {
+    return;
+  }
+
+  const size_t numberOfVoxels =
+      q->PET_flatten_values.size();
+
+  if (numberOfVoxels == 0)
+  {
+    return;
+  }
+
+  // ------------------------------------------------------------------------
+  // Selected models
+  // ------------------------------------------------------------------------
+
+  std::vector<std::string> selectedModels;
+
+  for (int i = 0;
+       i <
+       this->TCMOptimizationModelsCheckLayoutImg
+           ->count();
+       ++i)
+  {
+    QLayoutItem* item =
+        this->TCMOptimizationModelsCheckLayoutImg
+            ->itemAt(i);
+
+    QCheckBox* cb =
+        qobject_cast<QCheckBox*>(
+            item->widget());
+
+    if (cb && cb->isChecked())
+    {
+      selectedModels.push_back(
+          cb->text().toStdString());
+    }
+  }
+
+  if (selectedModels.size() < 2)
+  {
+    return;
+  }
+
+  // Every selected cached result must correspond to the
+  // complete PET voxel grid.
+  for (const std::string& modelID :
+       selectedModels)
+  {
+    auto it =
+        q->TCMImgOutcomes.find(modelID);
+
+    if (it == q->TCMImgOutcomes.end() ||
+        it->second.size() != numberOfVoxels)
+    {
+      QMessageBox::warning(
+          q,
+          QObject::tr("TCM model selection"),
+          QObject::tr(
+              "Cached voxelwise result for %1 "
+              "is missing or has an invalid size.")
+              .arg(
+                  QString::fromStdString(
+                      modelID)));
+
+      return;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // Requested output parameters
+  // ------------------------------------------------------------------------
+
+  std::vector<std::string> outputFields;
+
+  if (this->TCMOptK1CheckBoxImg->isChecked())
+    outputFields.push_back("K1");
+
+  if (this->TCMOptk2CheckBoxImg->isChecked())
+    outputFields.push_back("k2");
+
+  if (this->TCMOptk3CheckBoxImg->isChecked())
+    outputFields.push_back("k3");
+
+  if (this->TCMOptk4CheckBoxImg->isChecked())
+    outputFields.push_back("k4");
+
+  if (this->TCMOptvbCheckBoxImg->isChecked())
+    outputFields.push_back("vb");
+
+  if (this->TCMOpttdCheckBoxImg->isChecked())
+    outputFields.push_back("td");
+
+  if (this->TCMOptKiCheckBoxImg->isChecked())
+    outputFields.push_back("Ki");
+
+  if (this->TCMOptDVCheckBoxImg->isChecked())
+    outputFields.push_back("DV");
+
+  if (outputFields.empty())
+  {
+    return;
+  }
+
+  const QString criterion =
+      this->TCMSelectionCriterionComboImg
+          ->currentText();
+
+  const bool useTests =
+      this->TCMUseStatTestsCheckBoxImg
+          ->isChecked();
+
+  const double alpha =
+      this->TCMStatAlphaSpinBoxImg
+          ->value();
+
+  // ------------------------------------------------------------------------
+  // Helpers
+  // ------------------------------------------------------------------------
+
+  auto criterionValue =
+      [&](const TCMParameters& p)
+      {
+        if (criterion == "AIC")
+          return p.AIC;
+
+        if (criterion == "BIC")
+          return p.BIC;
+
+        if (criterion == "MASE")
+          return p.MASE;
+
+        return p.chi2;
+      };
+
+  auto modelCode =
+      [](const std::string& modelID)
+          -> unsigned char
+      {
+        if (modelID == "1TCM")   return 1;
+        if (modelID == "1TdCM")  return 2;
+        if (modelID == "1TiCM")  return 3;
+        if (modelID == "1TidCM") return 4;
+        if (modelID == "2TCM")   return 5;
+        if (modelID == "2TdCM")  return 6;
+        if (modelID == "2TiCM")  return 7;
+        if (modelID == "2TidCM") return 8;
+
+        return 0;
+      };
+
+  auto modelHasField =
+      [](const std::string& modelID,
+         const std::string& field)
+      {
+        if (field == "K1" ||
+            field == "vb" ||
+            field == "Ki")
+        {
+          return true;
+        }
+
+        if (field == "k2")
+        {
+          return
+              modelID == "1TCM" ||
+              modelID == "1TdCM" ||
+              modelID == "2TCM" ||
+              modelID == "2TdCM" ||
+              modelID == "2TiCM" ||
+              modelID == "2TidCM";
+        }
+
+        if (field == "k3")
+        {
+          return
+              modelID == "2TCM" ||
+              modelID == "2TdCM" ||
+              modelID == "2TiCM" ||
+              modelID == "2TidCM";
+        }
+
+        if (field == "k4")
+        {
+          return
+              modelID == "2TCM" ||
+              modelID == "2TdCM";
+        }
+
+        if (field == "td")
+        {
+          return
+              modelID == "1TdCM" ||
+              modelID == "1TidCM" ||
+              modelID == "2TdCM" ||
+              modelID == "2TidCM";
+        }
+
+        // DV is meaningful only for reversible models.
+        if (field == "DV")
+        {
+          return
+              modelID == "1TCM" ||
+              modelID == "1TdCM" ||
+              modelID == "2TCM" ||
+              modelID == "2TdCM";
+        }
+
+        return false;
+      };
+
+  auto parameterValue =
+      [](const TCMParameters& p,
+         const std::string& field)
+      {
+        if (field == "K1") return p.K1;
+        if (field == "k2") return p.k2;
+        if (field == "k3") return p.k3;
+        if (field == "k4") return p.k4;
+        if (field == "vb") return p.vb;
+        if (field == "td") return p.td;
+        if (field == "Ki") return p.Ki;
+        if (field == "DV") return p.DV;
+
+        return
+            std::numeric_limits<double>::
+                quiet_NaN();
+      };
+
+  // ------------------------------------------------------------------------
+  // Allocate outputs
+  // ------------------------------------------------------------------------
+
+  std::vector<unsigned char> selectedModelMap(
+      numberOfVoxels,
+      static_cast<unsigned char>(0));
+
+  std::map<
+      std::string,
+      std::vector<double>>
+      optimizedValues;
+
+  for (const std::string& field :
+       outputFields)
+  {
+    optimizedValues[field].assign(
+        numberOfVoxels,
+        0.0);
+  }
+
+  std::map<std::string, size_t>
+      selectedCounts;
+
+  size_t invalidVoxelCount = 0;
+  size_t simplifiedVoxelCount = 0;
+  size_t skippedStatComparisonCount = 0;
+
+  size_t lrtComparisonCount = 0;
+  size_t vuongComparisonCount = 0;
+
+  // ------------------------------------------------------------------------
+  // Progress
+  // ------------------------------------------------------------------------
+
+  q->ProgressBar->setMinimum(0);
+  q->ProgressBar->setMaximum(100);
+  q->ProgressBar->setValue(0);
+  q->ProgressBar->setFormat(
+      "Selecting TCM model (%p%)");
+  q->ProgressBar->setVisible(true);
+
+  const size_t totalEligible =
+      this->parametricFitVoxelIndices.size();
+
+  const size_t updateInterval =
+      std::max(
+          static_cast<size_t>(1),
+          totalEligible / 100);
+
+  size_t processed = 0;
+
+  auto updateProgress =
+      [&]()
+      {
+        ++processed;
+
+        if (processed % updateInterval == 0 ||
+            processed == totalEligible)
+        {
+          const int value =
+              totalEligible > 0
+              ? static_cast<int>(
+                    100 * processed /
+                    totalEligible)
+              : 100;
+
+          q->ProgressBar->setValue(value);
+
+          QApplication::processEvents();
+        }
+      };
+
+  // ------------------------------------------------------------------------
+  // Single voxelwise selection pass
+  // ------------------------------------------------------------------------
+
+  for (const int voxelIndex :
+       this->parametricFitVoxelIndices)
+  {
+    if (voxelIndex < 0 ||
+        static_cast<size_t>(voxelIndex) >=
+            numberOfVoxels)
+    {
+      updateProgress();
+      continue;
+    }
+
+    const size_t v =
+        static_cast<size_t>(
+            voxelIndex);
+
+    // ------------------------------------------------------
+    // 1. Criterion-selected model.
+    // All four TCM criteria are minimized.
+    // ------------------------------------------------------
+
+    const TCMParameters* bestParams =
+        nullptr;
+
+    std::string bestModel;
+
+    double bestMetric =
+        std::numeric_limits<double>::
+            infinity();
+
+    for (const std::string& modelID :
+         selectedModels)
+    {
+      const TCMParameters& p =
+          q->TCMImgOutcomes
+              .at(modelID)[v];
+
+      const double metric =
+          criterionValue(p);
+
+      // This model is invalid for this voxel.
+      if (!std::isfinite(metric))
+      {
+        continue;
+      }
+
+      if (!bestParams ||
+          metric < bestMetric ||
+          (metric == bestMetric &&
+           p.dof < bestParams->dof))
+      {
+        bestParams = &p;
+        bestModel = modelID;
+        bestMetric = metric;
+      }
+    }
+
+    // All selected models were invalid.
+    if (!bestParams)
+    {
+      ++invalidVoxelCount;
+      updateProgress();
+      continue;
+    }
+
+    // ------------------------------------------------------
+    // 2. Optional statistical simplification.
+    //
+    // IMPORTANT:
+    // all alternatives are compared with the ORIGINAL
+    // criterion-selected winner, never with a progressively
+    // replaced winner.
+    // ------------------------------------------------------
+
+    std::string finalModel =
+        bestModel;
+
+    const TCMParameters* finalParams =
+        bestParams;
+
+    int finalDof =
+        bestParams->dof;
+
+    double finalMetric =
+        bestMetric;
+
+    if (useTests)
+    {
+      for (const std::string& alternativeModel :
+           selectedModels)
+      {
+        if (alternativeModel == bestModel)
+        {
+          continue;
+        }
+
+        const TCMParameters& alternative =
+            q->TCMImgOutcomes
+                .at(alternativeModel)[v];
+
+        const double alternativeMetric =
+            criterionValue(alternative);
+
+        if (!std::isfinite(
+                alternativeMetric))
+        {
+          continue;
+        }
+
+        // We only use statistical testing to simplify.
+        if (alternative.dof >=
+            bestParams->dof)
+        {
+          continue;
+        }
+
+        // compareModels() may need either likelihoods
+        // (LRT) or residuals/weights (Vuong).
+        // Valid fitted TCM results normally contain all.
+        if (!std::isfinite(
+                bestParams->loglik) ||
+            !std::isfinite(
+                alternative.loglik) ||
+            bestParams->r.empty() ||
+            alternative.r.empty() ||
+            bestParams->r.size() !=
+                alternative.r.size() ||
+            bestParams->weights.size() !=
+                alternative.weights.size() ||
+            bestParams->weights.size() !=
+                bestParams->r.size())
+        {
+          ++skippedStatComparisonCount;
+          continue;
+        }
+
+        ModelComparisonResult comparison;
+
+        try
+        {
+          comparison =
+              logic->compareModels(
+                  bestModel,
+                  alternativeModel,
+                  *bestParams,
+                  alternative);
+          if (comparison.type == "LRT")
+          {
+            ++lrtComparisonCount;
+          }
+          else if (comparison.type == "Vuong")
+          {
+            ++vuongComparisonCount;
+          }
+        }
+        catch (const std::exception& e)
+        {
+          qWarning()
+              << "TCM model comparison failed:"
+              << QString::fromStdString(
+                     bestModel)
+              << "vs"
+              << QString::fromStdString(
+                     alternativeModel)
+              << ":"
+              << e.what();
+
+          ++skippedStatComparisonCount;
+          continue;
+        }
+
+        if (!std::isfinite(
+                comparison.p_value))
+        {
+          ++skippedStatComparisonCount;
+          continue;
+        }
+
+        // No significant evidence of a difference:
+        // the simpler model becomes a candidate.
+        if (comparison.p_value >= alpha)
+        {
+          if (alternative.dof < finalDof ||
+              (alternative.dof == finalDof &&
+               alternativeMetric <
+                   finalMetric))
+          {
+            finalModel =
+                alternativeModel;
+
+            finalParams =
+                &alternative;
+
+            finalDof =
+                alternative.dof;
+
+            finalMetric =
+                alternativeMetric;
+          }
+        }
+      }
+    }
+
+    if (finalModel != bestModel)
+    {
+      ++simplifiedVoxelCount;
+    }
+
+    const unsigned char code =
+        modelCode(finalModel);
+
+    if (code == 0)
+    {
+      ++invalidVoxelCount;
+      updateProgress();
+      continue;
+    }
+
+    selectedModelMap[v] =
+        code;
+
+    ++selectedCounts[finalModel];
+
+    // ------------------------------------------------------
+    // 3. Copy the parameters from the selected model.
+    //
+    // A parameter absent from that model stays zero.
+    // ------------------------------------------------------
+
+    for (const std::string& field :
+         outputFields)
+    {
+      if (!modelHasField(
+              finalModel,
+              field))
+      {
+        continue;
+      }
+
+      const double value =
+          parameterValue(
+              *finalParams,
+              field);
+
+      if (std::isfinite(value))
+      {
+        optimizedValues[field][v] =
+            value;
+      }
+    }
+
+    updateProgress();
+  }
+
+  q->ProgressBar->setValue(100);
+
+  std::cout
+      << "[TCM OPT] Selection COMPLETE"
+      << " | criterion="
+      << criterion.toStdString()
+      << " | tests="
+      << (useTests ? "ON" : "OFF")
+      << " | invalid="
+      << invalidVoxelCount
+      << " | simplified="
+      << simplifiedVoxelCount
+      << " | LRT comparisons="
+      << lrtComparisonCount
+      << " | Vuong comparisons="
+      << vuongComparisonCount
+      << " | skipped statistical comparisons="
+      << skippedStatComparisonCount
+      << std::endl;
+
+  for (const auto& item :
+       selectedCounts)
+  {
+    std::cout
+        << "[TCM OPT] "
+        << item.first
+        << " selected: "
+        << item.second
+        << std::endl;
+  }
+
+  // ------------------------------------------------------------------------
+  // Provenance strings
+  // ------------------------------------------------------------------------
+
+  QString comparedModels;
+
+  for (size_t i = 0;
+       i < selectedModels.size();
+       ++i)
+  {
+    if (i > 0)
+    {
+      comparedModels += ", ";
+    }
+
+    comparedModels +=
+        QString::fromStdString(
+            selectedModels[i]);
+  }
+
+  QString tcmDerivationDetails =
+      QString(
+          "selectionCriterion=%1; "
+          "comparedModels=%2; "
+          "statisticalTests=%3")
+          .arg(
+              criterion,
+              comparedModels,
+              useTests ? "ON" : "OFF");
+
+  if (useTests)
+  {
+    tcmDerivationDetails +=
+        QString(
+            "; alpha=%1; "
+            "nestedComparison=LRT; "
+            "nonNestedComparison=Vuong; "
+            "selectionPolicy=prefer simpler model "
+            "when p>=alpha")
+            .arg(
+                alpha,
+                0,
+                'g',
+                8);
+  }
+
+  QString suffix =
+      criterion;
+
+  if (useTests)
+  {
+    suffix +=
+        QString(" - Tests alpha=%1")
+            .arg(
+                alpha,
+                0,
+                'g',
+                3);
+  }
+
+  auto setMetadata =
+      [&](vtkMRMLNode* node)
+      {
+        if (!node)
+        {
+          return;
+        }
+
+        node->SetAttribute(
+            "SlicerDynamicPET.TCM.SelectionCriterion",
+            criterion
+                .toUtf8()
+                .constData());
+
+        node->SetAttribute(
+            "SlicerDynamicPET.TCM.ComparedModels",
+            comparedModels
+                .toUtf8()
+                .constData());
+
+        node->SetAttribute(
+            "SlicerDynamicPET.TCM.UseStatTests",
+            useTests ? "1" : "0");
+
+        if (useTests)
+        {
+          node->SetAttribute(
+              "SlicerDynamicPET.TCM.StatAlpha",
+              QString::number(
+                  alpha,
+                  'g',
+                  8)
+                  .toUtf8()
+                  .constData());
+        }
+      };
+
+  // ------------------------------------------------------------------------
+  // Show quantitative maps + selection map in Slicer
+  // ------------------------------------------------------------------------
+
+  if (this->TCMShowInSlicerCheckBoxImg
+          ->isChecked())
+  {
+    this->removeTCMOptimizedSceneNodes();
+
+    const vtkIdType refItemID =
+        shNode->GetItemByDataNode(
+            refPETNode);
+
+    const vtkIdType parentItemID =
+        shNode->GetItemParent(
+            refItemID);
+
+    auto createVolume =
+        [&](const std::vector<double>& values,
+            const QString& name)
+            -> vtkMRMLScalarVolumeNode*
+        {
+          vtkMRMLScalarVolumeNode* node =
+              logic->Flatten2Image(
+                  values,
+                  q->PETdims,
+                  name.toStdString());
+
+          if (!node)
+          {
+            return nullptr;
+          }
+
+          node->CopyOrientation(
+              refPETNode);
+
+          node->SetSpacing(
+              refPETNode->GetSpacing());
+
+          node->SetOrigin(
+              refPETNode->GetOrigin());
+
+          const vtkIdType itemID =
+              shNode->GetItemByDataNode(
+                  node);
+
+          if (itemID !=
+              vtkMRMLSubjectHierarchyNode::
+                  INVALID_ITEM_ID)
+          {
+            shNode->SetItemParent(
+                itemID,
+                parentItemID);
+          }
+
+          return node;
+        };
+
+    q->ProgressBar->setMinimum(0);
+    q->ProgressBar->setMaximum(0);
+    q->ProgressBar->setFormat(
+        "Creating optimized TCM maps...");
+    QApplication::processEvents();
+
+    for (const std::string& field :
+         outputFields)
+    {
+      const QString name =
+          "TCM Optimized - " +
+          QString::fromStdString(field) +
+          " - " +
+          suffix;
+
+      vtkMRMLScalarVolumeNode* node =
+          createVolume(
+              optimizedValues.at(field),
+              name);
+
+      if (!node)
+      {
+        continue;
+      }
+
+      setMetadata(node);
+
+      this->TCMOptimizedNodeIDs
+          .push_back(
+              node->GetID());
+    }
+
+    // ------------------------------------------------------
+    // Model-selection visualization.
+    // ------------------------------------------------------
+
+    std::vector<double> selectionValues(
+        numberOfVoxels,
+        0.0);
+
+    for (size_t v = 0;
+         v < numberOfVoxels;
+         ++v)
+    {
+      selectionValues[v] =
+          static_cast<double>(
+              selectedModelMap[v]);
+    }
+
+    vtkMRMLScalarVolumeNode*
+        selectionNode =
+            createVolume(
+                selectionValues,
+                "TCM Optimized Model Selection - " +
+                suffix);
+
+    if (selectionNode)
+    {
+      setMetadata(selectionNode);
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.0",
+          "Excluded");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.1",
+          "1TCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.2",
+          "1TdCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.3",
+          "1TiCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.4",
+          "1TidCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.5",
+          "2TCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.6",
+          "2TdCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.7",
+          "2TiCM");
+
+      selectionNode->SetAttribute(
+          "SlicerDynamicPET.TCM.ModelCode.8",
+          "2TidCM");
+
+      vtkMRMLScalarVolumeDisplayNode*
+          displayNode =
+              vtkMRMLScalarVolumeDisplayNode::
+                  SafeDownCast(
+                      selectionNode->
+                          GetDisplayNode());
+
+      if (displayNode)
+      {
+        displayNode->AutoWindowLevelOff();
+
+        displayNode->SetWindowLevelMinMax(
+            0.0,
+            8.0);
+
+        displayNode->SetAndObserveColorNodeID(
+            "vtkMRMLColorTableNodeLabels");
+      }
+
+      this->TCMOptimizedModelSelectionNodeID =
+          selectionNode->GetID();
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // DICOM PMAP export:
+  // only quantitative parameter maps.
+  // Selection map is visualization-only.
+  // ------------------------------------------------------------------------
+
+  if (this->TCMSaveDICOMCheckBoxImg
+          ->isChecked())
+  {
+    const QString outputDirectory =
+        this->TCMDICOMDirectoryImg
+            ->currentPath()
+            .trimmed();
+
+    auto fieldIndex =
+        [](const std::string& field)
+        {
+          if (field == "K1") return 0;
+          if (field == "k2") return 1;
+          if (field == "k3") return 2;
+          if (field == "k4") return 3;
+          if (field == "vb") return 4;
+          if (field == "td") return 5;
+          if (field == "Ki") return 6;
+          if (field == "DV") return 7;
+
+          return 99;
+        };
+
+    for (const std::string& field :
+         outputFields)
+    {
+      QString unitCode = "1";
+      QString unitMeaning = "1";
+
+      if (field == "K1" ||
+          field == "k2" ||
+          field == "k3" ||
+          field == "k4" ||
+          field == "Ki")
+      {
+        unitCode = "/s";
+        unitMeaning = "per second";
+      }
+      else if (field == "td")
+      {
+        unitCode = "s";
+        unitMeaning = "s";
+      }
+
+      q->ProgressBar->setMinimum(0);
+      q->ProgressBar->setMaximum(0);
+
+      q->ProgressBar->setFormat(
+          "Saving DICOM PMAP: "
+          "TCM Optimized - " +
+          QString::fromStdString(field) +
+          "...");
+
+      QApplication::processEvents();
+
+      const bool ok =
+          this->exportParametricMapDICOM(
+              refPETNode,
+              optimizedValues.at(field),
+              "TCM",
+              "TCMOptimized",
+              field,
+              outputDirectory,
+              7400 + fieldIndex(field),
+              unitCode,
+              unitMeaning,
+              tcmDerivationDetails);
+
+      if (!ok)
+      {
+        break;
+      }
+    }
+  }
+
+  q->ProgressBar->hide();
+  q->ProgressBar->setMinimum(0);
+  q->ProgressBar->setMaximum(100);
+  q->ProgressBar->setValue(0);
+  q->ProgressBar->setFormat("%p%");
+
+  std::cout
+      << "[TCM OPT] END"
+      << std::endl;
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::
@@ -3357,7 +5925,8 @@ exportParametricMapDICOM(
     const QString& outputDirectory,
     int seriesNumber,
     const QString& unitCode,
-    const QString& unitMeaning)
+    const QString& unitMeaning,
+    const QString& derivationDetails)
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
@@ -3635,6 +6204,8 @@ exportParametricMapDICOM(
     methodCode = "SDP_LOGAN";
   else if (modelID == "RE")
     methodCode = "SDP_RE";
+  else if (modelID == "MTGAOptimized")
+    methodCode = "SDP_MTGAOPT";
   else if (modelID == "1TCM")
     methodCode = "SDP_1TCM";
   else if (modelID == "1TdCM")
@@ -3645,12 +6216,14 @@ exportParametricMapDICOM(
     methodCode = "SDP_1TIDCM";
   else if (modelID == "2TCM")
     methodCode = "SDP_2TCM";
-  else if (modelID == "2dTCM")
+  else if (modelID == "2TdCM")
     methodCode = "SDP_2DTCM";
   else if (modelID == "2TiCM")
     methodCode = "SDP_2TICM";
   else if (modelID == "2TidCM")
     methodCode = "SDP_2TIDCM";
+  else if (modelID == "TCMOptimized")
+    methodCode = "SDP_TCMOPT";
   else
   {
     qWarning()
@@ -3798,7 +6371,8 @@ exportParametricMapDICOM(
               methodCode,
               methodMeaning,
               unitCode,
-              unitMeaning
+              unitMeaning,
+              derivationDetails
           });
 
   // Save-only must not leave anything in the MRML scene.
@@ -3905,7 +6479,7 @@ outputTCMParametricResult(
       "AIC", "MASE", "BIC", "chi2"
     };
   }
-  else if (modelID == "2dTCM")
+  else if (modelID == "2TdCM")
   {
     fields =
     {
@@ -3979,7 +6553,7 @@ outputTCMParametricResult(
     else if (modelID == "1TiCM")  modelIndex = 2;
     else if (modelID == "1TidCM") modelIndex = 3;
     else if (modelID == "2TCM")   modelIndex = 4;
-    else if (modelID == "2dTCM")  modelIndex = 5;
+    else if (modelID == "2TdCM")  modelIndex = 5;
     else if (modelID == "2TiCM")  modelIndex = 6;
     else if (modelID == "2TidCM") modelIndex = 7;
 
@@ -4214,6 +6788,20 @@ resetParametricImagingSelections()
   this->TCMImgFitSignatures.clear();
   this->MTGAImgFitSignatures.clear();
 
+  this->TCMOptimizedNodeIDs.clear();
+  this->TCMOptimizedModelSelectionNodeID.clear();
+
+  this->MTGAOptimizedSelection.clear();
+  this->MTGAOptimizedKiValues.clear();
+  this->MTGAOptimizedDVValues.clear();
+
+  this->MTGAOptimizedKiNodeID.clear();
+  this->MTGAOptimizedDVNodeID.clear();
+  this->MTGAOptimizedRGBNodeID.clear();
+
+  this->RefreshMTGARGBButtonImg
+      ->setEnabled(false);
+
   this->populateTCMOptimizationModels();
   this->updateMTGAOptimizationUI();
 
@@ -4319,7 +6907,7 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
     "Patlak", "Logan", "RE"
   };
   this->ModelsNamesTCM = QStringList{
-    "1TCM", "1TdCM", "1TiCM", "1TidCM", "2TCM", "2dTCM", "2TiCM", "2TidCM"
+    "1TCM", "1TdCM", "1TiCM", "1TidCM", "2TCM", "2TdCM", "2TiCM", "2TidCM"
   };
   this->StatsNames = QStringList{
     "Mean", "Median", "Peak"
@@ -6864,7 +9452,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         //                     ub_2tcm, sens, dk, timestep, pbrp, maxiter,
         //                     1, this->segmentTCM[segmentID]["2TCM"]);
       }
-      else if (modelID == "2dTCM") {
+      else if (modelID == "2TdCM") {
         bool sens[] = {true, true, true, true, true, true};
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
@@ -6872,14 +9460,14 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         logic->callTCM(tacVOI, Cp, framing, Nframe, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, pbrp, maxiter, 2,
-                       this->segmentTCM[segmentID]["2dTCM"],
-                       this->segmentTCMfits[segmentID]["2dTCM"],
+                       this->segmentTCM[segmentID]["2TdCM"],
+                       this->segmentTCMfits[segmentID]["2TdCM"],
                        wgt
                      );
-        // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2dTCM"],
+        // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TdCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
         //                     ub_2tcm, sens, dk, timestep, pbrp, maxiter,
-        //                     1, this->segmentTCM[segmentID]["2dTCM"]);
+        //                     1, this->segmentTCM[segmentID]["2TdCM"]);
       }
       else if (modelID == "2TiCM") {
         bool sens[] = {true, true, true, true, false, false};
@@ -7251,24 +9839,24 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
             modelID == "1TCM"  ||
             modelID == "1TdCM" ||
             modelID == "2TCM"  ||
-            modelID == "2dTCM" ||
+            modelID == "2TdCM" ||
             modelID == "2TiCM" ||
             modelID == "2TidCM";
 
         const bool usesK3 =
             modelID == "2TCM"  ||
-            modelID == "2dTCM" ||
+            modelID == "2TdCM" ||
             modelID == "2TiCM" ||
             modelID == "2TidCM";
 
         const bool usesK4 =
             modelID == "2TCM" ||
-            modelID == "2dTCM";
+            modelID == "2TdCM";
 
         const bool usesTd =
             modelID == "1TdCM"  ||
             modelID == "1TidCM" ||
-            modelID == "2dTCM"  ||
+            modelID == "2TdCM"  ||
             modelID == "2TidCM";
 
         if (usesK2)

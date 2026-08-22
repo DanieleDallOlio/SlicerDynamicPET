@@ -180,6 +180,7 @@ public:
 
   void resetParametricImagingSelections();
   void setPETItemID(vtkIdType newPetID);
+
 };
 
 //-----------------------------------------------------------------------------
@@ -639,9 +640,27 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
 
             df.to_excel(writer, sheet_name=sheet, index=False)
 
+# --------------------------------------------------------------------------
+# DICOM PM spatial-source cache.
+#
+# Only one PET source is retained. A different geometry UID set
+# automatically replaces the previous cache.
+# --------------------------------------------------------------------------
+
+_DPE_PMAP_SOURCE_CACHE = {
+    "key": None,
+    "source_images": None,
+}
+
+
+def DPE_clear_parametric_map_source_cache():
+    _DPE_PMAP_SOURCE_CACHE["key"] = None
+    _DPE_PMAP_SOURCE_CACHE["source_images"] = None
+
 def DPE_export_parametric_map(
     volume_node_id,
-    instance_uids,
+    geometry_instance_uids,
+    all_instance_uids,
     output_path,
     series_description,
     series_number,
@@ -674,61 +693,115 @@ def DPE_export_parametric_map(
             }
 
         # ------------------------------------------------------------
-        # 2. Resolve ALL source PET DICOM instances
+        # 2. Separate spatial construction sources from provenance.
         # ------------------------------------------------------------
-        uid_list = str(instance_uids).split()
 
-        if not uid_list:
+        geometry_uid_list = str(
+            geometry_instance_uids
+        ).split()
+
+        all_uid_list = str(
+            all_instance_uids
+        ).split()
+
+        if not geometry_uid_list:
             return {
                 "ok": False,
                 "error":
-                    "Source PET DICOM instance UID list is empty."
+                    "Source PET geometry UID list is empty."
             }
 
-        source_paths = []
-        seen_paths = set()
-
-        for uid in uid_list:
-            path = slicer.dicomDatabase.fileForInstance(uid)
-
-            if (
-                path and
-                os.path.isfile(path) and
-                path not in seen_paths
-            ):
-                seen_paths.add(path)
-                source_paths.append(path)
-
-        if not source_paths:
+        if not all_uid_list:
             return {
                 "ok": False,
                 "error":
-                    "Could not resolve any source PET DICOM "
-                    "instances from the Slicer DICOM database."
+                    "Source PET provenance UID list is empty."
             }
 
-        # ------------------------------------------------------------
-        # 3. Read source DICOM objects
-        #
-        # Works for:
-        #   - one Enhanced PET multiframe instance
-        #   - a classic series of single-frame PET instances
-        # ------------------------------------------------------------
-        source_images = [
-            hd.imread(path)
-            for path in source_paths
-        ]
 
         # ------------------------------------------------------------
-        # Determine whether source PET uses classic single-frame
-        # instances or Enhanced PET multiframe instances.
+        # 3. Read only the DICOM objects needed to define spatial
+        # geometry.
         #
-        # highdicom ParametricMap accepts:
+        # Classic PET:
+        #   one temporal frame -> one complete slice stack.
         #
-        #   - many single-frame source images
-        #   - ONE multiframe source image
+        # Enhanced PET:
+        #   one temporal frame -> one multiframe DICOM object.
         #
-        # but not multiple multiframe source images.
+        # These objects are cached and reused by every parameter map
+        # exported from this PET.
+        # ------------------------------------------------------------
+
+        source_cache_key = tuple(
+            geometry_uid_list
+        )
+
+        if (
+            _DPE_PMAP_SOURCE_CACHE["key"]
+                == source_cache_key
+            and
+            _DPE_PMAP_SOURCE_CACHE["source_images"]
+                is not None
+        ):
+            source_images = (
+                _DPE_PMAP_SOURCE_CACHE[
+                    "source_images"
+                ]
+            )
+
+        else:
+
+            source_paths = []
+            seen_paths = set()
+
+            for uid in geometry_uid_list:
+
+                path = (
+                    slicer.dicomDatabase
+                    .fileForInstance(uid)
+                )
+
+                if (
+                    path
+                    and os.path.isfile(path)
+                    and path not in seen_paths
+                ):
+                    seen_paths.add(path)
+                    source_paths.append(path)
+
+            if not source_paths:
+                return {
+                    "ok": False,
+                    "error":
+                        "Could not resolve the PET spatial "
+                        "reference DICOM instances from the "
+                        "Slicer DICOM database."
+                }
+
+            # Metadata only: source pixel values are not required
+            # to construct the derived parametric volume.
+            import pydicom
+
+            source_images = [
+                pydicom.dcmread(
+                    path,
+                    stop_before_pixels=True
+                )
+                for path in source_paths
+            ]
+
+            _DPE_PMAP_SOURCE_CACHE["key"] = (
+                source_cache_key
+            )
+
+            _DPE_PMAP_SOURCE_CACHE[
+                "source_images"
+            ] = source_images
+
+
+        # ------------------------------------------------------------
+        # Spatial source type.
         # ------------------------------------------------------------
 
         source_is_multiframe = [
@@ -758,47 +831,33 @@ def DPE_export_parametric_map(
             return {
                 "ok": False,
                 "error":
-                    "Source PET contains a mixture of "
-                    "single-frame and multiframe DICOM images. "
-                    "This combination is not supported."
+                    "PET spatial reference contains a mixture "
+                    "of single-frame and multiframe DICOM images."
             }
 
-
         # ------------------------------------------------------------
-        # Source images passed to the highdicom constructor.
-        #
-        # Classic PET:
-        #     keep all single-frame images.
-        #
-        # Enhanced PET:
-        #     use the first temporal Enhanced PET instance only as
-        #     the spatial reference for constructing the PM.
-        #
-        # All Enhanced temporal instances are added back to the PM
-        # SourceImageSequence after construction.
+        # Validate spatial source datasets.
         # ------------------------------------------------------------
 
-        if has_multiframe_sources:
-            constructor_source_images = [
-                source_images[0]
-            ]
-        else:
-            constructor_source_images = (
-                source_images
-            )
+        if (
+            has_multiframe_sources
+            and len(source_images) != 1
+        ):
+            return {
+                "ok": False,
+                "error":
+                    "Enhanced PET spatial reference must contain "
+                    "exactly one multiframe DICOM instance."
+            }
 
 
         # ------------------------------------------------------------
         # Normalize mandatory Type-2 patient/study attributes.
         #
-        # DICOM Type 2 means the attribute must be present, but its
-        # value may legitimately be empty if it is unknown.
-        #
-        # Some PET datasets omit these attributes completely.
-        # highdicom accesses them directly when constructing a derived
-        # Parametric Map, therefore add empty values rather than
-        # inventing patient/study information.
+        # Type 2 attributes must exist, but may legitimately have
+        # an empty value when unknown.
         # ------------------------------------------------------------
+
         required_type2_attributes = {
             "PatientName": "",
             "PatientID": "",
@@ -822,57 +881,9 @@ def DPE_export_parametric_map(
                         empty_value
                     )
 
+
         first_source = source_images[0]
 
-        if has_multiframe_sources:
-
-            reference_frames = int(
-                getattr(
-                    first_source,
-                    "NumberOfFrames",
-                    1
-                )
-            )
-
-            reference_rows = int(
-                first_source.Rows
-            )
-
-            reference_columns = int(
-                first_source.Columns
-            )
-
-            for source in source_images[1:]:
-
-                if int(
-                    getattr(
-                        source,
-                        "NumberOfFrames",
-                        1
-                    )
-                ) != reference_frames:
-
-                    return {
-                        "ok": False,
-                        "error":
-                            "Enhanced PET temporal instances "
-                            "do not contain the same number "
-                            "of spatial frames."
-                    }
-
-                if (
-                    int(source.Rows)
-                        != reference_rows
-                    or
-                    int(source.Columns)
-                        != reference_columns
-                ):
-                    return {
-                        "ok": False,
-                        "error":
-                            "Enhanced PET temporal instances "
-                            "do not have consistent image dimensions."
-                    }
 
         required_type1_attributes = [
             "StudyInstanceUID",
@@ -900,9 +911,11 @@ def DPE_export_parametric_map(
                         + "."
                 }
 
+
         if not hasattr(
                 first_source,
-                "FrameOfReferenceUID"):
+                "FrameOfReferenceUID"
+        ):
             return {
                 "ok": False,
                 "error":
@@ -910,25 +923,31 @@ def DPE_export_parametric_map(
                     "FrameOfReferenceUID."
             }
 
+
         frame_of_reference_uid = str(
             first_source.FrameOfReferenceUID
         )
 
-        # Every source used for the kinetic fit must belong
-        # to the same patient coordinate system.
+
+        # All geometry source images must share the same
+        # patient coordinate system.
         for source in source_images:
+
             if (
-                hasattr(source, "FrameOfReferenceUID") and
+                hasattr(source, "FrameOfReferenceUID")
+                and
                 str(source.FrameOfReferenceUID)
                     != frame_of_reference_uid
             ):
                 return {
                     "ok": False,
                     "error":
-                        "Source PET contains more than one "
-                        "FrameOfReferenceUID."
+                        "PET spatial reference contains more than "
+                        "one FrameOfReferenceUID."
                 }
 
+
+        constructor_source_images = source_images
         # ------------------------------------------------------------
         # 4. Get parametric values from Slicer
         #
@@ -1116,34 +1135,41 @@ def DPE_export_parametric_map(
         # Record all of those source SOP instances at image level.
         # ------------------------------------------------------------
 
-        if (
-            has_multiframe_sources
-            and len(source_images) > 1
-        ):
-            from pydicom.dataset import Dataset
-            from pydicom.sequence import Sequence
+        # ------------------------------------------------------------
+        # Record ALL temporal PET source SOP instances as provenance.
+        #
+        # These DICOM files do not need to be opened. Their SOP
+        # Instance UIDs are already retained on the Slicer sequence.
+        # ------------------------------------------------------------
 
-            source_references = []
+        from pydicom.dataset import Dataset
+        from pydicom.sequence import Sequence
 
-            for source in source_images:
+        source_sop_class_uid = str(
+            first_source.SOPClassUID
+        )
 
-                reference = Dataset()
+        source_references = []
 
-                reference.ReferencedSOPClassUID = (
-                    source.SOPClassUID
-                )
+        for source_uid in all_uid_list:
 
-                reference.ReferencedSOPInstanceUID = (
-                    source.SOPInstanceUID
-                )
+            reference = Dataset()
 
-                source_references.append(
-                    reference
-                )
-
-            pm.SourceImageSequence = Sequence(
-                source_references
+            reference.ReferencedSOPClassUID = (
+                source_sop_class_uid
             )
+
+            reference.ReferencedSOPInstanceUID = (
+                str(source_uid)
+            )
+
+            source_references.append(
+                reference
+            )
+
+        pm.SourceImageSequence = Sequence(
+            source_references
+        )
 
         # Keep model provenance human-readable.
         pm.DerivationDescription = (
@@ -1187,8 +1213,11 @@ def DPE_export_parametric_map(
             "path":
                 output_path,
 
-            "source_count":
+            "geometry_source_count":
                 len(source_images),
+
+            "provenance_source_count":
+                len(all_uid_list),
 
             "source_sop_class":
                 str(first_source.SOPClassUID),
@@ -3366,18 +3395,25 @@ exportParametricMapDICOM(
   // proxy node may or may not carry the original DICOM attributes.
   // ------------------------------------------------------------------------
 
-  QStringList sourceUIDList;
-  QSet<QString> sourceUIDSet;
+  QStringList geometryUIDList;
+  QStringList allSourceUIDList;
 
-  // Collect source SOP Instance UIDs from ALL dynamic PET frames.
+  QSet<QString> geometryUIDSet;
+  QSet<QString> allSourceUIDSet;
+
+  // ------------------------------------------------------------------------
+  // We need two different source sets:
   //
-  // Enhanced PET:
-  //   every Slicer time point may refer to the same multiframe SOP,
-  //   therefore QSet collapses it to one UID.
+  // geometryUIDList:
+  //   DICOM instances for ONE temporal PET frame only.
+  //   Classic PET   -> complete slice stack for one time point.
+  //   Enhanced PET  -> one multiframe SOP instance.
   //
-  // Classic single-frame PET:
-  //   each dynamic frame may contain many slice SOPs,
-  //   therefore all temporal frames are accumulated.
+  // allSourceUIDList:
+  //   every unique SOP Instance UID that contributed to the
+  //   dynamic kinetic fit. These are provenance references only.
+  // ------------------------------------------------------------------------
+
   if (q->sequencePETNode)
   {
     const int numberOfFrames =
@@ -3411,18 +3447,40 @@ exportParametricMapDICOM(
                   QRegularExpression("\\s+"),
                   Qt::SkipEmptyParts);
 
+      if (frameUIDs.isEmpty())
+      {
+        continue;
+      }
+
+      // First valid dynamic frame becomes the spatial
+      // reference set used by highdicom.
+      if (geometryUIDList.isEmpty())
+      {
+        for (const QString& uid : frameUIDs)
+        {
+          if (!geometryUIDSet.contains(uid))
+          {
+            geometryUIDSet.insert(uid);
+            geometryUIDList.append(uid);
+          }
+        }
+      }
+
+      // All temporal source SOPs are retained as provenance.
       for (const QString& uid : frameUIDs)
       {
-        if (!sourceUIDSet.contains(uid))
+        if (!allSourceUIDSet.contains(uid))
         {
-          sourceUIDSet.insert(uid);
-          sourceUIDList.append(uid);
+          allSourceUIDSet.insert(uid);
+          allSourceUIDList.append(uid);
         }
       }
     }
   }
 
-  if (sourceUIDList.isEmpty())
+
+  // Fallback if sequence frames do not retain source references.
+  if (geometryUIDList.isEmpty())
   {
     const char* attr =
         refPETNode->GetAttribute(
@@ -3438,19 +3496,30 @@ exportParametricMapDICOM(
 
       for (const QString& uid : proxyUIDs)
       {
-        if (!sourceUIDSet.contains(uid))
+        if (!geometryUIDSet.contains(uid))
         {
-          sourceUIDSet.insert(uid);
-          sourceUIDList.append(uid);
+          geometryUIDSet.insert(uid);
+          geometryUIDList.append(uid);
+        }
+
+        if (!allSourceUIDSet.contains(uid))
+        {
+          allSourceUIDSet.insert(uid);
+          allSourceUIDList.append(uid);
         }
       }
     }
   }
 
-  const QString instanceUIDs =
-      sourceUIDList.join(" ");
 
-  if (instanceUIDs.isEmpty())
+  const QString geometryInstanceUIDs =
+      geometryUIDList.join(" ");
+
+  const QString allInstanceUIDs =
+      allSourceUIDList.join(" ");
+
+  if (geometryInstanceUIDs.isEmpty() ||
+      allInstanceUIDs.isEmpty())
   {
     QMessageBox::warning(
         q,
@@ -3719,7 +3788,8 @@ exportParametricMapDICOM(
           QVariantList{
               QString::fromUtf8(
                   tempNode->GetID()),
-              instanceUIDs,
+              geometryInstanceUIDs,
+              allInstanceUIDs,
               outputPath,
               seriesDescription,
               seriesNumber,

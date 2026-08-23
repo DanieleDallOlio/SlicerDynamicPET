@@ -210,8 +210,9 @@ class TCMWorker : public QThread
 public:
     TCMWorker(vtkSlicerDynamicPETLogic* logic,
               std::vector<std::vector<double>>& voxels,
-              std::vector<double>& Cp,
-              std::vector<double>& framing,
+              const std::vector<double>& Cp,
+              const std::vector<double>& Cwb,
+              const std::vector<double>& framing,
               const std::vector<std::string>& modelIDs,
               const std::vector<int>& fitVoxelIndices,
               const double& vbInit, const double& vbLower, double& vbUpper,
@@ -222,17 +223,22 @@ public:
               const double& tdInit, const double& tdLower, double& tdUpper,
               double dk,
               double timestep,
-              const double pbrp[3],
               int maxiter,
               std::atomic<bool>& stopRequested,
               const std::vector<double>* wgt_global = nullptr,
               int numThreads = 1,
               const std::string& interpolationType = "linear",
-              const std::vector<double>* nativeInputTimesSec = nullptr,
-              const std::vector<double>* nativeInputCp = nullptr)
+              const std::vector<double>* nativePlasmaTimesSec = nullptr,
+              const std::vector<double>* nativePlasmaValues = nullptr,
+              const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+              const std::vector<double>* nativeWholeBloodValues = nullptr,
+              const std::vector<double>* parentFractionTimesSec = nullptr,
+              const std::vector<double>* parentFractionValues = nullptr,
+              bool plasmaIsParent = false)
         : logic(logic),
           voxels(voxels),
           Cp(Cp),
+          Cwb(Cwb),
           framing(framing),
           modelIDs(modelIDs),
           fitVoxelIndices(fitVoxelIndices),
@@ -241,9 +247,9 @@ public:
           maxiter(maxiter),
           stopRequested(stopRequested),
           numThreads(numThreads),
-          interpolationType(interpolationType)
+          interpolationType(interpolationType),
+          plasmaIsParent(plasmaIsParent)
     {
-      std::copy(pbrp, pbrp+3, this->pbrp);
       if (wgt_global) wgt_copy = *wgt_global;
       // copy init/lb/ub arrays
       this->vbInit = vbInit; this->vbLower = vbLower; this->vbUpper = vbUpper;
@@ -253,19 +259,43 @@ public:
       this->k4Init = k4Init; this->k4Lower = k4Lower; this->k4Upper = k4Upper;
       this->tdInit = tdInit; this->tdLower = tdLower; this->tdUpper = tdUpper;
 
-      if (nativeInputTimesSec &&
-          nativeInputCp &&
-          nativeInputTimesSec->size() ==
-              nativeInputCp->size() &&
-          nativeInputTimesSec->size() >= 2)
+      if (nativePlasmaTimesSec &&
+          nativePlasmaValues &&
+          nativePlasmaTimesSec->size() ==
+              nativePlasmaValues->size() &&
+          nativePlasmaTimesSec->size() >= 2)
       {
-          this->nativeInputTimesSec =
-              *nativeInputTimesSec;
+          this->nativePlasmaTimesSec =
+              *nativePlasmaTimesSec;
+          this->nativePlasmaValues =
+              *nativePlasmaValues;
+          this->hasNativePlasma = true;
+      }
 
-          this->nativeInputCp =
-              *nativeInputCp;
+      if (nativeWholeBloodTimesSec &&
+          nativeWholeBloodValues &&
+          nativeWholeBloodTimesSec->size() ==
+              nativeWholeBloodValues->size() &&
+          nativeWholeBloodTimesSec->size() >= 2)
+      {
+          this->nativeWholeBloodTimesSec =
+              *nativeWholeBloodTimesSec;
+          this->nativeWholeBloodValues =
+              *nativeWholeBloodValues;
+          this->hasNativeWholeBlood = true;
+      }
 
-          this->hasNativeInput = true;
+      if (parentFractionTimesSec &&
+          parentFractionValues &&
+          parentFractionTimesSec->size() ==
+              parentFractionValues->size() &&
+          parentFractionTimesSec->size() >= 2)
+      {
+          this->parentFractionTimesSec =
+              *parentFractionTimesSec;
+          this->parentFractionValues =
+              *parentFractionValues;
+          this->hasParentFraction = true;
       }
 
     }
@@ -283,10 +313,17 @@ protected:
 
     std::string interpolationType;
 
-    std::vector<double> nativeInputTimesSec;
-    std::vector<double> nativeInputCp;
+    std::vector<double> nativePlasmaTimesSec;
+    std::vector<double> nativePlasmaValues;
+    std::vector<double> nativeWholeBloodTimesSec;
+    std::vector<double> nativeWholeBloodValues;
+    std::vector<double> parentFractionTimesSec;
+    std::vector<double> parentFractionValues;
 
-    bool hasNativeInput{false};
+    bool hasNativePlasma{false};
+    bool hasNativeWholeBlood{false};
+    bool hasParentFraction{false};
+    bool plasmaIsParent{false};
     void run() override
     {
         for (size_t i = 0; i < modelIDs.size(); ++i) {
@@ -306,6 +343,7 @@ protected:
           logic->callTCMImg(
               voxels,
               Cp,
+              Cwb,
               framing,
               init,
               lb,
@@ -313,7 +351,6 @@ protected:
               sens,
               dk,
               timestep,
-              pbrp,
               maxiter,
               num_tc,
               localOutput,
@@ -332,12 +369,25 @@ protected:
                       std::memory_order_relaxed);
               },
               this->interpolationType,
-              this->hasNativeInput
-                  ? &this->nativeInputTimesSec
+              this->hasNativePlasma
+                  ? &this->nativePlasmaTimesSec
                   : nullptr,
-              this->hasNativeInput
-                  ? &this->nativeInputCp
-                  : nullptr);
+              this->hasNativePlasma
+                  ? &this->nativePlasmaValues
+                  : nullptr,
+              this->hasNativeWholeBlood
+                  ? &this->nativeWholeBloodTimesSec
+                  : nullptr,
+              this->hasNativeWholeBlood
+                  ? &this->nativeWholeBloodValues
+                  : nullptr,
+              this->hasParentFraction
+                  ? &this->parentFractionTimesSec
+                  : nullptr,
+              this->hasParentFraction
+                  ? &this->parentFractionValues
+                  : nullptr,
+              this->plasmaIsParent);
             if (stopRequested) {
                 emit canceled(QString::fromStdString(modelID));
                 break;
@@ -427,13 +477,13 @@ private:
     vtkSlicerDynamicPETLogic* logic;
     std::vector<std::vector<double>> voxels;
     std::vector<double> Cp;
+    std::vector<double> Cwb;
     std::vector<double> framing;
     std::vector<std::string> modelIDs;
     std::vector<int> fitVoxelIndices;
 
     std::atomic<bool>& stopRequested;
     double dk, timestep;
-    double pbrp[3];
     int maxiter, numThreads;
     std::vector<double> wgt_copy;
 

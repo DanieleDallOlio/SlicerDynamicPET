@@ -1,9 +1,14 @@
 // SegmentationChangeWatcher.cxx
 #include "SegmentationChangeWatcher.h"
 
-#include <vtkSegmentation.h>
 #include <vtkMRMLScene.h>
 #include <vtkObjectFactory.h>
+#include <vtkPointData.h>
+#include <vtkOrientedImageData.h>
+#include <vtkOrientedImageDataResample.h>
+#include <vtkSegmentationConverter.h>
+#include <vtkSlicerSegmentationsModuleLogic.h>
+#include <vtkStringArray.h>
 
 vtkStandardNewMacro(SegmentationChangeWatcher);
 
@@ -14,19 +19,21 @@ SegmentationChangeWatcher::~SegmentationChangeWatcher()
 
 void SegmentationChangeWatcher::Clear()
 {
-  // Remove segmentation-level observers
   for (auto& kv : this->SegTags)
   {
     vtkSegmentation* seg = kv.first;
-    unsigned long tag = kv.second;
-    if (seg)
+    if (!seg)
+    {
+      continue;
+    }
+
+    for (unsigned long tag : kv.second)
     {
       seg->RemoveObserver(tag);
     }
   }
   this->SegTags.clear();
 
-  // Remove SegmentationNode-level observers
   for (auto* node : this->ObservedNodes)
   {
     if (node)
@@ -35,8 +42,6 @@ void SegmentationChangeWatcher::Clear()
     }
   }
   this->ObservedNodes.clear();
-
-  // Clear lookup map
   this->SegToNode.clear();
 }
 
@@ -49,190 +54,305 @@ SegmentationChangeWatcher::SegmentationChangeWatcher()
 
 void SegmentationChangeWatcher::ObserveSegmentationNode(vtkMRMLSegmentationNode* segNode)
 {
-  if (!segNode) return;
-  // Only add the observer once
-  if (ObservedNodes.find(segNode) == ObservedNodes.end())
+  if (!segNode)
   {
-      segNode->AddObserver(vtkMRMLSegmentationNode::SegmentationChangedEvent, this->Callback);
-      ObservedNodes.insert(segNode);
+    return;
   }
 
-  // Skip if segmentation is null
-  if (!segNode->GetSegmentation())
-    return;
+  if (this->ObservedNodes.find(segNode) == this->ObservedNodes.end())
+  {
+    segNode->AddObserver(
+        vtkMRMLSegmentationNode::SegmentationChangedEvent,
+        this->Callback);
+    this->ObservedNodes.insert(segNode);
+  }
 
   vtkSegmentation* seg = segNode->GetSegmentation();
+  if (!seg)
+  {
+    return;
+  }
+
   this->SegToNode[seg] = segNode;
 
-  // You can also optionally track per-segmentation to avoid double observers
-  if (SegTags.find(seg) == SegTags.end())
+  if (this->SegTags.find(seg) == this->SegTags.end())
   {
-      unsigned long tag = seg->AddObserver(vtkSegmentation::RepresentationModified, this->Callback);
-      SegTags[seg] = tag;
+    std::vector<unsigned long> tags;
+    tags.push_back(seg->AddObserver(
+        vtkSegmentation::RepresentationModified,
+        this->Callback));
+    tags.push_back(seg->AddObserver(
+        vtkSegmentation::SegmentAdded,
+        this->Callback));
+    tags.push_back(seg->AddObserver(
+        vtkSegmentation::SegmentRemoved,
+        this->Callback));
+    this->SegTags[seg] = std::move(tags);
+  }
+}
+
+void SegmentationChangeWatcher::SynchronizeSegmentAdded(
+    vtkMRMLSegmentationNode* proxyNode,
+    const std::string& segmentId)
+{
+  if (!proxyNode || segmentId.empty() || !this->GetSequenceSeg)
+  {
+    return;
+  }
+
+  vtkSegmentation* sourceSegmentation = proxyNode->GetSegmentation();
+  if (!sourceSegmentation || !sourceSegmentation->GetSegment(segmentId))
+  {
+    return;
+  }
+
+  vtkMRMLSequenceNode* sequenceSeg = this->GetSequenceSeg();
+  if (!sequenceSeg)
+  {
+    return;
+  }
+
+  const int numberOfFrames = sequenceSeg->GetNumberOfDataNodes();
+
+  for (int i = 0; i < numberOfFrames; ++i)
+  {
+    vtkMRMLSegmentationNode* frameNode =
+        vtkMRMLSegmentationNode::SafeDownCast(
+            sequenceSeg->GetNthDataNode(i));
+
+    if (!frameNode || !frameNode->GetSegmentation())
+    {
+      continue;
+    }
+
+    vtkSegmentation* frameSegmentation = frameNode->GetSegmentation();
+    if (frameSegmentation->GetSegment(segmentId))
+    {
+      continue;
+    }
+
+    if (!frameSegmentation->CopySegmentFromSegmentation(
+            sourceSegmentation,
+            segmentId,
+            false))
+    {
+      vtkGenericWarningMacro(
+          "Could not propagate newly added segment "
+          << segmentId << " to segmentation sequence frame " << i);
+    }
+  }
+}
+
+void SegmentationChangeWatcher::SynchronizeSegmentRemoved(
+    const std::string& segmentId)
+{
+  if (segmentId.empty() || !this->GetSequenceSeg)
+  {
+    return;
+  }
+
+  vtkMRMLSequenceNode* sequenceSeg = this->GetSequenceSeg();
+  if (!sequenceSeg)
+  {
+    return;
+  }
+
+  const int numberOfFrames = sequenceSeg->GetNumberOfDataNodes();
+
+  for (int i = 0; i < numberOfFrames; ++i)
+  {
+    vtkMRMLSegmentationNode* frameNode =
+        vtkMRMLSegmentationNode::SafeDownCast(
+            sequenceSeg->GetNthDataNode(i));
+
+    if (!frameNode || !frameNode->GetSegmentation())
+    {
+      continue;
+    }
+
+    vtkSegmentation* frameSegmentation = frameNode->GetSegmentation();
+    if (frameSegmentation->GetSegment(segmentId))
+    {
+      frameSegmentation->RemoveSegment(segmentId);
+    }
   }
 }
 
 void SegmentationChangeWatcher::OnSegmentationChanged(
-  vtkObject* caller, unsigned long eid, void* clientData, void* callData)
+    vtkObject* caller,
+    unsigned long eid,
+    void* clientData,
+    void* callData)
 {
   auto* self = static_cast<SegmentationChangeWatcher*>(clientData);
-  if (!self->GetSegEditCorr()) {
+  if (!self)
+  {
     return;
   }
-
-  auto* segmentTACs = self->GetsegmentTACs();
-  if (segmentTACs == nullptr)
-    return;
-  if (segmentTACs->empty())
-    return;
-
-  vtkMRMLSegmentationNode* segNode = nullptr;
-  std::string segmentId;
 
   auto* segmentation = vtkSegmentation::SafeDownCast(caller);
-  if (segmentation)
-  {
-      auto it = self->SegToNode.find(segmentation);
-      if (it == self->SegToNode.end())
-      {
-        // We don't know this segmentation → nothing to do
-        return;
-      }
-      vtkMRMLSegmentationNode* segNodeCandidate = it->second.GetPointer();
-      if (!segNodeCandidate)
-      {
-        // Owning node was deleted
-        return;
-      }
 
-      segNode = segNodeCandidate;
-      if (callData)
-          segmentId = static_cast<const char*>(callData);
-  }
-  else if (auto* node = vtkMRMLSegmentationNode::SafeDownCast(caller))
+  if (!segmentation)
   {
-      // node swapped segmentation, re-attach
+    if (auto* node = vtkMRMLSegmentationNode::SafeDownCast(caller))
+    {
+      // The proxy received a different vtkSegmentation object. Reattach
+      // segmentation-level observers to the new object.
       self->ObserveSegmentationNode(node);
-      return;
+    }
+    return;
   }
 
-  if (!segNode || segmentId.empty())
+  auto ownerIt = self->SegToNode.find(segmentation);
+  if (ownerIt == self->SegToNode.end())
   {
     return;
   }
 
-  if (self->GetCurrentSegID() != segNode->GetName())
+  vtkMRMLSegmentationNode* segNode = ownerIt->second.GetPointer();
+  if (!segNode)
+  {
     return;
+  }
 
-  // Get the current frame index in the sequence
+  std::string segmentId;
+  if (callData)
+  {
+    segmentId = static_cast<const char*>(callData);
+  }
+
+  if (segmentId.empty())
+  {
+    return;
+  }
+
+  // Segment membership is a sequence-wide structural property. When a segment
+  // is moved/copied into the active proxy, Slicer only edits the current proxy
+  // item. Propagate the segment structure across all dynamic segmentation
+  // frames so later TAC extraction sees a consistent segment list.
+  if (eid == vtkSegmentation::SegmentAdded)
+  {
+    self->SynchronizeSegmentAdded(segNode, segmentId);
+    if (self->OnSegmentStructureChanged)
+    {
+      self->OnSegmentStructureChanged();
+    }
+    return;
+  }
+
+  if (eid == vtkSegmentation::SegmentRemoved)
+  {
+    self->SynchronizeSegmentRemoved(segmentId);
+    if (self->OnSegmentStructureChanged)
+    {
+      self->OnSegmentStructureChanged();
+    }
+    return;
+  }
+
+  if (eid != vtkSegmentation::RepresentationModified)
+  {
+    return;
+  }
+
+  auto* segmentTACs = self->GetsegmentTACs ? self->GetsegmentTACs() : nullptr;
+  if (!segmentTACs || segmentTACs->empty())
+  {
+    return;
+  }
+
+  // Only refresh a segment that already has a computed TAC. Newly added
+  // segments are handled by the normal TAC button after structure sync.
+  auto tacIt = segmentTACs->find(segmentId);
+  if (tacIt == segmentTACs->end())
+  {
+    return;
+  }
+
   int frameIndex = -1;
   if (self->browser)
   {
-      frameIndex = self->browser->GetSelectedItemNumber();
+    frameIndex = self->browser->GetSelectedItemNumber();
   }
-  if (frameIndex < 0)
-      return;
+  if (frameIndex < 0 ||
+      frameIndex >= static_cast<int>(tacIt->second.size()))
+  {
+    return;
+  }
 
-  // Retrieve the corresponding PET volume
-  vtkMRMLSequenceNode* PETSequenceNode = self->GetSequencePET();
-  auto* PETVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
-      PETSequenceNode->GetDataNodeAtValue(
-          PETSequenceNode->GetNthIndexValue(frameIndex)));
+  vtkMRMLSequenceNode* PETSequenceNode =
+      self->GetSequencePET ? self->GetSequencePET() : nullptr;
+  if (!PETSequenceNode || frameIndex >= PETSequenceNode->GetNumberOfDataNodes())
+  {
+    return;
+  }
 
+  vtkMRMLScalarVolumeNode* PETVolume =
+      vtkMRMLScalarVolumeNode::SafeDownCast(
+          PETSequenceNode->GetNthDataNode(frameIndex));
   if (!PETVolume)
-      return;
-
-  // Check if segment exists
-  auto it = segmentTACs->find(segmentId);
-  if (it == segmentTACs->end())
   {
-    vtkGenericWarningMacro("Segment ID " << segmentId << " TAC yet to be available.");
     return;
   }
-
-  // Check if frameIndex is in range
-  if (frameIndex < 0 || frameIndex >= static_cast<int>(it->second.size()))
-  {
-    vtkGenericWarningMacro("Frame index " << frameIndex << " out of range for segment " << segmentId);
-    return;
-  }
-
-  // Make sure the
-  segmentation->SeparateSegmentLabelmap(segmentId);
 
   vtkSegment* segment = segmentation->GetSegment(segmentId);
-  if (!segment || segment->GetRepresentation("Binary labelmap") == nullptr)
+  if (!segment)
   {
-    vtkGenericWarningMacro("Segment " << segmentId
-                       << " is empty at frame " << frameIndex);
-    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
-    (*segmentTACs)[segmentId][frameIndex].keep = false;
-    (*segmentTACs)[segmentId][frameIndex].empty = true;
-    if (self->RunPlot)
+    VoxelStatistics stats;
+    stats.keep = false;
+    stats.empty = true;
+    tacIt->second[frameIndex] = stats;
+
+    if (self->OnSegmentTACChanged)
     {
-      self->RunPlot();  // calls your widget function safely
+      self->OnSegmentTACChanged(segmentId);
     }
     return;
   }
 
-  vtkOrientedImageData* segLabelmap = vtkOrientedImageData::SafeDownCast(
-      segment->GetRepresentation(vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName()));
-
-  if (!segLabelmap)
-  {
-    vtkGenericWarningMacro("No binary labelmap for " << segmentId << " at frame " << frameIndex);
-    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
-    (*segmentTACs)[segmentId][frameIndex].keep = false;
-    (*segmentTACs)[segmentId][frameIndex].empty = true;
-    if (self->RunPlot)
-    {
-      self->RunPlot();  // calls your widget function safely
-    }
-    return;
-  }
-  double range[2];
-  segLabelmap->GetScalarRange(range);
-  if (range[1] == 0.0) // max is zero → fully empty
-  {
-    vtkGenericWarningMacro("Segment " << segmentId << " is empty at frame " << frameIndex);
-    (*segmentTACs)[segmentId][frameIndex] = VoxelStatistics{};
-    (*segmentTACs)[segmentId][frameIndex].keep = false;
-    (*segmentTACs)[segmentId][frameIndex].empty = true;
-    if (self->RunPlot)
-    {
-      self->RunPlot();  // calls your widget function safely
-    }
-    return;
-  }
   vtkNew<vtkStringArray> segmentArray;
   segmentArray->InsertNextValue(segmentId);
 
-  auto* logic = self->GetLogic();
-  vtkSmartPointer<vtkOrientedImageData> labelmap = vtkSmartPointer<vtkOrientedImageData>::New();
-  vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(segNode,
-                                                                               PETVolume,
-                                                                               segmentArray,
-                                                                               vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
-                                                                               labelmap);
+  vtkSmartPointer<vtkOrientedImageData> labelmap =
+      vtkSmartPointer<vtkOrientedImageData>::New();
+
+  vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(
+      segNode,
+      PETVolume,
+      segmentArray,
+      vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
+      labelmap);
 
   VoxelStatistics stats;
 
-  int labelOrientedImageDataEffectiveExtent[6] = { 0, -1, 0, -1, 0, -1 };
-  if (!vtkOrientedImageDataResample::CalculateEffectiveExtent(labelmap, labelOrientedImageDataEffectiveExtent))
+  if (!labelmap ||
+      !labelmap->GetPointData() ||
+      !labelmap->GetPointData()->GetScalars())
   {
-    vtkGenericWarningMacro("Segment " << segmentId << " has been removed at frame " << frameIndex);
-    stats = VoxelStatistics{};
     stats.keep = false;
     stats.empty = true;
-  } else {
+  }
+  else
+  {
+    auto* logic = self->GetLogic ? self->GetLogic() : nullptr;
+    if (!logic)
+    {
+      return;
+    }
     stats = logic->ComputeVoxelStatistics(PETVolume, labelmap, 1);
   }
 
-  (*segmentTACs)[segmentId][frameIndex] = stats;
+  tacIt->second[frameIndex] = stats;
 
-  if (self->RunPlot)
+  if (self->OnSegmentTACChanged)
   {
-    self->RunPlot();  // calls your widget function safely
+    self->OnSegmentTACChanged(segmentId);
   }
 
+  // Plot refresh remains a user-selectable performance option. The TAC cache
+  // itself is refreshed regardless so IF/ROI data cannot silently stay stale.
+  if (self->GetSegEditCorr && self->GetSegEditCorr() && self->RunPlot)
+  {
+    self->RunPlot();
+  }
 }

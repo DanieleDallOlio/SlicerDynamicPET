@@ -17,6 +17,7 @@
 
 // DynamicPET Logic includes
 #include "vtkSlicerDynamicPETLogic.h"
+#include <kmaplib.h>
 #include <chrono>
 // MRML includes
 #include <vtkMRMLScene.h>
@@ -1012,13 +1013,27 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
           double val = petArray->GetComponent(idx, 0);
           stats.count++;
           stats.mean += val;
-          stats.min = std::min(stats.min, val);
-          if (val > stats.max) {
+
+          if (stats.count == 1)
+          {
+            stats.min = val;
             stats.max = val;
             max_ijk[0] = x;
             max_ijk[1] = y;
             max_ijk[2] = z;
           }
+          else
+          {
+            stats.min = std::min(stats.min, val);
+            if (val > stats.max)
+            {
+              stats.max = val;
+              max_ijk[0] = x;
+              max_ijk[1] = y;
+              max_ijk[2] = z;
+            }
+          }
+
           values.push_back(val);
         }
       }
@@ -1042,6 +1057,22 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
     stats.q1 = values[n / 4];
     stats.q3 = values[3 * n / 4];
     stats.iqr = stats.q3 - stats.q1;
+  }
+
+  if (stats.count == 0)
+  {
+    stats.keep = false;
+    stats.empty = true;
+    stats.mean = std::numeric_limits<double>::quiet_NaN();
+    stats.median = std::numeric_limits<double>::quiet_NaN();
+    stats.min = std::numeric_limits<double>::quiet_NaN();
+    stats.max = std::numeric_limits<double>::quiet_NaN();
+    stats.stddev = std::numeric_limits<double>::quiet_NaN();
+    stats.q1 = std::numeric_limits<double>::quiet_NaN();
+    stats.q3 = std::numeric_limits<double>::quiet_NaN();
+    stats.iqr = std::numeric_limits<double>::quiet_NaN();
+    stats.peak = std::numeric_limits<double>::quiet_NaN();
+    return stats;
   }
 
   // ================= SUVPEAK =================
@@ -1230,17 +1261,53 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
 
   for (const QString& id : segmentsID)
   {
-    const std::string& segmentID = id.toStdString();
-    auto* segment = segmentationAt0->GetSegmentation()->GetSegment(segmentID);
-    if (!segment)
-    {
-      std::cerr << "Segment not found for ID: " << id.toStdString() << std::endl;
-      continue;
-    }
-    segmentTACsnames[segmentID] = segment->GetName();
+    const std::string segmentID = id.toStdString();
 
-    segmentTACs[segmentID].clear();
-    segmentTACs[segmentID].resize(numberOfTimepoints);
+    // Always allocate the full TAC first. A newly added segment may be absent
+    // from early segmentation-sequence frames; writing an invalid frame into an
+    // unallocated vector was the cause of the move-between-segmentations crash.
+    segmentTACs[segmentID].assign(
+        numberOfTimepoints,
+        VoxelStatistics{});
+
+    bool foundSegment = false;
+
+    for (int i = 0; i < numberOfTimepoints; ++i)
+    {
+      const std::string indexValue =
+          sequencePETNode->GetNthIndexValue(i);
+
+      vtkMRMLSegmentationNode* segmentationNode =
+          vtkMRMLSegmentationNode::SafeDownCast(
+              segSequenceNode->GetDataNodeAtValue(indexValue));
+
+      if (!segmentationNode ||
+          !segmentationNode->GetSegmentation())
+      {
+        continue;
+      }
+
+      vtkSegment* segment =
+          segmentationNode->GetSegmentation()->GetSegment(segmentID);
+
+      if (!segment)
+      {
+        continue;
+      }
+
+      segmentTACsnames[segmentID] =
+          segment->GetName() ? segment->GetName() : segmentID;
+      foundSegment = true;
+      break;
+    }
+
+    if (!foundSegment)
+    {
+      std::cerr
+          << "Segment not found in any segmentation timepoint: "
+          << segmentID << std::endl;
+      segmentTACsnames.erase(segmentID);
+    }
   }
 
   if (ProgressBar) {
@@ -1266,33 +1333,59 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       continue;
     }
 
-    #ifdef HAVE_OPENMP
-    int max_hw_threads = omp_get_num_procs();
-    omp_set_num_threads(max_hw_threads);
-    #pragma omp parallel for
-    #endif
+    // MRML/segmentation export is intentionally serialized.
+    // Heavy numerical work may be parallelized, but scene-dependent MRML
+    // segmentation operations must not run concurrently here.
     for (int s = 0; s < segmentsID.size(); ++s)
     {
       if (stopRequested) continue;
       const std::string& segmentID = segmentsID[s].toStdString();
-      const std::string& segmentName = segmentTACsnames[segmentID];
+      VoxelStatistics stats;
+
+      vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+      if (!segmentation || !segmentation->GetSegment(segmentID))
+      {
+        std::cerr
+            << "Segment not present at timepoint " << i
+            << ": " << segmentID << std::endl;
+        stats.keep = false;
+        stats.empty = true;
+        segmentTACs[segmentID][i] = stats;
+        continue;
+      }
 
       vtkNew<vtkStringArray> segmentArray;
       segmentArray->InsertNextValue(segmentID);
 
-      vtkSmartPointer<vtkOrientedImageData> labelmap = vtkSmartPointer<vtkOrientedImageData>::New();
-      vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(segmentationNode,
-                                                                                   PETVolume,
-                                                                                   segmentArray,
-                                                                                   vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
-                                                                                   labelmap);
-      VoxelStatistics stats;
-      if (!labelmap)
+      vtkSmartPointer<vtkOrientedImageData> labelmap =
+          vtkSmartPointer<vtkOrientedImageData>::New();
+
+      vtkSlicerSegmentationsModuleLogic::
+          GenerateMergedLabelmapInReferenceGeometry(
+              segmentationNode,
+              PETVolume,
+              segmentArray,
+              vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
+              labelmap);
+
+      if (!labelmap ||
+          !labelmap->GetPointData() ||
+          !labelmap->GetPointData()->GetScalars())
       {
-        std::cerr << "Failed to generate labelmap for segment: " << segmentID << " at timepoint " << i << std::endl;
+        std::cerr
+            << "Failed to generate labelmap for segment: "
+            << segmentID
+            << " at timepoint " << i
+            << std::endl;
         stats.keep = false;
-      } else {
-        stats = ComputeVoxelStatistics(PETVolume, labelmap, 1);
+        stats.empty = true;
+      }
+      else
+      {
+        stats = ComputeVoxelStatistics(
+            PETVolume,
+            labelmap,
+            1);
       }
 
       segmentTACs[segmentID][i] = stats;
@@ -1348,6 +1441,7 @@ double vtkSlicerDynamicPETLogic::computeLogLik(const std::vector<double>& y,
 void vtkSlicerDynamicPETLogic::callTCM(
     std::vector<std::vector<double>> tac,
     std::vector<std::vector<double>> Cp,
+    std::vector<std::vector<double>> Cwb,
     std::vector<std::vector<double>> framing,
     long int Nframe,
     long int Nvox,
@@ -1357,25 +1451,31 @@ void vtkSlicerDynamicPETLogic::callTCM(
     const bool* sens,
     const double dk,
     const double timestep,
-    const double pbrp[],
     const int maxiter,
     const int n_tc,
     TCMParameters& params,
     double*& fitted_curve,
     const std::vector<double>* wgt,
     const std::string& interpolationType,
-    const std::vector<double>* nativeInputTimesSec,
-    const std::vector<double>* nativeInputCp)
+    const std::vector<double>* nativePlasmaTimesSec,
+    const std::vector<double>* nativePlasmaValues,
+    const std::vector<double>* nativeWholeBloodTimesSec,
+    const std::vector<double>* nativeWholeBloodValues,
+    const std::vector<double>* parentFractionTimesSec,
+    const std::vector<double>* parentFractionValues,
+    bool plasmaIsParent)
 {
   const int nth = 1;
 
   // Basic validation
   if (containsNaN(tac)) return error_nan("TAC");
   if (containsNaN(Cp)) return error_nan("Cp");
+  if (containsNaN(Cwb)) return error_nan("Cwb");
   if (containsNaN(framing)) return error_nan("framing");
 
   if (tac.size() != framing.size()) return error_size("TAC", "framing", tac.size(), framing.size());
   if (tac.size() != Cp.size()) return error_size("TAC", "Cp", tac.size(), Cp.size());
+  if (tac.size() != Cwb.size()) return error_size("TAC", "Cwb", tac.size(), Cwb.size());
 
   // Allocate weights
   double* wt = new double[Nframe];
@@ -1410,108 +1510,44 @@ void vtkSlicerDynamicPETLogic::callTCM(
   double** scant =
       new double*[Nframe];
 
-  std::vector<std::vector<double>> cwb;
-  cwb.reserve(Nframe);
-
   for (long int i = 0;
        i < Nframe;
        ++i)
   {
-      scant[i] =
-          new double[2];
-
+      scant[i] = new double[2];
       scant[i][0] =
           (i == 0)
           ? 0.0
           : cumsum[i - 1];
-
-      scant[i][1] =
-          cumsum[i];
-
-      const double t =
-          0.5 *
-          (scant[i][0] +
-           scant[i][1]);
-
-      const double pbr =
-          pbrp[0] *
-          std::exp(
-              -pbrp[1] * t / 60.0)
-          + pbrp[2];
-
-      if (!std::isfinite(pbr) ||
-          pbr <= 1e-12)
-      {
-          throw std::runtime_error(
-              "Plasma/whole-blood ratio "
-              "must remain positive.");
-      }
-
-      cwb.push_back(
-          {
-              Cp[i][0] / pbr
-          });
+      scant[i][1] = cumsum[i];
   }
 
+  const double scanEndSec =
+      cumsum[Nframe - 1];
+
   long int N_cp = 0;
+  long int N_wb = 0;
 
   double* Cp_new = nullptr;
   double* cwb_new = nullptr;
 
-  const bool useNativeInput =
-      nativeInputTimesSec &&
-      nativeInputCp &&
-      nativeInputTimesSec->size() >= 2 &&
-      nativeInputTimesSec->size() ==
-          nativeInputCp->size();
+  const bool useNativePlasma =
+      nativePlasmaTimesSec &&
+      nativePlasmaValues &&
+      nativePlasmaTimesSec->size() >= 2 &&
+      nativePlasmaTimesSec->size() ==
+          nativePlasmaValues->size();
 
-  if (useNativeInput)
+  if (useNativePlasma)
   {
-      const double scanEndSec =
-          cumsum[Nframe - 1];
-
       Cp_new =
           FineSampleExplicitInputFunction(
-              *nativeInputTimesSec,
-              *nativeInputCp,
+              *nativePlasmaTimesSec,
+              *nativePlasmaValues,
               scanEndSec,
               timestep,
               interpolationType,
               N_cp);
-
-      cwb_new =
-          new double[N_cp];
-
-      constexpr double EPS = 1e-12;
-
-      for (long int i = 0;
-           i < N_cp;
-           ++i)
-      {
-          const double t =
-              (static_cast<double>(i) + 0.5) *
-              timestep;
-
-          const double pbr =
-              pbrp[0] *
-              std::exp(
-                  -pbrp[1] * t / 60.0)
-              + pbrp[2];
-
-          if (!std::isfinite(pbr) ||
-              pbr <= EPS)
-          {
-              delete[] Cp_new;
-              delete[] cwb_new;
-
-              throw std::runtime_error(
-                  "Plasma/whole-blood ratio "
-                  "must remain positive.");
-          }
-
-          cwb_new[i] =
-              Cp_new[i] / pbr;
-      }
   }
   else
   {
@@ -1523,15 +1559,86 @@ void vtkSlicerDynamicPETLogic::callTCM(
               N_cp,
               timestep,
               interpolationType);
+  }
 
+  const bool useNativeWholeBlood =
+      nativeWholeBloodTimesSec &&
+      nativeWholeBloodValues &&
+      nativeWholeBloodTimesSec->size() >= 2 &&
+      nativeWholeBloodTimesSec->size() ==
+          nativeWholeBloodValues->size();
+
+  if (useNativeWholeBlood)
+  {
+      cwb_new =
+          FineSampleExplicitInputFunction(
+              *nativeWholeBloodTimesSec,
+              *nativeWholeBloodValues,
+              scanEndSec,
+              timestep,
+              interpolationType,
+              N_wb);
+  }
+  else
+  {
       cwb_new =
           finesample(
               scant,
-              cwb,
+              Cwb,
               Nframe,
-              N_cp,
+              N_wb,
               timestep,
               interpolationType);
+  }
+
+  if (N_cp != N_wb)
+  {
+      delete[] Cp_new;
+      delete[] cwb_new;
+
+      throw std::runtime_error(
+          "Plasma and whole-blood fine-sampling grids differ.");
+  }
+
+  const bool applyParentFraction =
+      !plasmaIsParent &&
+      parentFractionTimesSec &&
+      parentFractionValues &&
+      parentFractionTimesSec->size() >= 2 &&
+      parentFractionTimesSec->size() ==
+          parentFractionValues->size();
+
+  if (applyParentFraction)
+  {
+      long int N_parent = 0;
+
+      double* parentFractionNew =
+          FineSampleExplicitInputFunction(
+              *parentFractionTimesSec,
+              *parentFractionValues,
+              scanEndSec,
+              timestep,
+              "linear",
+              N_parent);
+
+      if (N_parent != N_cp)
+      {
+          delete[] parentFractionNew;
+          delete[] Cp_new;
+          delete[] cwb_new;
+
+          throw std::runtime_error(
+              "Parent-fraction and plasma fine-sampling grids differ.");
+      }
+
+      for (long int i = 0;
+           i < N_cp;
+           ++i)
+      {
+          Cp_new[i] *= parentFractionNew[i];
+      }
+
+      delete[] parentFractionNew;
   }
 
   double * tac_flatten = new double[Nframe*Nvox];
@@ -1652,6 +1759,387 @@ void vtkSlicerDynamicPETLogic::callTCM(
   // delete[] fitted_params;
   delete[] wt;
   return;
+}
+
+
+void vtkSlicerDynamicPETLogic::callLiverTCM(
+    const std::vector<std::vector<double>>& tac,
+    const std::vector<std::vector<double>>& Cwb,
+    const std::vector<std::vector<double>>& framing,
+    long int Nframe,
+    double* kinit,
+    double* lb,
+    double* ub,
+    const bool* sens,
+    const double dk,
+    const double timestep,
+    const int maxiter,
+    TCMParameters& params,
+    double*& fitted_curve,
+    const std::vector<double>* wgt,
+    const std::string& interpolationType,
+    const std::vector<double>* nativeWholeBloodTimesSec,
+    const std::vector<double>* nativeWholeBloodValues)
+{
+    constexpr double EPS = 1e-16;
+    constexpr int numberOfParameters = 8;
+
+    if (Nframe <= 0 || timestep <= 0.0)
+    {
+        throw std::invalid_argument(
+            "Invalid liver DBIF fitting dimensions or integration timestep.");
+    }
+
+    if (tac.size() != static_cast<size_t>(Nframe) ||
+        Cwb.size() != static_cast<size_t>(Nframe) ||
+        framing.size() != static_cast<size_t>(Nframe))
+    {
+        throw std::invalid_argument(
+            "Liver DBIF TAC, whole-blood input, and framing sizes must match.");
+    }
+
+    if (containsNaN(tac)) return error_nan("TAC");
+    if (containsNaN(Cwb)) return error_nan("Cwb");
+    if (containsNaN(framing)) return error_nan("framing");
+
+    std::vector<double> weights(
+        static_cast<size_t>(Nframe),
+        1.0);
+
+    if (wgt)
+    {
+        if (wgt->size() != static_cast<size_t>(Nframe))
+        {
+            throw std::runtime_error(
+                "Weight vector length does not match Nframe.");
+        }
+
+        weights = *wgt;
+    }
+
+    params.keep.resize(
+        static_cast<size_t>(Nframe));
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        params.keep[static_cast<size_t>(i)] =
+            weights[static_cast<size_t>(i)] != 0.0;
+    }
+
+    std::vector<double> cumulative(
+        static_cast<size_t>(Nframe),
+        0.0);
+
+    double accumulatedTime = 0.0;
+
+    double** scant =
+        new double*[Nframe];
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        if (framing[static_cast<size_t>(i)].empty() ||
+            framing[static_cast<size_t>(i)][0] <= 0.0)
+        {
+            for (long int j = 0; j < i; ++j)
+            {
+                delete[] scant[j];
+            }
+
+            delete[] scant;
+
+            throw std::invalid_argument(
+                "Liver DBIF frame durations must be positive.");
+        }
+
+        accumulatedTime +=
+            framing[static_cast<size_t>(i)][0];
+
+        cumulative[static_cast<size_t>(i)] =
+            accumulatedTime;
+
+        scant[i] = new double[2];
+
+        scant[i][0] =
+            (i == 0)
+            ? 0.0
+            : cumulative[static_cast<size_t>(i - 1)];
+
+        scant[i][1] =
+            cumulative[static_cast<size_t>(i)];
+    }
+
+    const double scanEndSec =
+        cumulative.back();
+
+    long int numberOfFineSamples = 0;
+    double* arterialInputFine = nullptr;
+
+    const bool useNativeWholeBlood =
+        nativeWholeBloodTimesSec &&
+        nativeWholeBloodValues &&
+        nativeWholeBloodTimesSec->size() >= 2 &&
+        nativeWholeBloodTimesSec->size() ==
+            nativeWholeBloodValues->size();
+
+    if (useNativeWholeBlood)
+    {
+        arterialInputFine =
+            FineSampleExplicitInputFunction(
+                *nativeWholeBloodTimesSec,
+                *nativeWholeBloodValues,
+                scanEndSec,
+                timestep,
+                interpolationType,
+                numberOfFineSamples);
+    }
+    else
+    {
+        // Segment-derived IDIFs intentionally retain the established
+        // frame-aware fine-sampling pathway.
+        std::vector<std::vector<double>>
+            wholeBloodFrameValues = Cwb;
+
+        arterialInputFine =
+            finesample(
+                scant,
+                wholeBloodFrameValues,
+                Nframe,
+                numberOfFineSamples,
+                timestep,
+                interpolationType);
+    }
+
+    if (!arterialInputFine ||
+        numberOfFineSamples <= 0)
+    {
+        for (long int i = 0; i < Nframe; ++i)
+        {
+            delete[] scant[i];
+        }
+
+        delete[] scant;
+
+        throw std::runtime_error(
+            "Could not fine-sample the arterial whole-blood input "
+            "for the liver DBIF model.");
+    }
+
+    std::vector<double> scantFlattened(
+        static_cast<size_t>(Nframe) * 2);
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        scantFlattened[static_cast<size_t>(i)] =
+            scant[i][0];
+
+        scantFlattened[static_cast<size_t>(i + Nframe)] =
+            scant[i][1];
+    }
+
+    std::vector<double> tacValues(
+        static_cast<size_t>(Nframe));
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        if (tac[static_cast<size_t>(i)].empty())
+        {
+            delete[] arterialInputFine;
+
+            for (long int j = 0; j < Nframe; ++j)
+            {
+                delete[] scant[j];
+            }
+
+            delete[] scant;
+
+            throw std::invalid_argument(
+                "Liver DBIF TAC contains an empty frame.");
+        }
+
+        tacValues[static_cast<size_t>(i)] =
+            tac[static_cast<size_t>(i)][0];
+    }
+
+    std::vector<double> fittedParameters(
+        numberOfParameters);
+
+    std::vector<int> parameterSensitivity(
+        numberOfParameters);
+
+    for (int i = 0; i < numberOfParameters; ++i)
+    {
+        fittedParameters[static_cast<size_t>(i)] =
+            kinit[i];
+
+        parameterSensitivity[static_cast<size_t>(i)] =
+            sens[i] ? 1 : 0;
+    }
+
+    KMODEL_T model;
+    model.dk = dk;
+    model.td = timestep;
+
+    // kconv_liver_* names this argument "ca". It is the
+    // arterial/aortic whole-blood input from which the portal component
+    // and effective dual input are generated.
+    model.cp = arterialInputFine;
+
+    // The generic callback signature also contains wb. Supply a valid
+    // curve without changing the established KMAP API.
+    model.wb = arterialInputFine;
+
+    model.num_frm =
+        static_cast<int>(Nframe);
+
+    model.num_vox = 1;
+
+    model.scant =
+        scantFlattened.data();
+
+    model.tacfunc =
+        kconv_liver_tac;
+
+    model.jacfunc =
+        kconv_liver_jac;
+
+    fitted_curve =
+        new double[Nframe];
+
+    kmap_levmar(
+        tacValues.data(),
+        weights.data(),
+        static_cast<int>(Nframe),
+        fittedParameters.data(),
+        numberOfParameters,
+        &model,
+        tac_eval,
+        jac_eval,
+        lb,
+        ub,
+        parameterSensitivity.data(),
+        maxiter,
+        fitted_curve);
+
+    params.vb = sens[0]
+        ? fittedParameters[0]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.K1 = sens[1]
+        ? fittedParameters[1]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.k2 = sens[2]
+        ? fittedParameters[2]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.k3 = sens[3]
+        ? fittedParameters[3]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.k4 = sens[4]
+        ? fittedParameters[4]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.ka = sens[5]
+        ? fittedParameters[5]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.fa = sens[6]
+        ? fittedParameters[6]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.td = sens[7]
+        ? fittedParameters[7]
+        : std::numeric_limits<double>::quiet_NaN();
+
+    params.Ki =
+        params.K1 *
+        params.k3 /
+        (params.k2 +
+         params.k3 +
+         EPS);
+
+    params.DV =
+        params.K1 /
+        (params.k2 + EPS) *
+        (1.0 +
+         params.k3 /
+         (params.k4 + EPS));
+
+    params.weights =
+        weights;
+
+    params.dof =
+        std::count(
+            sens,
+            sens + numberOfParameters,
+            true);
+
+    std::vector<double> predicted(
+        fitted_curve,
+        fitted_curve + Nframe);
+
+    params.AIC =
+        this->computeAIC(
+            tacValues,
+            predicted,
+            params.dof,
+            wgt);
+
+    params.BIC =
+        this->computeBIC(
+            tacValues,
+            predicted,
+            params.dof,
+            wgt);
+
+    params.MASE =
+        this->MASE(
+            tacValues,
+            predicted,
+            wgt);
+
+    if (Nframe > params.dof)
+    {
+        params.chi2 =
+            this->computeChi2(
+                tacValues,
+                predicted,
+                wgt) /
+            static_cast<double>(
+                Nframe -
+                params.dof);
+    }
+    else
+    {
+        params.chi2 =
+            std::numeric_limits<double>::quiet_NaN();
+    }
+
+    params.loglik =
+        this->computeLogLik(
+            tacValues,
+            predicted,
+            wgt);
+
+    params.r.resize(
+        static_cast<size_t>(Nframe));
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        params.r[static_cast<size_t>(i)] =
+            tacValues[static_cast<size_t>(i)] -
+            predicted[static_cast<size_t>(i)];
+    }
+
+    delete[] arterialInputFine;
+
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        delete[] scant[i];
+    }
+
+    delete[] scant;
 }
 
 
@@ -2120,7 +2608,8 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
   params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
-      if (timeAlong[i] >= timeOffset)
+      if (timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0))
       {
           double x = intCp[i] / (Cp[i] + 1e-16);
           double y = tac[i]   / (Cp[i] + 1e-16);
@@ -2319,7 +2808,8 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
   params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
-      if (timeAlong[i] >= timeOffset)
+      if (timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0))
       {
           double x = intCp[i] / (tac[i] + 1e-16);
           double y = intCt[i] / (tac[i] + 1e-16);
@@ -2516,7 +3006,8 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
   params.keep.clear();
   for (size_t i = 0; i < N; ++i)
   {
-      if (timeAlong[i] >= timeOffset)
+      if (timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0))
       {
           double x = intCp[i] / (Cp[i] + 1e-16);
           double y = intCt[i] / (Cp[i] + 1e-16);
@@ -4031,7 +4522,8 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     std::vector<int> keepIndex;
     for (size_t i = 0; i < N; ++i)
     {
-        if (timeAlong[i] >= timeOffset)
+        if (timeAlong[i] >= timeOffset &&
+            (!wgt_global || (*wgt_global)[i] > 0.0))
         {
             X_all.push_back(intCp[i] * invCp[i]);
             keepIndex.push_back(static_cast<int>(i));
@@ -4290,7 +4782,8 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
     std::vector<int> keepIndex;
     for (size_t i = 0; i < N; ++i)
     {
-        if (timeAlong[i] >= timeOffset)
+        if (timeAlong[i] >= timeOffset &&
+            (!wgt_global || (*wgt_global)[i] > 0.0))
             keepIndex.push_back(static_cast<int>(i));
     }
     size_t n = keepIndex.size();
@@ -4547,7 +5040,8 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     std::vector<int> keepIndex;
     for (size_t i = 0; i < N; ++i)
     {
-      if (timeAlong[i] >= timeOffset)
+      if (timeAlong[i] >= timeOffset &&
+          (!wgt_global || (*wgt_global)[i] > 0.0))
       {
           X_all.push_back(intCp[i] * invCp[i]);
           keepIndex.push_back(static_cast<int>(i));
@@ -4939,7 +5433,8 @@ void vtkSlicerDynamicPETLogic::CreateMTGAParametricImages(
 
 void vtkSlicerDynamicPETLogic::callTCMImg(
     const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
-    const std::vector<double>& Cp,                    // [Nframe]
+    const std::vector<double>& Cp,                    // plasma [Nframe]
+    const std::vector<double>& Cwb,                   // total whole blood [Nframe]
     const std::vector<double>& framing,               // [Nframe]
     double* kinit,
     double* lb,
@@ -4947,7 +5442,6 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     const bool* sens,
     const double dk,
     const double timestep,
-    const double pbrp[],
     const int maxiter,
     const int n_tc,
     std::vector<TCMParameters>& outputParams,
@@ -4959,14 +5453,24 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     std::function<void(int)> progressCallback,
     std::function<bool()> stopCallback,
     const std::string& interpolationType,
-    const std::vector<double>* nativeInputTimesSec,
-    const std::vector<double>* nativeInputCp
+    const std::vector<double>* nativePlasmaTimesSec,
+    const std::vector<double>* nativePlasmaValues,
+    const std::vector<double>* nativeWholeBloodTimesSec,
+    const std::vector<double>* nativeWholeBloodValues,
+    const std::vector<double>* parentFractionTimesSec,
+    const std::vector<double>* parentFractionValues,
+    bool plasmaIsParent
     )
 {
-    const double EPS = 1e-12;
+    constexpr double EPS = 1e-16;
     const int Nframe = static_cast<int>(Cp.size());
     const int Nvox = static_cast<int>(voxels.size());
-    if (Nvox == 0 || framing.size() != Cp.size()) return;
+    if (Nvox == 0 ||
+        framing.size() != Cp.size() ||
+        Cwb.size() != Cp.size())
+    {
+        return;
+    }
 
     // ---------- choose threads ----------
     #ifdef HAVE_OPENMP
@@ -5004,80 +5508,39 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         cumsum[i] = cum;
     }
 
-    // ---------- 3) Scant and whole blood ----------
+    // ---------- 3) Scan intervals ----------
     std::vector<double*> scant(Nframe);
-    for (int i = 0; i < Nframe; ++i) {
-      scant[i] = new double[2];
-    }
-    std::vector<double> cwb(Nframe);
-    for (int i = 0; i < Nframe; ++i) {
-        scant[i][0] = (i==0)?0.0:cumsum[i-1];
+    for (int i = 0; i < Nframe; ++i)
+    {
+        scant[i] = new double[2];
+        scant[i][0] = (i == 0) ? 0.0 : cumsum[i - 1];
         scant[i][1] = cumsum[i];
-        double t = 0.5*(scant[i][0]+scant[i][1]);
-        double pbr = pbrp[0]*exp(-pbrp[1]*t/60.0)+pbrp[2];
-        if (!std::isfinite(pbr) ||
-            pbr <= EPS)
-        {
-            throw std::runtime_error(
-                "Plasma/whole-blood ratio "
-                "must remain positive.");
-        }
-        // std :: cout << "Cp[i] = " << Cp[i] << std :: endl;
-        cwb[i] = Cp[i]/pbr;
     }
 
-    // ---------- 4) Fine-sample ----------
+    // ---------- 4) Fine-sample plasma and whole blood independently ----------
     long int N_cp = 0;
+    long int N_wb = 0;
 
     double* Cp_new = nullptr;
     double* cwb_new = nullptr;
 
-    const bool useNativeInput =
-        nativeInputTimesSec &&
-        nativeInputCp &&
-        nativeInputTimesSec->size() >= 2 &&
-        nativeInputTimesSec->size() ==
-            nativeInputCp->size();
+    const bool useNativePlasma =
+        nativePlasmaTimesSec &&
+        nativePlasmaValues &&
+        nativePlasmaTimesSec->size() >= 2 &&
+        nativePlasmaTimesSec->size() ==
+            nativePlasmaValues->size();
 
-    if (useNativeInput)
+    if (useNativePlasma)
     {
         Cp_new =
             FineSampleExplicitInputFunction(
-                *nativeInputTimesSec,
-                *nativeInputCp,
+                *nativePlasmaTimesSec,
+                *nativePlasmaValues,
                 cumsum.back(),
                 timestep,
                 interpolationType,
                 N_cp);
-
-        cwb_new =
-            new double[N_cp];
-
-        for (long int i = 0;
-             i < N_cp;
-             ++i)
-        {
-            const double t =
-                (static_cast<double>(i) + 0.5) *
-                timestep;
-
-            double pbr =
-                pbrp[0] *
-                std::exp(
-                    -pbrp[1] * t / 60.0)
-                + pbrp[2];
-
-            if (!std::isfinite(pbr) ||
-                pbr <= EPS)
-            {
-                throw std::runtime_error(
-                    "Plasma/whole-blood ratio "
-                    "must remain positive.");
-            }
-
-            cwb_new[i] =
-                Cp_new[i] / pbr;
-        }
     }
     else
     {
@@ -5088,14 +5551,85 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
                 N_cp,
                 timestep,
                 interpolationType);
+    }
 
+    const bool useNativeWholeBlood =
+        nativeWholeBloodTimesSec &&
+        nativeWholeBloodValues &&
+        nativeWholeBloodTimesSec->size() >= 2 &&
+        nativeWholeBloodTimesSec->size() ==
+            nativeWholeBloodValues->size();
+
+    if (useNativeWholeBlood)
+    {
+        cwb_new =
+            FineSampleExplicitInputFunction(
+                *nativeWholeBloodTimesSec,
+                *nativeWholeBloodValues,
+                cumsum.back(),
+                timestep,
+                interpolationType,
+                N_wb);
+    }
+    else
+    {
         cwb_new =
             finesample2(
                 scant,
-                cwb,
-                N_cp,
+                Cwb,
+                N_wb,
                 timestep,
                 interpolationType);
+    }
+
+    if (N_cp != N_wb)
+    {
+        delete[] Cp_new;
+        delete[] cwb_new;
+
+        throw std::runtime_error(
+            "Plasma and whole-blood fine-sampling grids differ.");
+    }
+
+    const bool applyParentFraction =
+        !plasmaIsParent &&
+        parentFractionTimesSec &&
+        parentFractionValues &&
+        parentFractionTimesSec->size() >= 2 &&
+        parentFractionTimesSec->size() ==
+            parentFractionValues->size();
+
+    if (applyParentFraction)
+    {
+        long int N_parent = 0;
+
+        double* parentFractionNew =
+            FineSampleExplicitInputFunction(
+                *parentFractionTimesSec,
+                *parentFractionValues,
+                cumsum.back(),
+                timestep,
+                "linear",
+                N_parent);
+
+        if (N_parent != N_cp)
+        {
+            delete[] parentFractionNew;
+            delete[] Cp_new;
+            delete[] cwb_new;
+
+            throw std::runtime_error(
+                "Parent-fraction and plasma fine-sampling grids differ.");
+        }
+
+        for (long int i = 0;
+             i < N_cp;
+             ++i)
+        {
+            Cp_new[i] *= parentFractionNew[i];
+        }
+
+        delete[] parentFractionNew;
     }
 
     // ---------- 5) Preallocate output ----------

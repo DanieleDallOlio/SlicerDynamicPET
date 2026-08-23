@@ -104,6 +104,8 @@ struct TCMParameters
   double k2 = std::numeric_limits<double>::quiet_NaN();
   double k3 = std::numeric_limits<double>::quiet_NaN();
   double k4 = std::numeric_limits<double>::quiet_NaN();
+  double ka = std::numeric_limits<double>::quiet_NaN();
+  double fa = std::numeric_limits<double>::quiet_NaN();
   double vb = std::numeric_limits<double>::quiet_NaN();
   double td = std::numeric_limits<double>::quiet_NaN();
   double Ki = std::numeric_limits<double>::quiet_NaN();
@@ -152,6 +154,7 @@ public:
   void callTCM(
      std::vector<std::vector<double>> tac,
      std::vector<std::vector<double>> Cp,
+     std::vector<std::vector<double>> Cwb,
      std::vector<std::vector<double>> framing,
      long int Nframe,
      long int Nvox,
@@ -161,15 +164,42 @@ public:
      const bool* sens,
      const double dk,
      const double timestep,
-     const double pbrp[],
      const int maxiter,
      const int n_tc,
      TCMParameters& params,
      double*& fitted_curve,
      const std::vector<double>* wgt,
      const std::string& interpolationType = "linear",
-     const std::vector<double>* nativeInputTimesSec = nullptr,
-     const std::vector<double>* nativeInputCp = nullptr);
+     const std::vector<double>* nativePlasmaTimesSec = nullptr,
+     const std::vector<double>* nativePlasmaValues = nullptr,
+     const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+     const std::vector<double>* nativeWholeBloodValues = nullptr,
+     const std::vector<double>* parentFractionTimesSec = nullptr,
+     const std::vector<double>* parentFractionValues = nullptr,
+     bool plasmaIsParent = false);
+
+  // ROI-only optimization-derived liver dual-blood-input model.
+  // The supplied arterial input is total whole blood. The model internally
+  // derives the portal-vein component and estimates ka and fa.
+  void callLiverTCM(
+     const std::vector<std::vector<double>>& tac,
+     const std::vector<std::vector<double>>& Cwb,
+     const std::vector<std::vector<double>>& framing,
+     long int Nframe,
+     double* kinit,
+     double* lb,
+     double* ub,
+     const bool* sens,
+     const double dk,
+     const double timestep,
+     const int maxiter,
+     TCMParameters& params,
+     double*& fitted_curve,
+     const std::vector<double>* wgt,
+     const std::string& interpolationType = "linear",
+     const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+     const std::vector<double>* nativeWholeBloodValues = nullptr);
+
   // void getFittedTCM(double *& fitted_curve,
   //                   std :: vector< std :: vector<double> > Cp,
   //                   std :: vector< std :: vector<double> > framing,
@@ -374,7 +404,8 @@ public:
     );
   void callTCMImg(
       const std::vector<std::vector<double>>& voxels,   // [Nvoxels][Nframe]
-      const std::vector<double>& Cp,                    // [Nframe]
+      const std::vector<double>& Cp,                    // plasma [Nframe]
+      const std::vector<double>& Cwb,                   // total whole blood [Nframe]
       const std::vector<double>& framing,               // [Nframe]
       double* kinit,
       double* lb,
@@ -382,7 +413,6 @@ public:
       const bool* sens,
       const double dk,
       const double timestep,
-      const double pbrp[],
       const int maxiter,
       const int n_tc,
       std::vector<TCMParameters>& outputParams,
@@ -394,8 +424,13 @@ public:
       std::function<void(int)> progressCallback = nullptr,
       std::function<bool()> stopCallback = nullptr,
       const std::string& interpolationType = "linear",
-      const std::vector<double>* nativeInputTimesSec = nullptr,
-      const std::vector<double>* nativeInputCp = nullptr
+      const std::vector<double>* nativePlasmaTimesSec = nullptr,
+      const std::vector<double>* nativePlasmaValues = nullptr,
+      const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+      const std::vector<double>* nativeWholeBloodValues = nullptr,
+      const std::vector<double>* parentFractionTimesSec = nullptr,
+      const std::vector<double>* parentFractionValues = nullptr,
+      bool plasmaIsParent = false
       );
   std::vector<double> ExtractParameter(
       const std::vector<TCMParameters>& outputParams,

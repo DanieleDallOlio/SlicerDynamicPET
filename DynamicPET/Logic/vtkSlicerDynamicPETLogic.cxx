@@ -713,6 +713,190 @@ bool ComputeMultiscaleLogPETThreshold(
            threshold > 0.0;
 }
 
+
+struct FengFitContext
+{
+    std::vector<double> timesMin;
+    std::vector<double> frameStartMin;
+    std::vector<double> frameEndMin;
+    bool frameAverages{false};
+};
+
+static double fengSafeExp(double x)
+{
+    return std::exp(std::max(-40.0, std::min(40.0, x)));
+}
+
+static void fengInternalToPhysical(
+    const double* u,
+    FengParameters& p)
+{
+    p.tau = u[0];
+    p.A1 = fengSafeExp(u[1]);
+    p.A2 = fengSafeExp(u[2]);
+    p.A3 = fengSafeExp(u[3]);
+
+    p.lambda3 = fengSafeExp(u[6]);
+    p.lambda2 = p.lambda3 + fengSafeExp(u[5]);
+    p.lambda1 = p.lambda2 + fengSafeExp(u[4]);
+}
+
+static double fengI0(double x, double lambda)
+{
+    if (x <= 0.0)
+    {
+        return 0.0;
+    }
+
+    const double z = lambda * x;
+    if (std::abs(z) < 1e-6)
+    {
+        return x *
+            (1.0 - 0.5 * z + z * z / 6.0);
+    }
+
+    return -std::expm1(-z) / lambda;
+}
+
+static double fengI1(double x, double lambda)
+{
+    if (x <= 0.0)
+    {
+        return 0.0;
+    }
+
+    const double z = lambda * x;
+    if (std::abs(z) < 1e-5)
+    {
+        return x * x *
+            (0.5 - z / 3.0 + z * z / 8.0);
+    }
+
+    return
+        (1.0 - std::exp(-z) * (1.0 + z)) /
+        (lambda * lambda);
+}
+
+static double fengValueMin(
+    double timeMin,
+    const FengParameters& p)
+{
+    const double x = timeMin - p.tau;
+    if (x < 0.0)
+    {
+        return 0.0;
+    }
+
+    const double value =
+        (p.A1 * x - p.A2 - p.A3) *
+            std::exp(-p.lambda1 * x) +
+        p.A2 * std::exp(-p.lambda2 * x) +
+        p.A3 * std::exp(-p.lambda3 * x);
+
+    return value;
+}
+
+static double fengCumulativeMin(
+    double timeMin,
+    const FengParameters& p)
+{
+    const double x = std::max(0.0, timeMin - p.tau);
+
+    return
+        p.A1 * fengI1(x, p.lambda1) -
+        (p.A2 + p.A3) * fengI0(x, p.lambda1) +
+        p.A2 * fengI0(x, p.lambda2) +
+        p.A3 * fengI0(x, p.lambda3);
+}
+
+static void fengEvaluateInternal(
+    double* u,
+    void* param,
+    double* out)
+{
+    auto* ctx = static_cast<FengFitContext*>(param);
+    FengParameters physical;
+    fengInternalToPhysical(u, physical);
+
+    const size_t n = ctx->frameAverages
+        ? ctx->frameStartMin.size()
+        : ctx->timesMin.size();
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (ctx->frameAverages)
+        {
+            const double start = ctx->frameStartMin[i];
+            const double end = ctx->frameEndMin[i];
+            const double duration = end - start;
+            out[i] = duration > 0.0
+                ? (fengCumulativeMin(end, physical) -
+                   fengCumulativeMin(start, physical)) / duration
+                : 0.0;
+        }
+        else
+        {
+            out[i] = fengValueMin(ctx->timesMin[i], physical);
+        }
+    }
+}
+
+static void fengJacobianInternal(
+    double* u,
+    void* param,
+    double* out,
+    int* psens,
+    double* jac)
+{
+    auto* ctx = static_cast<FengFitContext*>(param);
+    const size_t n = ctx->frameAverages
+        ? ctx->frameStartMin.size()
+        : ctx->timesMin.size();
+
+    fengEvaluateInternal(u, param, out);
+
+    std::array<double, 7> plus{};
+    std::array<double, 7> minus{};
+    for (int j = 0; j < 7; ++j)
+    {
+        plus[static_cast<size_t>(j)] = u[j];
+        minus[static_cast<size_t>(j)] = u[j];
+    }
+
+    std::vector<double> yPlus(n, 0.0);
+    std::vector<double> yMinus(n, 0.0);
+
+    int column = 0;
+    for (int j = 0; j < 7; ++j)
+    {
+        if (!psens[j])
+        {
+            continue;
+        }
+
+        for (int k = 0; k < 7; ++k)
+        {
+            plus[static_cast<size_t>(k)] = u[k];
+            minus[static_cast<size_t>(k)] = u[k];
+        }
+
+        const double step =
+            1e-5 * (1.0 + std::abs(u[j]));
+        plus[static_cast<size_t>(j)] += step;
+        minus[static_cast<size_t>(j)] -= step;
+
+        fengEvaluateInternal(plus.data(), param, yPlus.data());
+        fengEvaluateInternal(minus.data(), param, yMinus.data());
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            jac[i + static_cast<size_t>(column) * n] =
+                (yPlus[i] - yMinus[i]) / (2.0 * step);
+        }
+        ++column;
+    }
+}
+
 } // end anonymous namespace
 
 static const std::map<std::string, std::set<std::string>> MODEL_PARAMS = {
@@ -761,6 +945,263 @@ static double median(std::vector<double> v){
     return m;
 }
 
+static double robustMADScale(
+    const Eigen::VectorXd& residuals,
+    const std::vector<double>& baseWeights)
+{
+    std::vector<double> activeResiduals;
+    activeResiduals.reserve(
+        static_cast<size_t>(residuals.size()));
+
+    for (Eigen::Index i = 0; i < residuals.size(); ++i)
+    {
+        const double baseWeight =
+            (static_cast<size_t>(i) < baseWeights.size())
+            ? baseWeights[static_cast<size_t>(i)]
+            : 1.0;
+
+        if (baseWeight > 0.0 && std::isfinite(residuals(i)))
+        {
+            activeResiduals.push_back(residuals(i));
+        }
+    }
+
+    if (activeResiduals.empty())
+    {
+        return 1.0;
+    }
+
+    const double residualMedian =
+        median(activeResiduals);
+
+    std::vector<double> absoluteDeviations;
+    absoluteDeviations.reserve(activeResiduals.size());
+
+    for (const double residual : activeResiduals)
+    {
+        absoluteDeviations.push_back(
+            std::abs(residual - residualMedian));
+    }
+
+    // For Gaussian residuals, MAD / 0.67448975 estimates sigma.
+    double scale =
+        1.482602218505602 *
+        median(absoluteDeviations);
+
+    if (!std::isfinite(scale) || scale <= 1e-12)
+    {
+        double weightedSquareSum = 0.0;
+        double weightSum = 0.0;
+
+        for (Eigen::Index i = 0; i < residuals.size(); ++i)
+        {
+            const double baseWeight =
+                (static_cast<size_t>(i) < baseWeights.size())
+                ? baseWeights[static_cast<size_t>(i)]
+                : 1.0;
+
+            if (baseWeight <= 0.0 || !std::isfinite(residuals(i)))
+            {
+                continue;
+            }
+
+            weightedSquareSum +=
+                baseWeight * residuals(i) * residuals(i);
+            weightSum += baseWeight;
+        }
+
+        if (weightSum > 0.0)
+        {
+            scale = std::sqrt(weightedSquareSum / weightSum);
+        }
+    }
+
+    if (!std::isfinite(scale) || scale <= 1e-12)
+    {
+        scale = 1.0;
+    }
+
+    return scale;
+}
+
+static bool solveHuberIRLS(
+    const Eigen::MatrixXd& design,
+    const Eigen::VectorXd& observations,
+    const std::vector<double>& baseWeights,
+    double huberTune,
+    double tolerance,
+    int maxIterations,
+    Eigen::VectorXd& coefficients,
+    std::vector<double>& finalWeights)
+{
+    const Eigen::Index n = observations.size();
+
+    if (n <= 0 || design.rows() != n || design.cols() <= 0)
+    {
+        return false;
+    }
+
+    const double tune =
+        std::max(huberTune, 1e-6);
+
+    std::vector<double> base(
+        static_cast<size_t>(n),
+        1.0);
+
+    if (!baseWeights.empty())
+    {
+        if (baseWeights.size() != static_cast<size_t>(n))
+        {
+            return false;
+        }
+        base = baseWeights;
+    }
+
+    auto solveWithWeights =
+        [&](const std::vector<double>& combined,
+            Eigen::VectorXd& solution) -> bool
+        {
+            Eigen::VectorXd diagonal(n);
+            for (Eigen::Index i = 0; i < n; ++i)
+            {
+                const double weight =
+                    combined[static_cast<size_t>(i)];
+                diagonal(i) =
+                    (std::isfinite(weight) && weight > 0.0)
+                    ? weight
+                    : 0.0;
+            }
+
+            if (diagonal.sum() <= 0.0)
+            {
+                return false;
+            }
+
+            const Eigen::MatrixXd normalMatrix =
+                design.transpose() *
+                diagonal.asDiagonal() *
+                design;
+
+            const Eigen::VectorXd rightHandSide =
+                design.transpose() *
+                diagonal.asDiagonal() *
+                observations;
+
+            solution =
+                normalMatrix.ldlt().solve(rightHandSide);
+
+            return solution.allFinite();
+        };
+
+    std::vector<double> combinedWeights(
+        static_cast<size_t>(n),
+        0.0);
+
+    for (Eigen::Index i = 0; i < n; ++i)
+    {
+        combinedWeights[static_cast<size_t>(i)] =
+            std::max(0.0, base[static_cast<size_t>(i)]);
+    }
+
+    if (!solveWithWeights(combinedWeights, coefficients))
+    {
+        return false;
+    }
+
+    for (int iteration = 0;
+         iteration < std::max(1, maxIterations);
+         ++iteration)
+    {
+        const Eigen::VectorXd residuals =
+            observations - design * coefficients;
+
+        const double scale =
+            robustMADScale(residuals, base);
+
+        for (Eigen::Index i = 0; i < n; ++i)
+        {
+            const double baseWeight =
+                std::max(0.0, base[static_cast<size_t>(i)]);
+
+            if (baseWeight <= 0.0)
+            {
+                combinedWeights[static_cast<size_t>(i)] = 0.0;
+                continue;
+            }
+
+            const double standardizedResidual =
+                std::abs(residuals(i)) / scale;
+
+            const double robustWeight =
+                (standardizedResidual <= tune)
+                ? 1.0
+                : tune / std::max(standardizedResidual, 1e-12);
+
+            combinedWeights[static_cast<size_t>(i)] =
+                baseWeight * robustWeight;
+        }
+
+        Eigen::VectorXd nextCoefficients;
+        if (!solveWithWeights(
+                combinedWeights,
+                nextCoefficients))
+        {
+            return false;
+        }
+
+        const double difference =
+            (nextCoefficients - coefficients).norm();
+
+        const double reference =
+            1.0 + coefficients.norm();
+
+        coefficients = nextCoefficients;
+
+        if (difference <= tolerance * reference)
+        {
+            break;
+        }
+    }
+
+    finalWeights = combinedWeights;
+    return true;
+}
+
+static void markBoundIfNeeded(
+    unsigned int& flags,
+    double value,
+    double lower,
+    double upper,
+    bool sensitive,
+    unsigned int lowerFlag,
+    unsigned int upperFlag)
+{
+    if (!sensitive ||
+        !std::isfinite(value) ||
+        !std::isfinite(lower) ||
+        !std::isfinite(upper) ||
+        upper < lower)
+    {
+        return;
+    }
+
+    const double span =
+        std::max(std::abs(upper - lower), 1e-8);
+
+    const double tolerance =
+        std::max(1e-8, 1e-3 * span);
+
+    if (std::abs(value - lower) <= tolerance)
+    {
+        flags |= lowerFlag;
+    }
+
+    if (std::abs(value - upper) <= tolerance)
+    {
+        flags |= upperFlag;
+    }
+}
+
 static bool check_if_constant(const std::vector<double>& x, const double thres = 0.001){
     if(x.size()<2) return true;
     double c = median(x);              // robust center
@@ -806,6 +1247,262 @@ vtkSlicerDynamicPETLogic::vtkSlicerDynamicPETLogic()
 //----------------------------------------------------------------------------
 vtkSlicerDynamicPETLogic::~vtkSlicerDynamicPETLogic()
 {
+}
+
+//----------------------------------------------------------------------------
+bool vtkSlicerDynamicPETLogic::FitFengInputFunction(
+    const std::vector<double>& timesSec,
+    const std::vector<double>& values,
+    const std::vector<double>* frameStartSec,
+    const std::vector<double>* frameEndSec,
+    bool observationsAreFrameAverages,
+    FengParameters& params,
+    std::vector<double>& fittedObservationValues,
+    std::string* errorMessage)
+{
+    params = FengParameters{};
+    fittedObservationValues.clear();
+
+    const size_t n = values.size();
+    if (n < 8)
+    {
+        if (errorMessage)
+        {
+            *errorMessage =
+                "Feng fitting requires at least 8 retained observations.";
+        }
+        return false;
+    }
+
+    FengFitContext context;
+    context.frameAverages = observationsAreFrameAverages;
+
+    if (observationsAreFrameAverages)
+    {
+        if (!frameStartSec || !frameEndSec ||
+            frameStartSec->size() != n ||
+            frameEndSec->size() != n)
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    "Feng frame-average fitting requires matching frame start/end arrays.";
+            }
+            return false;
+        }
+
+        context.frameStartMin.resize(n);
+        context.frameEndMin.resize(n);
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (!std::isfinite((*frameStartSec)[i]) ||
+                !std::isfinite((*frameEndSec)[i]) ||
+                (*frameEndSec)[i] <= (*frameStartSec)[i])
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        "Invalid PET frame interval supplied to Feng fitting.";
+                }
+                return false;
+            }
+            context.frameStartMin[i] = (*frameStartSec)[i] / 60.0;
+            context.frameEndMin[i] = (*frameEndSec)[i] / 60.0;
+        }
+    }
+    else
+    {
+        if (timesSec.size() != n)
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    "Feng point-sampled fitting requires one time per observation.";
+            }
+            return false;
+        }
+
+        context.timesMin.resize(n);
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (!std::isfinite(timesSec[i]))
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        "Non-finite sample time supplied to Feng fitting.";
+                }
+                return false;
+            }
+            if (i > 0 && timesSec[i] <= timesSec[i - 1])
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        "Feng sample times must be strictly increasing.";
+                }
+                return false;
+            }
+            context.timesMin[i] = timesSec[i] / 60.0;
+        }
+    }
+
+    double peak = 0.0;
+    for (double value : values)
+    {
+        if (!std::isfinite(value))
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    "Non-finite input-function value supplied to Feng fitting.";
+            }
+            return false;
+        }
+        peak = std::max(peak, value);
+    }
+
+    if (!(peak > 0.0))
+    {
+        if (errorMessage)
+        {
+            *errorMessage =
+                "Feng fitting requires a positive input-function peak.";
+        }
+        return false;
+    }
+
+    const double maximumTimeMin = observationsAreFrameAverages
+        ? context.frameEndMin.back()
+        : context.timesMin.back();
+
+    const double tauLower = -1.0;
+    const double tauUpper = std::max(
+        0.25,
+        std::min(5.0, maximumTimeMin));
+
+    const std::array<std::array<double, 3>, 3> lambdaStarts{{
+        {{4.0, 0.5, 0.05}},
+        {{10.0, 1.0, 0.10}},
+        {{2.0, 0.25, 0.02}}
+    }};
+    const std::array<double, 3> tauStarts{{0.0, -0.05, 0.10}};
+
+    double bestSSE = std::numeric_limits<double>::infinity();
+    std::array<double, 7> bestInternal{};
+    std::vector<double> bestFitted(n, 0.0);
+
+    for (double tau0 : tauStarts)
+    {
+        for (const auto& lambdas : lambdaStarts)
+        {
+            std::array<double, 7> u{{
+                std::max(tauLower, std::min(tauUpper, tau0)),
+                std::log(std::max(1e-12, 2.0 * peak)),
+                std::log(std::max(1e-12, 0.65 * peak)),
+                std::log(std::max(1e-12, 0.35 * peak)),
+                std::log(std::max(1e-8, lambdas[0] - lambdas[1])),
+                std::log(std::max(1e-8, lambdas[1] - lambdas[2])),
+                std::log(std::max(1e-8, lambdas[2]))
+            }};
+
+            std::array<double, 7> lower{{
+                tauLower, -30.0, -30.0, -30.0,
+                -20.0, -20.0, -20.0
+            }};
+            std::array<double, 7> upper{{
+                tauUpper, 30.0, 30.0, 30.0,
+                10.0, 10.0, 10.0
+            }};
+            std::array<int, 7> sensitive{{1, 1, 1, 1, 1, 1, 1}};
+            std::vector<double> weights(n, 1.0);
+            std::vector<double> predicted(n, 0.0);
+
+            std::vector<double> observations = values;
+
+            kmap_levmar(
+                observations.data(),
+                weights.data(),
+                static_cast<int>(n),
+                u.data(),
+                7,
+                &context,
+                fengEvaluateInternal,
+                fengJacobianInternal,
+                lower.data(),
+                upper.data(),
+                sensitive.data(),
+                300,
+                predicted.data());
+
+            fengEvaluateInternal(
+                u.data(),
+                &context,
+                predicted.data());
+
+            double sse = 0.0;
+            bool finite = true;
+            for (size_t i = 0; i < n; ++i)
+            {
+                if (!std::isfinite(predicted[i]))
+                {
+                    finite = false;
+                    break;
+                }
+                const double residual = values[i] - predicted[i];
+                sse += residual * residual;
+            }
+
+            if (finite && sse < bestSSE)
+            {
+                bestSSE = sse;
+                bestInternal = u;
+                bestFitted = predicted;
+            }
+        }
+    }
+
+    if (!std::isfinite(bestSSE))
+    {
+        if (errorMessage)
+        {
+            *errorMessage =
+                "Feng optimization did not produce a finite solution.";
+        }
+        return false;
+    }
+
+    fengInternalToPhysical(bestInternal.data(), params);
+    params.SSE = bestSSE;
+    fittedObservationValues = std::move(bestFitted);
+    return true;
+}
+
+//----------------------------------------------------------------------------
+double vtkSlicerDynamicPETLogic::EvaluateFengInputFunction(
+    double timeSec,
+    const FengParameters& params) const
+{
+    return fengValueMin(timeSec / 60.0, params);
+}
+
+//----------------------------------------------------------------------------
+double vtkSlicerDynamicPETLogic::AverageFengInputFunction(
+    double frameStartSec,
+    double frameEndSec,
+    const FengParameters& params) const
+{
+    if (!(frameEndSec > frameStartSec))
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double startMin = frameStartSec / 60.0;
+    const double endMin = frameEndSec / 60.0;
+    return
+        (fengCumulativeMin(endMin, params) -
+         fengCumulativeMin(startMin, params)) /
+        (endMin - startMin);
 }
 
 //----------------------------------------------------------------------------
@@ -1072,6 +1769,8 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
     stats.q3 = std::numeric_limits<double>::quiet_NaN();
     stats.iqr = std::numeric_limits<double>::quiet_NaN();
     stats.peak = std::numeric_limits<double>::quiet_NaN();
+    stats.peakStddev = std::numeric_limits<double>::quiet_NaN();
+    stats.peakCount = 0;
     return stats;
   }
 
@@ -1087,6 +1786,7 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
   // --- 2) Compute mean inside sphere ---
   double sumPeak = 0.0;
   int countPeak = 0;
+  std::vector<double> peakValues;
   for (int z = max_ijk[2] - rz; z <= max_ijk[2] + rz; ++z)
   for (int y = max_ijk[1] - ry; y <= max_ijk[1] + ry; ++y)
   for (int x = max_ijk[0] - rx; x <= max_ijk[0] + rx; ++x)
@@ -1113,12 +1813,30 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
 
     sumPeak += val;
     countPeak++;
+    peakValues.push_back(val);
   }
 
   if (countPeak > 0)
+  {
     stats.peak = sumPeak / countPeak;
+    stats.peakCount = countPeak;
+
+    double peakVariance = 0.0;
+    for (const double value : peakValues)
+    {
+      const double delta = value - stats.peak;
+      peakVariance += delta * delta;
+    }
+
+    stats.peakStddev =
+        std::sqrt(peakVariance / countPeak);
+  }
   else
+  {
     stats.peak = std::numeric_limits<double>::quiet_NaN();
+    stats.peakStddev = std::numeric_limits<double>::quiet_NaN();
+    stats.peakCount = 0;
+  }
 
   return stats;
 }
@@ -1682,6 +2400,13 @@ void vtkSlicerDynamicPETLogic::callTCM(
     params.K1 = sens[1] ? fitted_params[1] : std::numeric_limits<double>::quiet_NaN();
     params.k2 = sens[2] ? fitted_params[2] : std::numeric_limits<double>::quiet_NaN();
     params.td = sens[3] ? fitted_params[3] : std::numeric_limits<double>::quiet_NaN();
+
+    params.boundFlags = TCM_BOUND_NONE;
+    markBoundIfNeeded(params.boundFlags, params.vb, lb[0], ub[0], sens[0], TCM_BOUND_VB_LOWER, TCM_BOUND_VB_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.K1, lb[1], ub[1], sens[1], TCM_BOUND_K1_LOWER, TCM_BOUND_K1_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k2, lb[2], ub[2], sens[2], TCM_BOUND_K2_LOWER, TCM_BOUND_K2_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.td, lb[3], ub[3], sens[3], TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER);
+
     params.Ki = params.K1;
     params.DV = params.K1/(params.k2 + 1e-16);
     params.weights.assign(wt, wt + Nframe);
@@ -1728,6 +2453,15 @@ void vtkSlicerDynamicPETLogic::callTCM(
     params.k3 = sens[3] ? fitted_params[3] : std::numeric_limits<double>::quiet_NaN();
     params.k4 = sens[4] ? fitted_params[4] : std::numeric_limits<double>::quiet_NaN();
     params.td = sens[5] ? fitted_params[5] : std::numeric_limits<double>::quiet_NaN();
+
+    params.boundFlags = TCM_BOUND_NONE;
+    markBoundIfNeeded(params.boundFlags, params.vb, lb[0], ub[0], sens[0], TCM_BOUND_VB_LOWER, TCM_BOUND_VB_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.K1, lb[1], ub[1], sens[1], TCM_BOUND_K1_LOWER, TCM_BOUND_K1_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k2, lb[2], ub[2], sens[2], TCM_BOUND_K2_LOWER, TCM_BOUND_K2_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k3, lb[3], ub[3], sens[3], TCM_BOUND_K3_LOWER, TCM_BOUND_K3_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k4, lb[4], ub[4], sens[4], TCM_BOUND_K4_LOWER, TCM_BOUND_K4_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.td, lb[5], ub[5], sens[5], TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER);
+
     params.Ki = params.K1 * params.k3 / (params.k2 + params.k3);
     params.DV = params.K1/(params.k2 + 1e-16) * (1 + params.k3/(params.k4 + 1e-16));
     params.weights.assign(wt, wt + Nframe);
@@ -2051,6 +2785,16 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
     params.td = sens[7]
         ? fittedParameters[7]
         : std::numeric_limits<double>::quiet_NaN();
+
+    params.boundFlags = TCM_BOUND_NONE;
+    markBoundIfNeeded(params.boundFlags, params.vb, lb[0], ub[0], sens[0], TCM_BOUND_VB_LOWER, TCM_BOUND_VB_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.K1, lb[1], ub[1], sens[1], TCM_BOUND_K1_LOWER, TCM_BOUND_K1_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k2, lb[2], ub[2], sens[2], TCM_BOUND_K2_LOWER, TCM_BOUND_K2_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k3, lb[3], ub[3], sens[3], TCM_BOUND_K3_LOWER, TCM_BOUND_K3_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.k4, lb[4], ub[4], sens[4], TCM_BOUND_K4_LOWER, TCM_BOUND_K4_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.ka, lb[5], ub[5], sens[5], TCM_BOUND_KA_LOWER, TCM_BOUND_KA_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.fa, lb[6], ub[6], sens[6], TCM_BOUND_FA_LOWER, TCM_BOUND_FA_UPPER);
+    markBoundIfNeeded(params.boundFlags, params.td, lb[7], ub[7], sens[7], TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER);
 
     params.Ki =
         params.K1 *
@@ -2590,17 +3334,19 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
   for (size_t i = 0; i < N; ++i)
       frameScaled[i] = framing[i] / framingNorm;
 
-  // cumulative sum of framing
-  std::vector<double> timeAlong(N);
-  std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
-  // cumulative trapezoid for Cp
+  // PET values are frame averages. Associate each observation with its
+  // frame midpoint and integrate frame-average values directly. Full-frame
+  // areas are known exactly; only the current half-frame is approximated.
+  std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
-  double acc = 0.0;
-  for (size_t i = 1; i < N; ++i)
+  double elapsed = 0.0;
+  double accumulatedCp = 0.0;
+  for (size_t i = 0; i < N; ++i)
   {
-      acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-      intCp[i] = acc;
+      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+      accumulatedCp += Cp[i] * frameScaled[i];
+      elapsed += frameScaled[i];
   }
 
   // build X, Y with time filter
@@ -2636,8 +3382,10 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
 
       meanX = std::accumulate(outX.begin(), outX.end(), 0.0) / n;
       meanY = std::accumulate(outY.begin(), outY.end(), 0.0) / n;
-      stdX = std::sqrt(std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX*meanX);
-      stdY = std::sqrt(std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY*meanY);
+      stdX = std::sqrt(std::max(0.0, std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX*meanX));
+      stdY = std::sqrt(std::max(0.0, std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY*meanY));
+      if (stdX < 1e-12) stdX = 1.0;
+      if (stdY < 1e-12) stdY = 1.0;
 
       for (size_t i = 0; i < n; ++i)
       {
@@ -2654,86 +3402,124 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
   A.col(1) = Xv;
 
   Eigen::VectorXd coeff(2);
-  if (robust) {
-    // simple robust regression using Iteratively Reweighted Least Squares (Huber)
-    Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
-    std::vector<size_t> keepIndices;
-    if (!wgt_adj.empty())
-    {
-        for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
-        {
-            if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
-            {
-                keepIndices.push_back(iz);
+  std::vector<double> baseFitWeights(n, 1.0);
+  if (!wgt_adj.empty())
+  {
+      baseFitWeights = wgt_adj;
+  }
 
-            } else {
-              weights(iz) = 0.;
-            }
-        }
-    }
-    Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
-    Eigen::VectorXd residuals(n), prev_coeff(2);
-    for (int iter = 0; iter < max_iter; ++iter) {
-      // Update weight matrix
-      W.diagonal() = weights;
-      // Weighted least squares step
-      coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-      // Check for convergence
-      if (iter > 0 && (coeff - prev_coeff).norm() < tol) break;
-      prev_coeff = coeff;
-      // Update residuals and weights
-      residuals = Yv - A * coeff;
-      for (auto i: keepIndices) {
-          double r = std::abs(residuals(i));
-          weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);  // avoid div by 0
+  std::vector<double> finalFitWeights = baseFitWeights;
+
+  if (robust)
+  {
+      if (!solveHuberIRLS(
+              A,
+              Yv,
+              baseFitWeights,
+              huber_tune,
+              tol,
+              max_iter,
+              coeff,
+              finalFitWeights))
+      {
+          throw std::runtime_error(
+              "Huber robust regression failed.");
       }
-    }
-    wgt_adj.assign(weights.data(), weights.data() + weights.size());
-    wgt = &wgt_adj;
-  } else {
-    if (!wgt)
-    {
-      // Ordinary Least Squares
-      coeff = (A.transpose() * A).ldlt().solve(A.transpose() * Yv);
-    }
-    else
-    {
-      // Weighted Least Squares
-      Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-      Eigen::MatrixXd W = Wv.asDiagonal();
-      coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-    }
+  }
+  else if (!wgt_adj.empty())
+  {
+      Eigen::Map<const Eigen::VectorXd> Wv(
+          wgt_adj.data(),
+          n);
+      const Eigen::MatrixXd W = Wv.asDiagonal();
+      coeff =
+          (A.transpose() * W * A)
+              .ldlt()
+              .solve(A.transpose() * W * Yv);
+  }
+  else
+  {
+      coeff =
+          (A.transpose() * A)
+              .ldlt()
+              .solve(A.transpose() * Yv);
   }
 
   double intercept = coeff(0);
   double slope = coeff(1);
 
-  // fitted values
   fittedValues.resize(n);
-  params.r.resize(n);
-  for (size_t i = 0; i < n; ++i) {
-    fittedValues[i] = intercept + slope * outX[i];
-    params.r[i] = outY[i] - fittedValues[i];
+  for (size_t i = 0; i < n; ++i)
+  {
+      fittedValues[i] =
+          intercept + slope * outX[i];
   }
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
+  // Keep diagnostics on the standardized graphical-analysis scale when
+  // standardization is enabled. The reported kinetic slope/intercept and
+  // plotted X/Y values are converted back to their original coordinates.
+  const std::vector<double> diagnosticY = outY;
+  const std::vector<double> diagnosticFitted = fittedValues;
 
-  // de-standardize if needed
+  // Convert the regression parameters and displayed vectors back to
+  // the original graphical-analysis scale.
   if (std)
   {
-      double devyoverdevx = stdY / stdX;
-      slope   = slope * devyoverdevx;
-      intercept = meanY - slope * meanX + intercept;
+      const double slopeRaw =
+          slope * stdY / stdX;
+      const double interceptRaw =
+          meanY + stdY * intercept - slopeRaw * meanX;
+
+      slope = slopeRaw;
+      intercept = interceptRaw;
+
       for (size_t i = 0; i < n; ++i)
       {
-          outX[i] = outX[i]*stdX + meanX;
-          outY[i] = outY[i]*stdY + meanY;
-          fittedValues[i] = fittedValues[i]*stdY + meanY;
+          outX[i] = outX[i] * stdX + meanX;
+          outY[i] = outY[i] * stdY + meanY;
+          fittedValues[i] =
+              fittedValues[i] * stdY + meanY;
       }
+  }
+
+  // Huber weights are adaptive fitting weights, not a measurement-variance
+  // model.  For AIC/R2/MASE/chi-square diagnostics evaluate the final robust
+  // solution using the original frame weights/mask.
+  const std::vector<double>* diagnosticWeights =
+      baseFitWeights.empty()
+      ? nullptr
+      : &baseFitWeights;
+
+  params.AIC =
+      computeAIC(
+          diagnosticY,
+          diagnosticFitted,
+          2,
+          diagnosticWeights);
+  params.MASE =
+      MASE(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.R2 =
+      computeR2(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.chi2 =
+      (n > 2)
+      ? computeChi2(
+            diagnosticY,
+            diagnosticFitted,
+            diagnosticWeights) /
+            static_cast<double>(n - 2)
+      : std::numeric_limits<double>::quiet_NaN();
+
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i)
+  {
+      params.r[i] =
+          diagnosticY[i] - diagnosticFitted[i];
   }
 
   // Ki and Intercept
@@ -2747,14 +3533,10 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
   params.fitted = fittedValues;
 
   params.dof = 2;
-  if (wgt == nullptr)
-  {
-      params.weights.assign(n, 1.0);  // fills with ones
-  }
-  else
-  {
-      params.weights = wgt_adj;  // copy from your pre-filled vector
-  }
+  params.weights =
+      robust
+      ? finalFitWeights
+      : baseFitWeights;
 }
 
 void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
@@ -2780,27 +3562,29 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
   for (size_t i = 0; i < N; ++i)
       frameScaled[i] = framing[i] / framingNorm;
 
-  // cumulative sum of framing
-  std::vector<double> timeAlong(N);
-  std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
-
-  // cumulative trapezoid for Cp
+  // PET values are frame averages. Associate each observation with its
+  // frame midpoint and integrate frame-average values directly. Full-frame
+  // areas are known exactly; only the current half-frame is approximated.
+  std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
-  double acc = 0.0;
-  for (size_t i = 1; i < N; ++i)
+  double elapsed = 0.0;
+  double accumulatedCp = 0.0;
+  for (size_t i = 0; i < N; ++i)
   {
-      acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-      intCp[i] = acc;
+      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+      accumulatedCp += Cp[i] * frameScaled[i];
+      elapsed += frameScaled[i];
   }
 
-  // cumulative trapezoid for TAC
+  // Cumulative tissue area at each frame midpoint, using the same
+  // frame-average convention as for the input function.
   std::vector<double> intCt(N, 0.0);
-  acc = 0.0;
-  for (size_t i = 1; i < N; ++i)
+  double accumulatedCt = 0.0;
+  for (size_t i = 0; i < N; ++i)
   {
-      acc += 0.5 * (tac[i] + tac[i-1]) * frameScaled[i];
-      intCt[i] = acc;
+      intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
+      accumulatedCt += tac[i] * frameScaled[i];
   }
 
   // Build X, Y with time filter
@@ -2836,8 +3620,10 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
 
       meanX = std::accumulate(outX.begin(), outX.end(), 0.0) / n;
       meanY = std::accumulate(outY.begin(), outY.end(), 0.0) / n;
-      stdX = std::sqrt(std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX * meanX);
-      stdY = std::sqrt(std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY * meanY);
+      stdX = std::sqrt(std::max(0.0, std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX * meanX));
+      stdY = std::sqrt(std::max(0.0, std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY * meanY));
+      if (stdX < 1e-12) stdX = 1.0;
+      if (stdY < 1e-12) stdY = 1.0;
 
       for (size_t i = 0; i < n; ++i)
       {
@@ -2854,85 +3640,124 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
   A.col(1) = Xv;
 
   Eigen::VectorXd coeff(2);
+  std::vector<double> baseFitWeights(n, 1.0);
+  if (!wgt_adj.empty())
+  {
+      baseFitWeights = wgt_adj;
+  }
+
+  std::vector<double> finalFitWeights = baseFitWeights;
+
   if (robust)
   {
-      // Iteratively Reweighted Least Squares (Huber)
-      Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
-      std::vector<size_t> keepIndices;
-      if (!wgt_adj.empty())
+      if (!solveHuberIRLS(
+              A,
+              Yv,
+              baseFitWeights,
+              huber_tune,
+              tol,
+              max_iter,
+              coeff,
+              finalFitWeights))
       {
-          for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
-          {
-              if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
-              {
-                  keepIndices.push_back(iz);
-              } else {
-                weights(iz) = 0.;
-              }
-          }
+          throw std::runtime_error(
+              "Huber robust regression failed.");
       }
-      Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
-      Eigen::VectorXd residuals(n), prev_coeff(2);
-      for (int iter = 0; iter < max_iter; ++iter)
-      {
-          W.diagonal() = weights;
-          coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-          if (iter > 0 && (coeff - prev_coeff).norm() < tol) break;
-          prev_coeff = coeff;
-          residuals = Yv - A * coeff;
-          for (auto i: keepIndices) {
-              double r = std::abs(residuals(i));
-              weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
-          }
-      }
-      wgt_adj.assign(weights.data(), weights.data() + weights.size());
-      wgt = &wgt_adj;
+  }
+  else if (!wgt_adj.empty())
+  {
+      Eigen::Map<const Eigen::VectorXd> Wv(
+          wgt_adj.data(),
+          n);
+      const Eigen::MatrixXd W = Wv.asDiagonal();
+      coeff =
+          (A.transpose() * W * A)
+              .ldlt()
+              .solve(A.transpose() * W * Yv);
   }
   else
   {
-      if (!wgt)
-      {
-          // Ordinary Least Squares
-          coeff = (A.transpose() * A).ldlt().solve(A.transpose() * Yv);
-      }
-      else
-      {
-          // Weighted Least Squares
-          Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-          Eigen::MatrixXd W = Wv.asDiagonal();
-          coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-      }
+      coeff =
+          (A.transpose() * A)
+              .ldlt()
+              .solve(A.transpose() * Yv);
   }
 
   double intercept = coeff(0);
   double slope = coeff(1);
 
-  // Fitted values
   fittedValues.resize(n);
-  params.r.resize(n);
-  for (size_t i = 0; i < n; ++i) {
-    fittedValues[i] = intercept + slope * outX[i];
-    params.r[i] = outY[i] - fittedValues[i];
+  for (size_t i = 0; i < n; ++i)
+  {
+      fittedValues[i] =
+          intercept + slope * outX[i];
   }
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
+  // Keep diagnostics on the standardized graphical-analysis scale when
+  // standardization is enabled. The reported kinetic slope/intercept and
+  // plotted X/Y values are converted back to their original coordinates.
+  const std::vector<double> diagnosticY = outY;
+  const std::vector<double> diagnosticFitted = fittedValues;
 
-  // De-standardize if needed
+  // Convert the regression parameters and displayed vectors back to
+  // the original graphical-analysis scale.
   if (std)
   {
-      double devyoverdevx = stdY / stdX;
-      slope   = slope * devyoverdevx;
-      intercept = meanY - slope * meanX + intercept;
+      const double slopeRaw =
+          slope * stdY / stdX;
+      const double interceptRaw =
+          meanY + stdY * intercept - slopeRaw * meanX;
+
+      slope = slopeRaw;
+      intercept = interceptRaw;
+
       for (size_t i = 0; i < n; ++i)
       {
-          outX[i] = outX[i]*stdX + meanX;
-          outY[i] = outY[i]*stdY + meanY;
-          fittedValues[i] = fittedValues[i]*stdY + meanY;
+          outX[i] = outX[i] * stdX + meanX;
+          outY[i] = outY[i] * stdY + meanY;
+          fittedValues[i] =
+              fittedValues[i] * stdY + meanY;
       }
+  }
+
+  // Huber weights are adaptive fitting weights, not a measurement-variance
+  // model.  For AIC/R2/MASE/chi-square diagnostics evaluate the final robust
+  // solution using the original frame weights/mask.
+  const std::vector<double>* diagnosticWeights =
+      baseFitWeights.empty()
+      ? nullptr
+      : &baseFitWeights;
+
+  params.AIC =
+      computeAIC(
+          diagnosticY,
+          diagnosticFitted,
+          2,
+          diagnosticWeights);
+  params.MASE =
+      MASE(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.R2 =
+      computeR2(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.chi2 =
+      (n > 2)
+      ? computeChi2(
+            diagnosticY,
+            diagnosticFitted,
+            diagnosticWeights) /
+            static_cast<double>(n - 2)
+      : std::numeric_limits<double>::quiet_NaN();
+
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i)
+  {
+      params.r[i] =
+          diagnosticY[i] - diagnosticFitted[i];
   }
 
   // DV and Intercept
@@ -2946,14 +3771,10 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
   params.fitted = fittedValues;
 
   params.dof = 2;
-  if (wgt == nullptr)
-  {
-      params.weights.assign(n, 1.0);  // fills with ones
-  }
-  else
-  {
-      params.weights = wgt_adj;  // copy from your pre-filled vector
-  }
+  params.weights =
+      robust
+      ? finalFitWeights
+      : baseFitWeights;
 }
 
 void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
@@ -2979,26 +3800,29 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
   for (size_t i = 0; i < N; ++i)
       frameScaled[i] = framing[i] / framingNorm;
 
-  // cumulative sum of framing
-  std::vector<double> timeAlong(N);
-  std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
-  // cumulative trapezoid for Cp
+  // PET values are frame averages. Associate each observation with its
+  // frame midpoint and integrate frame-average values directly. Full-frame
+  // areas are known exactly; only the current half-frame is approximated.
+  std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
-  double acc = 0.0;
-  for (size_t i = 1; i < N; ++i)
+  double elapsed = 0.0;
+  double accumulatedCp = 0.0;
+  for (size_t i = 0; i < N; ++i)
   {
-      acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-      intCp[i] = acc;
+      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+      accumulatedCp += Cp[i] * frameScaled[i];
+      elapsed += frameScaled[i];
   }
 
-  // cumulative trapezoid for TAC
+  // Cumulative tissue area at each frame midpoint, using the same
+  // frame-average convention as for the input function.
   std::vector<double> intCt(N, 0.0);
-  acc = 0.0;
-  for (size_t i = 1; i < N; ++i)
+  double accumulatedCt = 0.0;
+  for (size_t i = 0; i < N; ++i)
   {
-      acc += 0.5 * (tac[i] + tac[i-1]) * frameScaled[i];
-      intCt[i] = acc;
+      intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
+      accumulatedCt += tac[i] * frameScaled[i];
   }
 
   // Build X, Y with time filter
@@ -3034,8 +3858,10 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
 
       meanX = std::accumulate(outX.begin(), outX.end(), 0.0) / n;
       meanY = std::accumulate(outY.begin(), outY.end(), 0.0) / n;
-      stdX = std::sqrt(std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX * meanX);
-      stdY = std::sqrt(std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY * meanY);
+      stdX = std::sqrt(std::max(0.0, std::inner_product(outX.begin(), outX.end(), outX.begin(), 0.0) / n - meanX * meanX));
+      stdY = std::sqrt(std::max(0.0, std::inner_product(outY.begin(), outY.end(), outY.begin(), 0.0) / n - meanY * meanY));
+      if (stdX < 1e-12) stdX = 1.0;
+      if (stdY < 1e-12) stdY = 1.0;
 
       for (size_t i = 0; i < n; ++i)
       {
@@ -3052,85 +3878,124 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
   A.col(1) = Xv;
 
   Eigen::VectorXd coeff(2);
+  std::vector<double> baseFitWeights(n, 1.0);
+  if (!wgt_adj.empty())
+  {
+      baseFitWeights = wgt_adj;
+  }
+
+  std::vector<double> finalFitWeights = baseFitWeights;
+
   if (robust)
   {
-      // Iteratively Reweighted Least Squares (Huber)
-      Eigen::VectorXd weights = Eigen::VectorXd::Ones(n);
-      std::vector<size_t> keepIndices;
-      if (!wgt_adj.empty())
+      if (!solveHuberIRLS(
+              A,
+              Yv,
+              baseFitWeights,
+              huber_tune,
+              tol,
+              max_iter,
+              coeff,
+              finalFitWeights))
       {
-          for (size_t iz = 0; iz < wgt_adj.size(); ++iz)
-          {
-              if (wgt_adj[iz] != 0.0)  // or use std::abs(wgt_adj[i]) < eps for floating-point
-              {
-                  keepIndices.push_back(iz);
-              } else {
-                weights(iz) = 0.;
-              }
-          }
+          throw std::runtime_error(
+              "Huber robust regression failed.");
       }
-      Eigen::MatrixXd W = Eigen::MatrixXd::Identity(n, n);
-      Eigen::VectorXd residuals(n), prev_coeff(2);
-      for (int iter = 0; iter < max_iter; ++iter)
-      {
-          W.diagonal() = weights;
-          coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-          if (iter > 0 && (coeff - prev_coeff).norm() < tol) break;
-          prev_coeff = coeff;
-          residuals = Yv - A * coeff;
-          for (auto i: keepIndices) {
-              double r = std::abs(residuals(i));
-              weights(i) = (r <= huber_tune) ? 1.0 : huber_tune / std::max(r, 1e-8);
-          }
-      }
-      wgt_adj.assign(weights.data(), weights.data() + weights.size());
-      wgt = &wgt_adj;
+  }
+  else if (!wgt_adj.empty())
+  {
+      Eigen::Map<const Eigen::VectorXd> Wv(
+          wgt_adj.data(),
+          n);
+      const Eigen::MatrixXd W = Wv.asDiagonal();
+      coeff =
+          (A.transpose() * W * A)
+              .ldlt()
+              .solve(A.transpose() * W * Yv);
   }
   else
   {
-      if (!wgt)
-      {
-          // Ordinary Least Squares
-          coeff = (A.transpose() * A).ldlt().solve(A.transpose() * Yv);
-      }
-      else
-      {
-          // Weighted Least Squares
-          Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-          Eigen::MatrixXd W = Wv.asDiagonal();
-          coeff = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv);
-      }
+      coeff =
+          (A.transpose() * A)
+              .ldlt()
+              .solve(A.transpose() * Yv);
   }
 
   double intercept = coeff(0);
   double slope = coeff(1);
 
-  // Fitted values
   fittedValues.resize(n);
-  params.r.resize(n);
-  for (size_t i = 0; i < n; ++i){
-    fittedValues[i] = intercept + slope * outX[i];
-    params.r[i] = outY[i] - fittedValues[i];
+  for (size_t i = 0; i < n; ++i)
+  {
+      fittedValues[i] =
+          intercept + slope * outX[i];
   }
 
-  // AIC and MASE
-  params.AIC = computeAIC(outY, fittedValues, 2, wgt ? &wgt_adj : nullptr);
-  params.MASE = MASE(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.R2 = computeR2(outY, fittedValues, wgt ? &wgt_adj : nullptr);
-  params.chi2 = computeChi2(outY, fittedValues, wgt ? &wgt_adj : nullptr)/(n-2);
+  // Keep diagnostics on the standardized graphical-analysis scale when
+  // standardization is enabled. The reported kinetic slope/intercept and
+  // plotted X/Y values are converted back to their original coordinates.
+  const std::vector<double> diagnosticY = outY;
+  const std::vector<double> diagnosticFitted = fittedValues;
 
-  // De-standardize if needed
+  // Convert the regression parameters and displayed vectors back to
+  // the original graphical-analysis scale.
   if (std)
   {
-      double devyoverdevx = stdY / stdX;
-      slope   = slope * devyoverdevx;
-      intercept = meanY - slope * meanX + intercept;
+      const double slopeRaw =
+          slope * stdY / stdX;
+      const double interceptRaw =
+          meanY + stdY * intercept - slopeRaw * meanX;
+
+      slope = slopeRaw;
+      intercept = interceptRaw;
+
       for (size_t i = 0; i < n; ++i)
       {
-          outX[i] = outX[i]*stdX + meanX;
-          outY[i] = outY[i]*stdY + meanY;
-          fittedValues[i] = fittedValues[i]*stdY + meanY;
+          outX[i] = outX[i] * stdX + meanX;
+          outY[i] = outY[i] * stdY + meanY;
+          fittedValues[i] =
+              fittedValues[i] * stdY + meanY;
       }
+  }
+
+  // Huber weights are adaptive fitting weights, not a measurement-variance
+  // model.  For AIC/R2/MASE/chi-square diagnostics evaluate the final robust
+  // solution using the original frame weights/mask.
+  const std::vector<double>* diagnosticWeights =
+      baseFitWeights.empty()
+      ? nullptr
+      : &baseFitWeights;
+
+  params.AIC =
+      computeAIC(
+          diagnosticY,
+          diagnosticFitted,
+          2,
+          diagnosticWeights);
+  params.MASE =
+      MASE(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.R2 =
+      computeR2(
+          diagnosticY,
+          diagnosticFitted,
+          diagnosticWeights);
+  params.chi2 =
+      (n > 2)
+      ? computeChi2(
+            diagnosticY,
+            diagnosticFitted,
+            diagnosticWeights) /
+            static_cast<double>(n - 2)
+      : std::numeric_limits<double>::quiet_NaN();
+
+  params.r.resize(n);
+  for (size_t i = 0; i < n; ++i)
+  {
+      params.r[i] =
+          diagnosticY[i] - diagnosticFitted[i];
   }
 
   // DV and Intercept
@@ -3144,14 +4009,10 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
   params.fitted = fittedValues;
 
   params.dof = 2;
-  if (wgt == nullptr)
-  {
-      params.weights.assign(n, 1.0);  // fills with ones
-  }
-  else
-  {
-      params.weights = wgt_adj;  // copy from your pre-filled vector
-  }
+  params.weights =
+      robust
+      ? finalFitWeights
+      : baseFitWeights;
 }
 
 vtkSmartPointer<vtkOrientedImageData>
@@ -4503,15 +5364,19 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     std::vector<double> frameScaled(N);
     for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
 
-    std::vector<double> timeAlong(N);
-    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
+    // PET observations are frame averages and are associated with frame
+    // midpoints. Preserve prior full-frame areas, then add half of the
+    // current frame to evaluate the cumulative integral at its midpoint.
+    std::vector<double> timeAlong(N, 0.0);
     std::vector<double> intCp(N, 0.0);
-    double acc = 0.0;
-    for (size_t i = 1; i < N; ++i)
+    double elapsed = 0.0;
+    double accumulatedCp = 0.0;
+    for (size_t i = 0; i < N; ++i)
     {
-        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-        intCp[i] = acc;
+        timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+        intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+        accumulatedCp += Cp[i] * frameScaled[i];
+        elapsed += frameScaled[i];
     }
 
     std::vector<double> invCp(N);
@@ -4612,54 +5477,52 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
                 meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0) / double(n);
                 double sq = 0.0;
                 for (size_t ii = 0; ii < n; ++ii) sq += Yvec[ii] * Yvec[ii];
-                stdY = std::sqrt(sq / double(n) - meanY*meanY);
+                stdY = std::sqrt(std::max(0.0, sq / double(n) - meanY*meanY));
                 if (stdY < EPS) stdY = 1.0;
                 for (size_t ii = 0; ii < n; ++ii) Yvec[ii] = (Yvec[ii] - meanY) / stdY;
             }
 
             Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
 
-            // ---------- Weighted / unweighted OLS ----------
-            if (!robust && wgt_global)
+            std::vector<double> baseFitWeights(n, 1.0);
+            if (wgt_global)
             {
-                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-                Eigen::MatrixXd W = Wv.asDiagonal();
-                coeff_vec = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+                baseFitWeights = wgt_adj;
+            }
+            std::vector<double> finalFitWeights = baseFitWeights;
+
+            if (robust)
+            {
+                if (!solveHuberIRLS(
+                        A,
+                        Yv_map,
+                        baseFitWeights,
+                        huber_tune,
+                        tol,
+                        max_iter,
+                        coeff_vec,
+                        finalFitWeights))
+                {
+                    continue;
+                }
+            }
+            else if (wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(
+                    wgt_adj.data(),
+                    n);
+                const Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec =
+                    (A.transpose() * W * A)
+                        .ldlt()
+                        .solve(A.transpose() * W * Yv_map);
             }
             else
             {
                 coeff_vec = pinv * Yv_map;
             }
-            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
-
-            // ---------- Robust IRLS ----------
-            if (robust)
-            {
-                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
-                if (wgt_global)
-                {
-                    for (size_t ii = 0; ii < n; ++ii)
-                        wts(ii) = wgt_adj[ii] == 0.0 ? 0.0 : wgt_adj[ii];
-                }
-                Eigen::VectorXd prev_coeff = coeff;
-                for (int iter = 0; iter < max_iter; ++iter)
-                {
-                    if (stopRequested.load(
-                            std::memory_order_relaxed))
-                    {
-                      break;
-                    }
-                    Eigen::MatrixXd W = wts.asDiagonal();
-                    Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
-                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
-                    prev_coeff = c;
-                    Eigen::VectorXd residuals = Yv_map - A * c;
-                    for (size_t ii = 0; ii < n; ++ii)
-                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
-                    coeff = c;
-                }
-                for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
-            }
+            coeff(0) = coeff_vec(0);
+            coeff(1) = coeff_vec(1);
 
             if (stopRequested.load(
                     std::memory_order_relaxed))
@@ -4674,20 +5537,25 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
                 fitted[ii] = coeff(0) + coeff(1) * xval;
             }
 
-            // ---------- Compute statistics ----------
-            params.AIC = computeAIC(Yvec, fitted, 2, wgt_global ? &wgt_adj : nullptr);
-            params.MASE = MASE(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
-            params.R2 = computeR2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
-            params.chi2 = computeChi2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr)/(n-2);
+            // Keep residual/model-selection diagnostics in standardized
+            // graphical-analysis space when requested. Reported kinetic
+            // parameters and plotted vectors are converted back below.
+            const std::vector<double> diagnosticY = Yvec;
+            const std::vector<double> diagnosticFitted = fitted;
 
             // ---------- De-standardize ----------
             double slope = coeff(1), intercept = coeff(0);
             if (standardize)
             {
-                double devyoverdevx = stdY / stdX;
-                slope = slope * devyoverdevx;
-                intercept = meanY - slope * meanX + intercept;
-                for (size_t ii = 0; ii < n; ++ii) fitted[ii] = fitted[ii] * stdY + meanY;
+                const double slopeRaw = slope * stdY / stdX;
+                const double interceptRaw =
+                    meanY + stdY * intercept - slopeRaw * meanX;
+                slope = slopeRaw;
+                intercept = interceptRaw;
+                for (size_t ii = 0; ii < n; ++ii)
+                {
+                    fitted[ii] = fitted[ii] * stdY + meanY;
+                }
             }
 
             // ---------- Fill MTGAParameters ----------
@@ -4695,12 +5563,40 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
             params.Intercept = intercept;
             params.x = X_all;
             params.y.resize(n);
-            for (size_t ii = 0; ii < n; ++ii) params.y[ii] = voxels[v][keepIndex[ii]] * invCp[keepIndex[ii]];
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                params.y[ii] =
+                    voxels[v][keepIndex[ii]] *
+                    invCp[keepIndex[ii]];
+            }
             params.fitted = fitted;
-            params.frame.resize(n); for (size_t ii = 0; ii < n; ++ii) params.frame[ii] = keepIndex[ii] + 1;
+            params.frame.resize(n);
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                params.frame[ii] = keepIndex[ii] + 1;
+            }
             params.dof = 2;
-            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(), wgt_adj.begin()+n) : std::vector<double>(n, 1.0));
-            params.r.resize(n); for (size_t ii = 0; ii < n; ++ii) params.r[ii] = params.y[ii] - params.fitted[ii];
+            params.weights =
+                robust
+                ? finalFitWeights
+                : baseFitWeights;
+            params.r.resize(n);
+            for (size_t ii = 0; ii < n; ++ii)
+            {
+                params.r[ii] =
+                    diagnosticY[ii] - diagnosticFitted[ii];
+            }
+
+            const std::vector<double>* diagnosticWeights =
+                &baseFitWeights;
+            params.AIC = computeAIC(diagnosticY, diagnosticFitted, 2, diagnosticWeights);
+            params.MASE = MASE(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.R2 = computeR2(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.chi2 =
+                (n > 2)
+                ? computeChi2(diagnosticY, diagnosticFitted, diagnosticWeights) /
+                    static_cast<double>(n - 2)
+                : std::numeric_limits<double>::quiet_NaN();
 
             outputParams[v] = std::move(params);
 
@@ -4767,15 +5663,19 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
     std::vector<double> frameScaled(N);
     for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
 
-    std::vector<double> timeAlong(N);
-    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
+    // PET observations are frame averages and are associated with frame
+    // midpoints. Preserve prior full-frame areas, then add half of the
+    // current frame to evaluate the cumulative integral at its midpoint.
+    std::vector<double> timeAlong(N, 0.0);
     std::vector<double> intCp(N, 0.0);
-    double acc = 0.0;
-    for (size_t i = 1; i < N; ++i)
+    double elapsed = 0.0;
+    double accumulatedCp = 0.0;
+    for (size_t i = 0; i < N; ++i)
     {
-        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-        intCp[i] = acc;
+        timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+        intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+        accumulatedCp += Cp[i] * frameScaled[i];
+        elapsed += frameScaled[i];
     }
 
     // ---------- 2) Determine frames >= timeOffset ----------
@@ -4833,11 +5733,11 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
 
             // ---------- Build X, Y ----------
             std::vector<double> intCt(N, 0.0);
-            double accCt = 0.0;
-            for (size_t i = 1; i < N; ++i)
+            double accumulatedCt = 0.0;
+            for (size_t i = 0; i < N; ++i)
             {
-                accCt += 0.5 * (tac[i] + tac[i-1]) * frameScaled[i];
-                intCt[i] = accCt;
+                intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
+                accumulatedCt += tac[i] * frameScaled[i];
             }
 
             for (size_t ii = 0; ii < n; ++ii)
@@ -4857,8 +5757,8 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
                 meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0) / double(n);
                 double sqX=0.0, sqY=0.0;
                 for (size_t ii=0; ii<n; ++ii){sqX += Xvec[ii]*Xvec[ii]; sqY += Yvec[ii]*Yvec[ii];}
-                stdX = std::sqrt(sqX/double(n) - meanX*meanX);
-                stdY = std::sqrt(sqY/double(n) - meanY*meanY);
+                stdX = std::sqrt(std::max(0.0, sqX/double(n) - meanX*meanX));
+                stdY = std::sqrt(std::max(0.0, sqY/double(n) - meanY*meanY));
                 if (stdX < EPS) stdX = 1.0;
                 if (stdY < EPS) stdY = 1.0;
                 for (size_t ii=0; ii<n; ++ii){Xvec[ii] = (Xvec[ii]-meanX)/stdX; Yvec[ii] = (Yvec[ii]-meanY)/stdY;}
@@ -4875,45 +5775,46 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
             Eigen::MatrixXd pinv = AtA_inv * A.transpose(); // 2 x n
 
             Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
-            if (!robust && wgt_global)
+
+            std::vector<double> baseFitWeights(n, 1.0);
+            if (wgt_global)
             {
-                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-                Eigen::MatrixXd W = Wv.asDiagonal();
-                coeff_vec = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
+                baseFitWeights = wgt_adj;
+            }
+            std::vector<double> finalFitWeights = baseFitWeights;
+
+            if (robust)
+            {
+                if (!solveHuberIRLS(
+                        A,
+                        Yv_map,
+                        baseFitWeights,
+                        huber_tune,
+                        tol,
+                        max_iter,
+                        coeff_vec,
+                        finalFitWeights))
+                {
+                    continue;
+                }
+            }
+            else if (wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(
+                    wgt_adj.data(),
+                    n);
+                const Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec =
+                    (A.transpose() * W * A)
+                        .ldlt()
+                        .solve(A.transpose() * W * Yv_map);
             }
             else
             {
                 coeff_vec = pinv * Yv_map;
             }
-            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
-
-
-            if (robust)
-            {
-                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
-                if (wgt_global)
-                {
-                    for (size_t ii=0; ii<n; ++ii) wts(ii) = (wgt_adj[ii]==0.0 ? 0.0 : wgt_adj[ii]);
-                }
-                Eigen::VectorXd prev_coeff = coeff;
-                for (int iter = 0; iter < max_iter; ++iter)
-                {
-                    if (stopRequested.load(
-                            std::memory_order_relaxed))
-                    {
-                      break;
-                    }
-                    Eigen::MatrixXd W = wts.asDiagonal();
-                    Eigen::Vector2d c = (A.transpose() * W * A).ldlt().solve(A.transpose() * W * Yv_map);
-                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
-                    prev_coeff = c;
-                    Eigen::VectorXd residuals = Yv_map - A * c;
-                    for (size_t ii = 0; ii < n; ++ii)
-                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
-                    coeff = c;
-                }
-                for (size_t ii = 0; ii < n; ++ii) wgt_adj[ii] = wts(ii);
-            }
+            coeff(0) = coeff_vec(0);
+            coeff(1) = coeff_vec(1);
 
             if (stopRequested.load(
                     std::memory_order_relaxed))
@@ -4924,19 +5825,21 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
             // ---------- Compute fitted values ----------
             for (size_t ii=0; ii<n; ++ii) fitted[ii] = coeff(0) + coeff(1)*Xvec[ii];
 
-            // ---------- Statistics ----------
-            params.AIC = computeAIC(Yvec, fitted, 2, wgt_global ? &wgt_adj : nullptr);
-            params.MASE = MASE(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
-            params.R2 = computeR2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr);
-            params.chi2 = computeChi2(Yvec, fitted, wgt_global ? &wgt_adj : nullptr)/(n-2);
+            // Keep residual/model-selection diagnostics in standardized
+            // graphical-analysis space when requested. Reported kinetic
+            // parameters and plotted vectors are converted back below.
+            const std::vector<double> diagnosticY = Yvec;
+            const std::vector<double> diagnosticFitted = fitted;
 
             // ---------- De-standardize ----------
             double slope = coeff(1), intercept = coeff(0);
             if (standardize)
             {
-                double devyoverdevx = stdY / stdX;
-                slope = slope * devyoverdevx;
-                intercept = meanY - slope * meanX + intercept;
+                const double slopeRaw = slope * stdY / stdX;
+                const double interceptRaw =
+                    meanY + stdY * intercept - slopeRaw * meanX;
+                slope = slopeRaw;
+                intercept = interceptRaw;
                 for (size_t ii=0; ii<n; ++ii)
                 {
                     fitted[ii] = fitted[ii]*stdY + meanY;
@@ -4953,8 +5856,16 @@ void vtkSlicerDynamicPETLogic::Logan4Img(
             params.fitted = fitted;
             params.frame.resize(n); for (size_t ii=0; ii<n; ++ii) params.frame[ii] = keepIndex[ii]+1;
             params.dof = 2;
-            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(), wgt_adj.begin()+n) : std::vector<double>(n,1.0));
-            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = params.y[ii]-params.fitted[ii];
+            params.weights = robust ? finalFitWeights : baseFitWeights;
+            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = diagnosticY[ii] - diagnosticFitted[ii];
+
+            const std::vector<double>* diagnosticWeights = &baseFitWeights;
+            params.AIC = computeAIC(diagnosticY, diagnosticFitted, 2, diagnosticWeights);
+            params.MASE = MASE(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.R2 = computeR2(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.chi2 = (n > 2)
+                ? computeChi2(diagnosticY, diagnosticFitted, diagnosticWeights) / static_cast<double>(n - 2)
+                : std::numeric_limits<double>::quiet_NaN();
 
             outputParams[v] = std::move(params);
 
@@ -5021,15 +5932,19 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     std::vector<double> frameScaled(N);
     for (size_t i = 0; i < N; ++i) frameScaled[i] = framing[i] / framingNorm;
 
-    std::vector<double> timeAlong(N);
-    std::partial_sum(frameScaled.begin(), frameScaled.end(), timeAlong.begin());
-
+    // PET observations are frame averages and are associated with frame
+    // midpoints. Preserve prior full-frame areas, then add half of the
+    // current frame to evaluate the cumulative integral at its midpoint.
+    std::vector<double> timeAlong(N, 0.0);
     std::vector<double> intCp(N, 0.0);
-    double acc = 0.0;
-    for (size_t i = 1; i < N; ++i)
+    double elapsed = 0.0;
+    double accumulatedCp = 0.0;
+    for (size_t i = 0; i < N; ++i)
     {
-        acc += 0.5 * (Cp[i] + Cp[i-1]) * frameScaled[i];
-        intCp[i] = acc;
+        timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+        intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
+        accumulatedCp += Cp[i] * frameScaled[i];
+        elapsed += frameScaled[i];
     }
 
     std::vector<double> invCp(N);
@@ -5117,11 +6032,11 @@ void vtkSlicerDynamicPETLogic::RE4Img(
 
             // ---------- Compute intCt (voxel-dependent) ----------
             std::vector<double> intCt(N, 0.0);
-            double accCt = 0.0;
-            for (size_t i = 1; i < N; ++i)
+            double accumulatedCt = 0.0;
+            for (size_t i = 0; i < N; ++i)
             {
-                accCt += 0.5*(tac[i]+tac[i-1])*frameScaled[i];
-                intCt[i] = accCt;
+                intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
+                accumulatedCt += tac[i] * frameScaled[i];
             }
 
 
@@ -5140,53 +6055,52 @@ void vtkSlicerDynamicPETLogic::RE4Img(
                 meanY = std::accumulate(Yvec.begin(), Yvec.end(), 0.0)/double(n);
                 double sq = 0.0;
                 for (size_t ii=0; ii<n; ++ii) sq += Yvec[ii]*Yvec[ii];
-                stdY = std::sqrt(sq/double(n) - meanY*meanY);
+                stdY = std::sqrt(std::max(0.0, sq/double(n) - meanY*meanY));
                 if (stdY < EPS) stdY = 1.0;
                 for (size_t ii=0; ii<n; ++ii) Yvec[ii] = (Yvec[ii]-meanY)/stdY;
             }
 
             Eigen::Map<const Eigen::VectorXd> Yv_map(Yvec.data(), n);
 
-            // ---------- Weighted / unweighted OLS ----------
-            if (!robust && wgt_global)
+            std::vector<double> baseFitWeights(n, 1.0);
+            if (wgt_global)
             {
-                Eigen::Map<const Eigen::VectorXd> Wv(wgt_adj.data(), n);
-                Eigen::MatrixXd W = Wv.asDiagonal();
-                coeff_vec = (A.transpose()*W*A).ldlt().solve(A.transpose()*W*Yv_map);
+                baseFitWeights = wgt_adj;
+            }
+            std::vector<double> finalFitWeights = baseFitWeights;
+
+            if (robust)
+            {
+                if (!solveHuberIRLS(
+                        A,
+                        Yv_map,
+                        baseFitWeights,
+                        huber_tune,
+                        tol,
+                        max_iter,
+                        coeff_vec,
+                        finalFitWeights))
+                {
+                    continue;
+                }
+            }
+            else if (wgt_global)
+            {
+                Eigen::Map<const Eigen::VectorXd> Wv(
+                    wgt_adj.data(),
+                    n);
+                const Eigen::MatrixXd W = Wv.asDiagonal();
+                coeff_vec =
+                    (A.transpose() * W * A)
+                        .ldlt()
+                        .solve(A.transpose() * W * Yv_map);
             }
             else
             {
                 coeff_vec = pinv * Yv_map;
             }
-            coeff(0) = coeff_vec(0); coeff(1) = coeff_vec(1);
-
-            // ---------- Robust regression ----------
-            if (robust)
-            {
-                Eigen::VectorXd wts = Eigen::VectorXd::Ones(n);
-                if (wgt_global)
-                {
-                    for (size_t ii=0; ii<n; ++ii) wts(ii) = (wgt_adj[ii]==0.0 ? 0.0 : wgt_adj[ii]);
-                }
-                Eigen::VectorXd prev_coeff = coeff;
-                for (int iter=0; iter<max_iter; ++iter)
-                {
-                    if (stopRequested.load(
-                            std::memory_order_relaxed))
-                    {
-                      break;
-                    }
-                    Eigen::MatrixXd W = wts.asDiagonal();
-                    Eigen::Vector2d c = (A.transpose()*W*A).ldlt().solve(A.transpose()*W*Yv_map);
-                    if ((c - prev_coeff).norm() < tol) { coeff = c; break; }
-                    prev_coeff = c;
-                    Eigen::VectorXd residuals = Yv_map - A*c;
-                    for (size_t ii=0; ii<n; ++ii)
-                        wts(ii) = (std::abs(residuals(ii)) <= huber_tune) ? 1.0 : huber_tune / std::max(std::abs(residuals(ii)), EPS);
-                    coeff = c;
-                }
-                for (size_t ii=0; ii<n; ++ii) wgt_adj[ii] = wts(ii);
-            }
+            coeff(0) = coeff_vec(0);
+            coeff(1) = coeff_vec(1);
 
             if (stopRequested.load(
                     std::memory_order_relaxed))
@@ -5201,21 +6115,25 @@ void vtkSlicerDynamicPETLogic::RE4Img(
                 fitted[ii] = coeff(0) + coeff(1)*xval;
             }
 
-            // ---------- Statistics ----------
-            params.AIC = computeAIC(Yvec,fitted,2,wgt_global?&wgt_adj:nullptr);
-            params.MASE = MASE(Yvec,fitted,wgt_global?&wgt_adj:nullptr);
-            params.R2 = computeR2(Yvec,fitted,wgt_global?&wgt_adj:nullptr);
-            params.chi2 = computeChi2(Yvec,fitted,wgt_global?&wgt_adj:nullptr)/(n-2);
+            // Keep residual/model-selection diagnostics in standardized
+            // graphical-analysis space when requested. Reported kinetic
+            // parameters and plotted vectors are converted back below.
+            const std::vector<double> diagnosticY = Yvec;
+            const std::vector<double> diagnosticFitted = fitted;
 
             // ---------- De-standardize ----------
             double slope = coeff(1), intercept = coeff(0);
             if (standardize)
             {
-                double devyoverdevx = stdY/stdX;
-                slope *= devyoverdevx;
-                intercept = meanY - slope*meanX + intercept;
+                const double slopeRaw = slope * stdY / stdX;
+                const double interceptRaw =
+                    meanY + stdY * intercept - slopeRaw * meanX;
+                slope = slopeRaw;
+                intercept = interceptRaw;
                 for (size_t ii=0; ii<n; ++ii)
+                {
                     fitted[ii] = fitted[ii]*stdY + meanY;
+                }
             }
 
             // ---------- Fill MTGAParameters ----------
@@ -5227,8 +6145,16 @@ void vtkSlicerDynamicPETLogic::RE4Img(
             params.fitted = fitted;
             params.frame.resize(n); for (size_t ii=0; ii<n; ++ii) params.frame[ii] = keepIndex[ii]+1;
             params.dof = 2;
-            params.weights = (wgt_global ? std::vector<double>(wgt_adj.begin(),wgt_adj.begin()+n) : std::vector<double>(n,1.0));
-            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = params.y[ii]-params.fitted[ii];
+            params.weights = robust ? finalFitWeights : baseFitWeights;
+            params.r.resize(n); for (size_t ii=0; ii<n; ++ii) params.r[ii] = diagnosticY[ii] - diagnosticFitted[ii];
+
+            const std::vector<double>* diagnosticWeights = &baseFitWeights;
+            params.AIC = computeAIC(diagnosticY, diagnosticFitted, 2, diagnosticWeights);
+            params.MASE = MASE(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.R2 = computeR2(diagnosticY, diagnosticFitted, diagnosticWeights);
+            params.chi2 = (n > 2)
+                ? computeChi2(diagnosticY, diagnosticFitted, diagnosticWeights) / static_cast<double>(n - 2)
+                : std::numeric_limits<double>::quiet_NaN();
 
             outputParams[v] = std::move(params);
 
@@ -5665,6 +6591,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         params.MASE   = std::numeric_limits<double>::quiet_NaN();
         params.chi2   = std::numeric_limits<double>::quiet_NaN();
         params.loglik = std::numeric_limits<double>::quiet_NaN();
+        params.boundFlags = TCM_BOUND_NONE;
     };
     // All voxels start excluded.
     // Only voxels present in fitVoxelIndices will receive fitted values.
@@ -5744,6 +6671,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         };
 
     std::atomic<int> guardHitCount(0);
+    std::atomic<int> boundHitVoxelCount(0);
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
     #ifdef HAVE_OPENMP
@@ -5843,6 +6771,26 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
                 params.DV = params.K1/(params.k2+EPS)*(1.0+params.k3/(params.k4+EPS));
             }
 
+            params.boundFlags = TCM_BOUND_NONE;
+            markBoundIfNeeded(params.boundFlags, params.vb, lb[0], ub[0], sens[0], TCM_BOUND_VB_LOWER, TCM_BOUND_VB_UPPER);
+            markBoundIfNeeded(params.boundFlags, params.K1, lb[1], ub[1], sens[1], TCM_BOUND_K1_LOWER, TCM_BOUND_K1_UPPER);
+            markBoundIfNeeded(params.boundFlags, params.k2, lb[2], ub[2], sens[2], TCM_BOUND_K2_LOWER, TCM_BOUND_K2_UPPER);
+            if (n_tc == 2)
+            {
+                markBoundIfNeeded(params.boundFlags, params.k3, lb[3], ub[3], sens[3], TCM_BOUND_K3_LOWER, TCM_BOUND_K3_UPPER);
+                markBoundIfNeeded(params.boundFlags, params.k4, lb[4], ub[4], sens[4], TCM_BOUND_K4_LOWER, TCM_BOUND_K4_UPPER);
+                markBoundIfNeeded(params.boundFlags, params.td, lb[5], ub[5], sens[5], TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER);
+            }
+            else
+            {
+                markBoundIfNeeded(params.boundFlags, params.td, lb[3], ub[3], sens[3], TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER);
+            }
+
+            if (params.boundFlags != TCM_BOUND_NONE)
+            {
+                ++boundHitVoxelCount;
+            }
+
             // Residuals
             params.r.resize(Nframe);
             for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
@@ -5870,6 +6818,15 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             << guardHitCount.load()
             << " voxels failed to converge "
                "(LM iteration guard reached)."
+            << std::endl;
+    }
+
+    if (boundHitVoxelCount.load() > 0)
+    {
+        std::cout
+            << "TCM fitting: "
+            << boundHitVoxelCount.load()
+            << " fitted voxels reached or approached at least one active parameter bound."
             << std::endl;
     }
 

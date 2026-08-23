@@ -115,6 +115,11 @@ struct InputFunctionResult
   // integration, but MTGA excludes that frame from regression.
   std::vector<bool> frameKeep;
 
+  // Number of complete PET frames for which the final input function is
+  // supported. Terminally removed IDIF observations shorten this support
+  // instead of invalidating the whole input function.
+  size_t supportFrameCount{0};
+
   bool plasmaIsParent{false};
   bool applyParentFraction{false};
   bool hasWholeBlood{false};
@@ -125,6 +130,12 @@ struct InputFunctionResult
   std::vector<double> pbifPatientCalibrationTimesSec;
   std::vector<double> pbifPatientCalibrationValues;
   std::vector<double> pbifScaledValues;
+
+  bool sourceProcessingApplied{false};
+  QString sourceProcessingLabel;
+  std::vector<double> processedSourcePreviewTimesSec;
+  std::vector<double> processedSourcePreviewValues;
+  FengParameters fengParameters;
 };
 
 struct PreviewCurve
@@ -134,6 +145,160 @@ struct PreviewCurve
   std::vector<double> values;
   bool pointsOnly{false};
 };
+
+static std::vector<double> lowessPredict(
+    const std::vector<double>& x,
+    const std::vector<double>& y,
+    const std::vector<double>& evalX,
+    double span,
+    int robustIterations = 2)
+{
+    const size_t n = x.size();
+    if (n == 0 || n != y.size())
+    {
+        return {};
+    }
+    if (n < 3)
+    {
+        std::vector<double> out;
+        out.reserve(evalX.size());
+        for (double t : evalX)
+        {
+            const auto it = std::lower_bound(x.begin(), x.end(), t);
+            if (it == x.begin()) out.push_back(y.front());
+            else if (it == x.end()) out.push_back(y.back());
+            else
+            {
+                const size_t r = static_cast<size_t>(std::distance(x.begin(), it));
+                const size_t l = r - 1;
+                const double f = (t - x[l]) / (x[r] - x[l]);
+                out.push_back(y[l] + f * (y[r] - y[l]));
+            }
+        }
+        return out;
+    }
+
+    span = std::max(0.05, std::min(1.0, span));
+    const size_t neighborhood = std::min(
+        n,
+        std::max<size_t>(3, static_cast<size_t>(std::ceil(span * static_cast<double>(n)))));
+
+    auto localPrediction = [&](double x0, const std::vector<double>& robustWeights)
+    {
+        std::vector<double> distances(n);
+        for (size_t i = 0; i < n; ++i)
+        {
+            distances[i] = std::abs(x[i] - x0);
+        }
+        std::vector<double> sortedDistances = distances;
+        std::nth_element(
+            sortedDistances.begin(),
+            sortedDistances.begin() + static_cast<std::ptrdiff_t>(neighborhood - 1),
+            sortedDistances.end());
+        double bandwidth = sortedDistances[neighborhood - 1];
+        if (bandwidth <= 1e-12)
+        {
+            bandwidth = *std::max_element(distances.begin(), distances.end());
+        }
+        if (bandwidth <= 1e-12)
+        {
+            return y.front();
+        }
+
+        double sw = 0.0;
+        double swx = 0.0;
+        double swy = 0.0;
+        double swxx = 0.0;
+        double swxy = 0.0;
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double u = distances[i] / bandwidth;
+            if (u >= 1.0)
+            {
+                continue;
+            }
+            const double oneMinusCube = 1.0 - u * u * u;
+            double w = oneMinusCube * oneMinusCube * oneMinusCube;
+            if (i < robustWeights.size())
+            {
+                w *= robustWeights[i];
+            }
+            const double dx = x[i] - x0;
+            sw += w;
+            swx += w * dx;
+            swy += w * y[i];
+            swxx += w * dx * dx;
+            swxy += w * dx * y[i];
+        }
+
+        if (sw <= 1e-16)
+        {
+            return 0.0;
+        }
+
+        const double denom = sw * swxx - swx * swx;
+        if (std::abs(denom) <= 1e-16)
+        {
+            return swy / sw;
+        }
+
+        // Centering x around x0 makes the fitted intercept the prediction at x0.
+        return (swy * swxx - swx * swxy) / denom;
+    };
+
+    std::vector<double> robustWeights(n, 1.0);
+    std::vector<double> fittedAtData(n, 0.0);
+
+    for (int iteration = 0; iteration <= robustIterations; ++iteration)
+    {
+        for (size_t i = 0; i < n; ++i)
+        {
+            fittedAtData[i] = localPrediction(x[i], robustWeights);
+        }
+
+        if (iteration == robustIterations)
+        {
+            break;
+        }
+
+        std::vector<double> absResiduals(n, 0.0);
+        for (size_t i = 0; i < n; ++i)
+        {
+            absResiduals[i] = std::abs(y[i] - fittedAtData[i]);
+        }
+        std::vector<double> tmp = absResiduals;
+        std::nth_element(tmp.begin(), tmp.begin() + static_cast<std::ptrdiff_t>(n / 2), tmp.end());
+        const double medianAbsResidual = tmp[n / 2];
+        const double scale = 6.0 * medianAbsResidual;
+        if (scale <= 1e-16)
+        {
+            break;
+        }
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            const double u = absResiduals[i] / scale;
+            if (u >= 1.0)
+            {
+                robustWeights[i] = 0.0;
+            }
+            else
+            {
+                const double oneMinusSquare = 1.0 - u * u;
+                robustWeights[i] = oneMinusSquare * oneMinusSquare;
+            }
+        }
+    }
+
+    std::vector<double> out;
+    out.reserve(evalX.size());
+    for (double x0 : evalX)
+    {
+        out.push_back(std::max(0.0, localPrediction(x0, robustWeights)));
+    }
+    return out;
+}
 
 bool segmentNameLessCaseInsensitive(
     const std::string& a,
@@ -152,6 +317,101 @@ bool segmentNameLessCaseInsensitive(
            qa, qb, Qt::CaseSensitive) < 0;
 }
 
+
+double statisticDispersionSigma(
+    const VoxelStatistics& stats,
+    const std::string& statistic)
+{
+  if (statistic == "Mean")
+  {
+    return stats.stddev;
+  }
+
+  if (statistic == "Median")
+  {
+    // For Gaussian data: IQR = 1.34898 * sigma.
+    return stats.iqr / 1.3489795003921634;
+  }
+
+  if (statistic == "Peak")
+  {
+    return stats.peakStddev;
+  }
+
+  return std::numeric_limits<double>::quiet_NaN();
+}
+
+double inverseVarianceWeightFromSigma(double sigma)
+{
+  if (!std::isfinite(sigma) || sigma <= 1e-12)
+  {
+    // Spatial dispersion is a weighting proxy, not a known measurement
+    // variance.  Do not turn a zero/undefined proxy into an infinite weight.
+    return 1.0;
+  }
+
+  return 1.0 / (sigma * sigma);
+}
+
+void normalizePositiveWeights(std::vector<double>& weights)
+{
+  double sum = 0.0;
+  size_t count = 0;
+
+  for (const double weight : weights)
+  {
+    if (std::isfinite(weight) && weight > 0.0)
+    {
+      sum += weight;
+      ++count;
+    }
+  }
+
+  if (count == 0 || sum <= 0.0)
+  {
+    return;
+  }
+
+  const double mean = sum / static_cast<double>(count);
+  for (double& weight : weights)
+  {
+    if (std::isfinite(weight) && weight > 0.0)
+    {
+      weight /= mean;
+    }
+  }
+}
+
+QString formatTCMBoundStatus(unsigned int flags)
+{
+  QStringList hits;
+
+  auto append =
+      [&](unsigned int lowerFlag,
+          unsigned int upperFlag,
+          const QString& name)
+      {
+        if (flags & lowerFlag)
+        {
+          hits << name + ":lower";
+        }
+        if (flags & upperFlag)
+        {
+          hits << name + ":upper";
+        }
+      };
+
+  append(TCM_BOUND_K1_LOWER, TCM_BOUND_K1_UPPER, "K1");
+  append(TCM_BOUND_K2_LOWER, TCM_BOUND_K2_UPPER, "k2");
+  append(TCM_BOUND_K3_LOWER, TCM_BOUND_K3_UPPER, "k3");
+  append(TCM_BOUND_K4_LOWER, TCM_BOUND_K4_UPPER, "k4");
+  append(TCM_BOUND_VB_LOWER, TCM_BOUND_VB_UPPER, "vb");
+  append(TCM_BOUND_TD_LOWER, TCM_BOUND_TD_UPPER, "td");
+  append(TCM_BOUND_KA_LOWER, TCM_BOUND_KA_UPPER, "ka");
+  append(TCM_BOUND_FA_LOWER, TCM_BOUND_FA_UPPER, "fA");
+
+  return hits.join(", ");
+}
 
 std::vector<std::string> sortedSegmentIDs(
     const std::map<std::string, std::string>& segmentNames)
@@ -175,6 +435,28 @@ std::vector<std::string> sortedSegmentIDs(
     });
 
   return ids;
+}
+
+void padFittedCurveToFullFrames(
+    double*& fittedCurve,
+    size_t fittedFrameCount,
+    size_t fullFrameCount)
+{
+  if (!fittedCurve || fittedFrameCount >= fullFrameCount)
+  {
+    return;
+  }
+
+  double* padded = new double[fullFrameCount];
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+
+  for (size_t i = 0; i < fullFrameCount; ++i)
+  {
+    padded[i] = i < fittedFrameCount ? fittedCurve[i] : nan;
+  }
+
+  delete[] fittedCurve;
+  fittedCurve = padded;
 }
 
 }
@@ -370,6 +652,9 @@ public:
   std::vector<double> parentFractionValues;
   bool parentFractionZeroAnchorAdded{false};
   bool suvbwFactorValidated{false};
+
+  bool inputFunctionCacheValid{false};
+  InputFunctionResult cachedInputFunction;
   void populateVOI(std :: string ifID);
   void populateVOIMTGA(std :: string ifID);
   void populateResultsVOI();
@@ -1031,8 +1316,7 @@ previewInputFunction()
             }
 
             sourceTimes.push_back(
-                q->timePoints[i] -
-                0.5 * q->durations[i]);
+                q->timePoints[i]);
             sourceValues.push_back(allSourceValues[i]);
         }
     }
@@ -1084,16 +1368,33 @@ previewInputFunction()
                 &error);
         };
 
+    const size_t previewFrameCount =
+        std::min(
+            result.supportFrameCount > 0
+                ? result.supportFrameCount
+                : q->durations.size(),
+            q->durations.size());
+
     std::vector<double> frameTimes;
-    frameTimes.reserve(q->durations.size());
+    frameTimes.reserve(previewFrameCount);
     for (size_t i = 0;
-         i < q->durations.size();
+         i < previewFrameCount;
          ++i)
     {
         frameTimes.push_back(
-            q->timePoints[i] -
-            0.5 * q->durations[i]);
+            q->timePoints[i]);
     }
+
+    auto clippedFrameValues =
+        [&](const std::vector<double>& values)
+        {
+            const size_t n =
+                std::min(previewFrameCount, values.size());
+            return std::vector<double>(
+                values.begin(),
+                values.begin() +
+                    static_cast<std::ptrdiff_t>(n));
+        };
 
     std::vector<PreviewCurve> curves;
     curves.push_back(
@@ -1102,13 +1403,37 @@ previewInputFunction()
          sourceDisplayValues,
          true});
 
+    if (result.sourceProcessingApplied &&
+        !result.processedSourcePreviewTimesSec.empty() &&
+        result.processedSourcePreviewTimesSec.size() ==
+            result.processedSourcePreviewValues.size())
+    {
+        std::vector<double> processedDisplayValues;
+        if (!toDisplay(
+                result.processedSourcePreviewValues,
+                processedDisplayValues))
+        {
+            QMessageBox::warning(q, QObject::tr("Input Function"), error);
+            return;
+        }
+        curves.push_back(
+            {result.sourceProcessingLabel,
+             result.processedSourcePreviewTimesSec,
+             processedDisplayValues,
+             false});
+    }
+
     if (result.hasWholeBlood)
     {
         std::vector<double> displayValues;
+        const bool useNative =
+            !result.nativeWholeBloodTimesSec.empty();
+        const std::vector<double> frameValues =
+            clippedFrameValues(result.frameWholeBlood);
         const std::vector<double>& nativeValues =
-            !result.nativeWholeBloodTimesSec.empty()
+            useNative
             ? result.nativeWholeBloodValues
-            : result.frameWholeBlood;
+            : frameValues;
 
         if (!toDisplay(nativeValues, displayValues))
         {
@@ -1118,7 +1443,7 @@ previewInputFunction()
 
         curves.push_back(
             {QObject::tr("Total whole blood"),
-             !result.nativeWholeBloodTimesSec.empty()
+             useNative
                  ? result.nativeWholeBloodTimesSec
                  : frameTimes,
              displayValues,
@@ -1128,10 +1453,14 @@ previewInputFunction()
     if (!result.plasmaIsParent)
     {
         std::vector<double> displayValues;
+        const bool useNative =
+            !result.nativePlasmaTimesSec.empty();
+        const std::vector<double> frameValues =
+            clippedFrameValues(result.framePlasma);
         const std::vector<double>& nativeValues =
-            !result.nativePlasmaTimesSec.empty()
+            useNative
             ? result.nativePlasmaValues
-            : result.framePlasma;
+            : frameValues;
 
         if (!toDisplay(nativeValues, displayValues))
         {
@@ -1141,7 +1470,7 @@ previewInputFunction()
 
         curves.push_back(
             {QObject::tr("Total plasma"),
-             !result.nativePlasmaTimesSec.empty()
+             useNative
                  ? result.nativePlasmaTimesSec
                  : frameTimes,
              displayValues,
@@ -1152,7 +1481,9 @@ previewInputFunction()
         result.applyParentFraction)
     {
         std::vector<double> displayValues;
-        if (!toDisplay(result.frameModelPlasma, displayValues))
+        const std::vector<double> modelFrameValues =
+            clippedFrameValues(result.frameModelPlasma);
+        if (!toDisplay(modelFrameValues, displayValues))
         {
             QMessageBox::warning(q, QObject::tr("Input Function"), error);
             return;
@@ -1928,8 +2259,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
             this->populateVOIMTGA(
                 excludedVOI);
 
-            this->updateInputFunctionUI();
             this->invalidateInputFunctionResults();
+            this->updateInputFunctionUI();
         });
 
     QObject::connect(
@@ -1985,8 +2316,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
             this->IFCSVPathEdit->
                 setText(path);
 
-            this->updateInputFunctionUI();
             this->invalidateInputFunctionResults();
+            this->updateInputFunctionUI();
         });
 
 
@@ -1997,15 +2328,15 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
         q,
         [this](int)
         {
-            this->updateInputFunctionUI();
             this->invalidateInputFunctionResults();
+            this->updateInputFunctionUI();
         });
 
     auto onPBRChanged =
         [this]()
         {
-            this->updateInputFunctionUI();
             this->invalidateInputFunctionResults();
+            this->updateInputFunctionUI();
         };
 
     QObject::connect(
@@ -2026,20 +2357,6 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
         q,
         onPBRChanged);
 
-  }
-
-  // Future source-processing choices are visible but disabled.
-  if (QStandardItemModel* model =
-          qobject_cast<QStandardItemModel*>(
-              this->IFSourceProcessingSelector->model()))
-  {
-      for (int i = 1; i < model->rowCount(); ++i)
-      {
-          if (model->item(i))
-          {
-              model->item(i)->setEnabled(false);
-          }
-      }
   }
 
   // Future parent-fraction models are visible but disabled.
@@ -2106,8 +2423,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                       "The original CSV file was not modified."));
           }
 
-          this->updateInputFunctionUI();
           this->invalidateInputFunctionResults();
+          this->updateInputFunctionUI();
       });
 
   QObject::connect(
@@ -2181,8 +2498,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           this->PBIFCalibrationEndSpinBox->setValue(
               endTime);
 
-          this->updateInputFunctionUI();
           this->invalidateInputFunctionResults();
+          this->updateInputFunctionUI();
       });
 
   QObject::connect(
@@ -2239,8 +2556,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                       "The original CSV file was not modified."));
           }
 
-          this->updateInputFunctionUI();
           this->invalidateInputFunctionResults();
+          this->updateInputFunctionUI();
       });
 
   QObject::connect(
@@ -2255,8 +2572,14 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   auto invalidateIFPipeline =
       [this]()
       {
-          this->updateInputFunctionUI();
+          // Clear the cached/precomputed IF before rebuilding status. This is
+          // important for nonlinear Feng processing, which must be recomputed
+          // exactly once after a pipeline setting changes rather than showing
+          // a stale cached source during the immediate UI refresh.
           this->invalidateInputFunctionResults();
+          this->updateInputFunctionUI();
+          this->updateROIModelingAvailability();
+          this->updateParametricImagingAvailability();
       };
 
   QObject::connect(
@@ -2351,6 +2674,16 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       });
 
   QObject::connect(
+      this->IFLowessSpanSpinBox,
+      QOverload<double>::of(
+          &QDoubleSpinBox::valueChanged),
+      q,
+      [invalidateIFPipeline](double)
+      {
+          invalidateIFPipeline();
+      });
+
+  QObject::connect(
       this->ParentFractionProcessingSelector,
       QOverload<int>::of(
           &QComboBox::currentIndexChanged),
@@ -2367,8 +2700,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this](int)
       {
-          this->updateInputFunctionUI();
           this->invalidateInputFunctionResults();
+          this->updateInputFunctionUI();
       });
 
   QObject::connect(
@@ -2743,7 +3076,7 @@ def DPE_save_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Time(s)", "Duration", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "Peak", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
+            df = pd.DataFrame(data)[["Time(s)", "FrameStart_s", "FrameMid_s", "FrameEnd_s", "Duration_s", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "Peak", "PeakStDev", "PeakVoxelCount", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
@@ -2753,7 +3086,7 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "ka", "fA", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu"]]
+            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "ka", "fA", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "BoundHits"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
@@ -4403,36 +4736,222 @@ void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
   this->PlotSegmentCheckContents->blockSignals(false);
 }
 
-void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA() {
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
+{
   Q_Q(qSlicerDynamicPETModuleWidget);
 
+  if (q->numberOfTimepoints <= 0 ||
+      q->timePoints.empty() ||
+      q->durations.size() != q->timePoints.size())
+  {
+    return;
+  }
+
+  const int lastFrame = q->numberOfTimepoints;
+
   this->timeOffsetSlider->setMinimum(1);
-  this->timeOffsetSlider->setMaximum(q->numberOfTimepoints);
-  this->timeOffsetSlider->setValue(1);
+  this->timeOffsetSlider->setMaximum(lastFrame);
+  if (this->timeOffsetSlider->value() < 1 ||
+      this->timeOffsetSlider->value() > lastFrame)
+  {
+    this->timeOffsetSlider->setValue(1);
+  }
+
+  this->timeEndSlider->setMinimum(1);
+  this->timeEndSlider->setMaximum(lastFrame);
+  if (this->timeEndSlider->value() < 1 ||
+      this->timeEndSlider->value() > lastFrame)
+  {
+    this->timeEndSlider->setValue(lastFrame);
+  }
+
+  this->TCMEndSlider->setMinimum(1);
+  this->TCMEndSlider->setMaximum(lastFrame);
+  if (this->TCMEndSlider->value() < 1 ||
+      this->TCMEndSlider->value() > lastFrame)
+  {
+    this->TCMEndSlider->setValue(lastFrame);
+  }
 
   frameEdit->setReadOnly(true);
   timeSecEdit->setReadOnly(true);
   timeMinEdit->setReadOnly(true);
-  q->onSliderChanged(1);
 
-  QObject::connect( this->timeOffsetSlider, SIGNAL(valueChanged(int)),
-    q, SLOT(onSliderChanged(int)));
+  auto updateMTGAEndInfo = [this, q]()
+  {
+    const int index = this->timeEndSlider->value();
+    if (index < 1 || index > static_cast<int>(q->timePoints.size()))
+      return;
+    const double endSec = q->timePoints[index - 1];
+    this->timeEndInfoEdit->setText(
+        QObject::tr("Frame %1 | end %2 s (%3 min)")
+            .arg(index)
+            .arg(endSec, 0, 'f', 2)
+            .arg(endSec / 60.0, 0, 'f', 2));
+  };
+
+  auto updateTCMEndInfo = [this, q]()
+  {
+    const int index = this->TCMEndSlider->value();
+    if (index < 1 || index > static_cast<int>(q->timePoints.size()))
+      return;
+    const double endSec = q->timePoints[index - 1];
+    this->TCMEndInfoEdit->setText(
+        QObject::tr("Frame %1 | complete through %2 s (%3 min)")
+            .arg(index)
+            .arg(endSec, 0, 'f', 2)
+            .arg(endSec / 60.0, 0, 'f', 2));
+  };
+
+  QObject::disconnect(
+      this->timeOffsetSlider,
+      SIGNAL(valueChanged(int)),
+      q,
+      SLOT(onSliderChanged(int)));
+  QObject::connect(
+      this->timeOffsetSlider,
+      SIGNAL(valueChanged(int)),
+      q,
+      SLOT(onSliderChanged(int)));
+
+  QObject::disconnect(this->timeEndSlider, nullptr, q, nullptr);
+  QObject::connect(
+      this->timeEndSlider,
+      &QSlider::valueChanged,
+      q,
+      [this, q, updateMTGAEndInfo](int index)
+      {
+        if (index < this->timeOffsetSlider->value())
+        {
+          this->timeOffsetSlider->setValue(index);
+        }
+        updateMTGAEndInfo();
+        q->enableFITMTGAbutton();
+      });
+
+  QObject::disconnect(this->TCMEndSlider, nullptr, q, nullptr);
+  QObject::connect(
+      this->TCMEndSlider,
+      &QSlider::valueChanged,
+      q,
+      [q, updateTCMEndInfo](int)
+      {
+        updateTCMEndInfo();
+        q->enableFITbutton();
+      });
+
+  q->onSliderChanged(this->timeOffsetSlider->value());
+  updateMTGAEndInfo();
+  updateTCMEndInfo();
 }
 
-void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg() {
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
+{
   Q_Q(qSlicerDynamicPETModuleWidget);
 
+  if (q->numberOfTimepoints <= 0 ||
+      q->timePoints.empty() ||
+      q->durations.size() != q->timePoints.size())
+  {
+    return;
+  }
+
+  const int lastFrame = q->numberOfTimepoints;
+
   this->timeOffsetSliderImg->setMinimum(1);
-  this->timeOffsetSliderImg->setMaximum(q->numberOfTimepoints);
-  this->timeOffsetSliderImg->setValue(1);
+  this->timeOffsetSliderImg->setMaximum(lastFrame);
+  if (this->timeOffsetSliderImg->value() < 1 ||
+      this->timeOffsetSliderImg->value() > lastFrame)
+  {
+    this->timeOffsetSliderImg->setValue(1);
+  }
+
+  this->timeEndSliderImg->setMinimum(1);
+  this->timeEndSliderImg->setMaximum(lastFrame);
+  if (this->timeEndSliderImg->value() < 1 ||
+      this->timeEndSliderImg->value() > lastFrame)
+  {
+    this->timeEndSliderImg->setValue(lastFrame);
+  }
+
+  this->TCMEndSliderImg->setMinimum(1);
+  this->TCMEndSliderImg->setMaximum(lastFrame);
+  if (this->TCMEndSliderImg->value() < 1 ||
+      this->TCMEndSliderImg->value() > lastFrame)
+  {
+    this->TCMEndSliderImg->setValue(lastFrame);
+  }
 
   this->frameEditImg->setReadOnly(true);
   this->timeSecEditImg->setReadOnly(true);
   this->timeMinEditImg->setReadOnly(true);
-  q->onSliderImgChanged(1);
 
-  QObject::connect( this->timeOffsetSliderImg, SIGNAL(valueChanged(int)),
-    q, SLOT(onSliderImgChanged(int)));
+  auto updateMTGAEndInfo = [this, q]()
+  {
+    const int index = this->timeEndSliderImg->value();
+    if (index < 1 || index > static_cast<int>(q->timePoints.size()))
+      return;
+    const double endSec = q->timePoints[index - 1];
+    this->timeEndInfoEditImg->setText(
+        QObject::tr("Frame %1 | end %2 s (%3 min)")
+            .arg(index)
+            .arg(endSec, 0, 'f', 2)
+            .arg(endSec / 60.0, 0, 'f', 2));
+  };
+
+  auto updateTCMEndInfo = [this, q]()
+  {
+    const int index = this->TCMEndSliderImg->value();
+    if (index < 1 || index > static_cast<int>(q->timePoints.size()))
+      return;
+    const double endSec = q->timePoints[index - 1];
+    this->TCMEndInfoEditImg->setText(
+        QObject::tr("Frame %1 | complete through %2 s (%3 min)")
+            .arg(index)
+            .arg(endSec, 0, 'f', 2)
+            .arg(endSec / 60.0, 0, 'f', 2));
+  };
+
+  QObject::disconnect(
+      this->timeOffsetSliderImg,
+      SIGNAL(valueChanged(int)),
+      q,
+      SLOT(onSliderImgChanged(int)));
+  QObject::connect(
+      this->timeOffsetSliderImg,
+      SIGNAL(valueChanged(int)),
+      q,
+      SLOT(onSliderImgChanged(int)));
+
+  QObject::disconnect(this->timeEndSliderImg, nullptr, q, nullptr);
+  QObject::connect(
+      this->timeEndSliderImg,
+      &QSlider::valueChanged,
+      q,
+      [this, q, updateMTGAEndInfo](int index)
+      {
+        if (index < this->timeOffsetSliderImg->value())
+        {
+          this->timeOffsetSliderImg->setValue(index);
+        }
+        updateMTGAEndInfo();
+        q->enableFITMTGAImgbutton();
+      });
+
+  QObject::disconnect(this->TCMEndSliderImg, nullptr, q, nullptr);
+  QObject::connect(
+      this->TCMEndSliderImg,
+      &QSlider::valueChanged,
+      q,
+      [q, updateTCMEndInfo](int)
+      {
+        updateTCMEndInfo();
+        q->enableFITTCMImgbutton();
+      });
+
+  q->onSliderImgChanged(this->timeOffsetSliderImg->value());
+  updateMTGAEndInfo();
+  updateTCMEndInfo();
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::populateIF()
@@ -4670,6 +5189,11 @@ updateInputFunctionUI()
         this->IFAdvancedCollapsibleButton->setCollapsed(true);
     }
 
+    const bool lowessSelected =
+        this->IFSourceProcessingSelector->currentIndex() == 1;
+    this->IFLowessSpanLabel->setVisible(lowessSelected);
+    this->IFLowessSpanSpinBox->setVisible(lowessSelected);
+
     this->IFLabel->setVisible(segmentSource);
     this->IFSelector->setVisible(segmentSource);
     this->IFStatLabel->setVisible(segmentSource);
@@ -4840,6 +5364,20 @@ updateInputFunctionUI()
         status += QObject::tr(" | model scale=%1")
             .arg(this->activityUnitLabel(this->petStoredActivityUnit()));
 
+        if (result.sourceProcessingApplied)
+        {
+            status += QObject::tr(" | processing=%1")
+                .arg(result.sourceProcessingLabel);
+            if (this->IFSourceProcessingSelector->currentIndex() == 2)
+            {
+                status += QObject::tr(" | Feng tau=%1 min, lambdas=%2/%3/%4 min^-1")
+                    .arg(result.fengParameters.tau, 0, 'g', 4)
+                    .arg(result.fengParameters.lambda1, 0, 'g', 4)
+                    .arg(result.fengParameters.lambda2, 0, 'g', 4)
+                    .arg(result.fengParameters.lambda3, 0, 'g', 4);
+            }
+        }
+
         if (this->selectedDisplayActivityUnit() != this->petStoredActivityUnit())
         {
             status += QObject::tr(" | display=%1")
@@ -4997,6 +5535,8 @@ invalidateInputFunctionResults()
     Q_Q(qSlicerDynamicPETModuleWidget);
 
     // Any pipeline edit makes the currently displayed QC curves stale.
+    this->inputFunctionCacheValid = false;
+    this->cachedInputFunction = InputFunctionResult{};
     this->removeInputFunctionPreview();
 
     q->clearFITdata();
@@ -5908,6 +6448,21 @@ buildCurrentInputFunction(
 
     result = InputFunctionResult{};
 
+    if (this->inputFunctionCacheValid)
+    {
+        result = this->cachedInputFunction;
+        if (requireWholeBlood && !result.hasWholeBlood)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "TCM requires total whole blood for its vascular term.");
+            }
+            return false;
+        }
+        return true;
+    }
+
     if (q->durations.empty() ||
         q->timePoints.empty() ||
         q->durations.size() != q->timePoints.size())
@@ -5917,18 +6472,6 @@ buildCurrentInputFunction(
             *errorMessage =
                 QObject::tr(
                     "Select a valid dynamic PET dataset first.");
-        }
-        return false;
-    }
-
-    if (this->IFSourceProcessingSelector->currentIndex() != 0)
-    {
-        if (errorMessage)
-        {
-            *errorMessage =
-                QObject::tr(
-                    "The selected source-processing method "
-                    "is not implemented yet.");
         }
         return false;
     }
@@ -6033,29 +6576,79 @@ buildCurrentInputFunction(
                 result.frameKeep.end(),
                 false) != result.frameKeep.end();
 
+        // A missing first IDIF observation would require unknown pre-injection
+        // history. Keep that boundary mandatory. Missing observations at the
+        // end, however, simply shorten the usable acquisition.
+        if (result.frameKeep.empty() ||
+            !result.frameKeep.front())
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    QObject::tr(
+                        "The first IDIF observation must be retained. "
+                        "Input history before the first available PET frame "
+                        "is not extrapolated.");
+            }
+            return false;
+        }
+
+        auto lastKeepIt =
+            std::find(
+                result.frameKeep.rbegin(),
+                result.frameKeep.rend(),
+                true);
+
+        if (lastKeepIt == result.frameKeep.rend())
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    QObject::tr(
+                        "No retained IDIF observations are available.");
+            }
+            return false;
+        }
+
+        const size_t lastKeptIndex =
+            result.frameKeep.size() - 1 -
+            static_cast<size_t>(
+                std::distance(
+                    result.frameKeep.rbegin(),
+                    lastKeepIt));
+
+        result.supportFrameCount = lastKeptIndex + 1;
+
+        const size_t retainedCount =
+            static_cast<size_t>(
+                std::count(
+                    result.frameKeep.begin(),
+                    result.frameKeep.begin() +
+                        static_cast<std::ptrdiff_t>(
+                            result.supportFrameCount),
+                    true));
+
+        if (retainedCount < 2)
+        {
+            if (errorMessage)
+            {
+                *errorMessage =
+                    QObject::tr(
+                        "At least two IDIF observations must remain.");
+            }
+            return false;
+        }
+
         if (hasRemovedInputPoint)
         {
-            if (result.frameKeep.size() < 2 ||
-                !result.frameKeep.front() ||
-                !result.frameKeep.back())
-            {
-                if (errorMessage)
-                {
-                    *errorMessage =
-                        QObject::tr(
-                            "The first and last IDIF observations must be "
-                            "retained. Boundary extrapolation is not "
-                            "performed. Restore those points before fitting.");
-                }
-                return false;
-            }
-
             std::vector<double> retainedTimes;
             std::vector<double> retainedValues;
-            retainedTimes.reserve(observedWholeBlood.size());
-            retainedValues.reserve(observedWholeBlood.size());
+            retainedTimes.reserve(result.supportFrameCount);
+            retainedValues.reserve(result.supportFrameCount);
 
-            for (size_t i = 0; i < observedWholeBlood.size(); ++i)
+            for (size_t i = 0;
+                 i < result.supportFrameCount;
+                 ++i)
             {
                 if (!result.frameKeep[i])
                 {
@@ -6063,23 +6656,17 @@ buildCurrentInputFunction(
                 }
 
                 retainedTimes.push_back(
-                    q->timePoints[i] - 0.5 * q->durations[i]);
-                retainedValues.push_back(observedWholeBlood[i]);
+                    q->timePoints[i] -
+                    0.5 * q->durations[i]);
+                retainedValues.push_back(
+                    observedWholeBlood[i]);
             }
 
-            if (retainedTimes.size() < 2)
-            {
-                if (errorMessage)
-                {
-                    *errorMessage =
-                        QObject::tr(
-                            "At least two IDIF observations must remain "
-                            "after point exclusion.");
-                }
-                return false;
-            }
-
-            for (size_t i = 0; i < result.frameWholeBlood.size(); ++i)
+            // Reconstruct only internal missing observations. Trailing removed
+            // points are outside support and therefore are never used by a fit.
+            for (size_t i = 0;
+                 i < result.supportFrameCount;
+                 ++i)
             {
                 if (result.frameKeep[i])
                 {
@@ -6087,7 +6674,8 @@ buildCurrentInputFunction(
                 }
 
                 const double midpoint =
-                    q->timePoints[i] - 0.5 * q->durations[i];
+                    q->timePoints[i] -
+                    0.5 * q->durations[i];
 
                 result.frameWholeBlood[i] =
                     this->interpolateInputFunction(
@@ -6096,6 +6684,150 @@ buildCurrentInputFunction(
                         midpoint,
                         inputInterpolation);
             }
+        }
+
+        const int sourceProcessing =
+            this->IFSourceProcessingSelector->currentIndex();
+
+        if (sourceProcessing == 1)
+        {
+            std::vector<double> retainedTimes;
+            std::vector<double> retainedValues;
+            std::vector<double> evaluationTimes;
+            retainedTimes.reserve(result.supportFrameCount);
+            retainedValues.reserve(result.supportFrameCount);
+            evaluationTimes.reserve(result.supportFrameCount);
+
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                const double midpoint =
+                    q->timePoints[i] - 0.5 * q->durations[i];
+                evaluationTimes.push_back(midpoint);
+                if (result.frameKeep[i])
+                {
+                    retainedTimes.push_back(midpoint);
+                    retainedValues.push_back(observedWholeBlood[i]);
+                }
+            }
+
+            const std::vector<double> smoothed =
+                lowessPredict(
+                    retainedTimes,
+                    retainedValues,
+                    evaluationTimes,
+                    this->IFLowessSpanSpinBox->value(),
+                    2);
+
+            if (smoothed.size() != result.supportFrameCount)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        QObject::tr("LOWESS input-function smoothing failed.");
+                }
+                return false;
+            }
+
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                result.frameWholeBlood[i] = smoothed[i];
+                result.processedSourcePreviewTimesSec.push_back(q->timePoints[i]);
+                result.processedSourcePreviewValues.push_back(smoothed[i]);
+            }
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel =
+                QObject::tr("LOWESS (span %1)")
+                    .arg(this->IFLowessSpanSpinBox->value(), 0, 'f', 2);
+        }
+        else if (sourceProcessing == 2)
+        {
+            vtkSlicerDynamicPETLogic* logic =
+                vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+            if (!logic)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr("DynamicPET logic is unavailable.");
+                }
+                return false;
+            }
+
+            std::vector<double> retainedTimes;
+            std::vector<double> retainedValues;
+            std::vector<double> retainedFrameStarts;
+            std::vector<double> retainedFrameEnds;
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                if (!result.frameKeep[i])
+                {
+                    continue;
+                }
+                retainedTimes.push_back(
+                    q->timePoints[i] - 0.5 * q->durations[i]);
+                retainedValues.push_back(observedWholeBlood[i]);
+                retainedFrameStarts.push_back(q->timePoints[i] - q->durations[i]);
+                retainedFrameEnds.push_back(q->timePoints[i]);
+            }
+
+            std::vector<double> fittedObservations;
+            std::string fengError;
+            if (!logic->FitFengInputFunction(
+                    retainedTimes,
+                    retainedValues,
+                    &retainedFrameStarts,
+                    &retainedFrameEnds,
+                    true,
+                    result.fengParameters,
+                    fittedObservations,
+                    &fengError))
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        QObject::tr("Feng input-function fit failed: %1")
+                            .arg(QString::fromStdString(fengError));
+                }
+                return false;
+            }
+
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                result.frameWholeBlood[i] =
+                    logic->AverageFengInputFunction(
+                        q->timePoints[i] - q->durations[i],
+                        q->timePoints[i],
+                        result.fengParameters);
+            }
+
+            const double supportEndSec =
+                q->timePoints[result.supportFrameCount - 1];
+            // Dense representation of the analytic Feng curve is independent
+            // of the user-selected TCM integration step. The TCM backend may
+            // subsequently sample this continuous representation more finely.
+            const double denseStepSec = 0.25;
+
+            for (double t = 0.0; t < supportEndSec; t += denseStepSec)
+            {
+                result.nativeWholeBloodTimesSec.push_back(t);
+                result.nativeWholeBloodValues.push_back(
+                    logic->EvaluateFengInputFunction(t, result.fengParameters));
+            }
+            if (result.nativeWholeBloodTimesSec.empty() ||
+                result.nativeWholeBloodTimesSec.back() < supportEndSec)
+            {
+                result.nativeWholeBloodTimesSec.push_back(supportEndSec);
+                result.nativeWholeBloodValues.push_back(
+                    logic->EvaluateFengInputFunction(
+                        supportEndSec,
+                        result.fengParameters));
+            }
+
+            result.processedSourcePreviewTimesSec =
+                result.nativeWholeBloodTimesSec;
+            result.processedSourcePreviewValues =
+                result.nativeWholeBloodValues;
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel = QObject::tr("Feng model");
         }
 
         result.framePlasma.resize(
@@ -6122,11 +6854,35 @@ buildCurrentInputFunction(
                 result.frameWholeBlood[i] * pbr;
         }
 
+        if (!result.nativeWholeBloodTimesSec.empty() &&
+            result.nativeWholeBloodTimesSec.size() ==
+                result.nativeWholeBloodValues.size())
+        {
+            result.nativePlasmaTimesSec =
+                result.nativeWholeBloodTimesSec;
+            result.nativePlasmaValues.resize(
+                result.nativeWholeBloodValues.size());
+            for (size_t i = 0; i < result.nativeWholeBloodValues.size(); ++i)
+            {
+                double pbr = 0.0;
+                if (!this->pbrAtTime(
+                        result.nativeWholeBloodTimesSec[i],
+                        pbr,
+                        errorMessage))
+                {
+                    return false;
+                }
+                result.nativePlasmaValues[i] =
+                    result.nativeWholeBloodValues[i] * pbr;
+            }
+        }
+
         result.hasWholeBlood = true;
         result.plasmaIsParent = false;
 
-        // Native vectors intentionally remain empty here so TCM keeps
-        // the existing frame-aware fine-sampling pathway.
+        // None/LOWESS retain the established frame-aware fine-sampling path.
+        // Feng supplies its analytic curve densely so TCM can evaluate the
+        // fitted source without reconstructing the bolus from frame means.
     }
     else
     {
@@ -6175,25 +6931,126 @@ buildCurrentInputFunction(
             return false;
         }
 
+        std::vector<double> processedPatientTimes =
+            this->externalIFTimesSec;
+        std::vector<double> processedPatientValues =
+            externalPatientValues;
+
+        const int sourceProcessing =
+            this->IFSourceProcessingSelector->currentIndex();
+
+        if (sourceProcessing == 1)
+        {
+            processedPatientValues =
+                lowessPredict(
+                    processedPatientTimes,
+                    processedPatientValues,
+                    processedPatientTimes,
+                    this->IFLowessSpanSpinBox->value(),
+                    2);
+            if (processedPatientValues.size() != processedPatientTimes.size())
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr("LOWESS input-function smoothing failed.");
+                }
+                return false;
+            }
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel =
+                QObject::tr("LOWESS (span %1)")
+                    .arg(this->IFLowessSpanSpinBox->value(), 0, 'f', 2);
+        }
+        else if (sourceProcessing == 2)
+        {
+            if (sourceDomain == IFCurveDomain::ParentPlasma)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr(
+                        "Feng source modeling is intended for whole-blood or total-plasma input functions, not an already metabolite-corrected parent-plasma curve. Use None or LOWESS for this source.");
+                }
+                return false;
+            }
+
+            vtkSlicerDynamicPETLogic* logic =
+                vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+            if (!logic)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr("DynamicPET logic is unavailable.");
+                }
+                return false;
+            }
+
+            std::vector<double> fittedObservations;
+            std::string fengError;
+            if (!logic->FitFengInputFunction(
+                    processedPatientTimes,
+                    processedPatientValues,
+                    nullptr,
+                    nullptr,
+                    false,
+                    result.fengParameters,
+                    fittedObservations,
+                    &fengError))
+            {
+                if (errorMessage)
+                {
+                    *errorMessage =
+                        QObject::tr("Feng input-function fit failed: %1")
+                            .arg(QString::fromStdString(fengError));
+                }
+                return false;
+            }
+
+            processedPatientTimes.clear();
+            processedPatientValues.clear();
+            // Dense representation of the analytic Feng curve is independent
+            // of the user-selected TCM integration step. The TCM backend may
+            // subsequently sample this continuous representation more finely.
+            const double denseStepSec = 0.25;
+            for (double t = 0.0; t < petEndTimeSec; t += denseStepSec)
+            {
+                processedPatientTimes.push_back(t);
+                processedPatientValues.push_back(
+                    logic->EvaluateFengInputFunction(t, result.fengParameters));
+            }
+            processedPatientTimes.push_back(petEndTimeSec);
+            processedPatientValues.push_back(
+                logic->EvaluateFengInputFunction(
+                    petEndTimeSec,
+                    result.fengParameters));
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel = QObject::tr("Feng model");
+        }
+
+        if (result.sourceProcessingApplied)
+        {
+            result.processedSourcePreviewTimesSec = processedPatientTimes;
+            result.processedSourcePreviewValues = processedPatientValues;
+        }
+
         if (sourceDomain == IFCurveDomain::WholeBlood)
         {
             result.nativeWholeBloodTimesSec =
-                this->externalIFTimesSec;
+                processedPatientTimes;
             result.nativeWholeBloodValues =
-                externalPatientValues;
+                processedPatientValues;
 
             result.nativePlasmaTimesSec =
-                this->externalIFTimesSec;
+                processedPatientTimes;
             result.nativePlasmaValues.resize(
-                externalPatientValues.size());
+                processedPatientValues.size());
 
             for (size_t i = 0;
-                 i < externalPatientValues.size();
+                 i < processedPatientValues.size();
                  ++i)
             {
                 double pbr = 0.0;
                 if (!this->pbrAtTime(
-                        this->externalIFTimesSec[i],
+                        processedPatientTimes[i],
                         pbr,
                         errorMessage))
                 {
@@ -6201,7 +7058,7 @@ buildCurrentInputFunction(
                 }
 
                 result.nativePlasmaValues[i] =
-                    externalPatientValues[i] * pbr;
+                    processedPatientValues[i] * pbr;
             }
 
             result.hasWholeBlood = true;
@@ -6210,22 +7067,22 @@ buildCurrentInputFunction(
         else if (sourceDomain == IFCurveDomain::TotalPlasma)
         {
             result.nativePlasmaTimesSec =
-                this->externalIFTimesSec;
+                processedPatientTimes;
             result.nativePlasmaValues =
-                externalPatientValues;
+                processedPatientValues;
 
             result.nativeWholeBloodTimesSec =
-                this->externalIFTimesSec;
+                processedPatientTimes;
             result.nativeWholeBloodValues.resize(
-                externalPatientValues.size());
+                processedPatientValues.size());
 
             for (size_t i = 0;
-                 i < externalPatientValues.size();
+                 i < processedPatientValues.size();
                  ++i)
             {
                 double pbr = 0.0;
                 if (!this->pbrAtTime(
-                        this->externalIFTimesSec[i],
+                        processedPatientTimes[i],
                         pbr,
                         errorMessage))
                 {
@@ -6233,7 +7090,7 @@ buildCurrentInputFunction(
                 }
 
                 result.nativeWholeBloodValues[i] =
-                    externalPatientValues[i] / pbr;
+                    processedPatientValues[i] / pbr;
             }
 
             result.hasWholeBlood = true;
@@ -6243,9 +7100,9 @@ buildCurrentInputFunction(
         {
             // Already metabolite-corrected parent plasma.
             result.nativePlasmaTimesSec =
-                this->externalIFTimesSec;
+                processedPatientTimes;
             result.nativePlasmaValues =
-                externalPatientValues;
+                processedPatientValues;
             result.plasmaIsParent = true;
 
             const bool validWholeBlood =
@@ -6323,6 +7180,7 @@ buildCurrentInputFunction(
         result.frameKeep.assign(
             q->durations.size(),
             true);
+        result.supportFrameCount = q->durations.size();
     }
 
     // ------------------------------------------------------------
@@ -6574,6 +7432,7 @@ buildCurrentInputFunction(
 
         result.hasWholeBlood = true;
         result.plasmaIsParent = false;
+        result.supportFrameCount = q->durations.size();
 
         if (!fillFrameAverages(
                 result.nativePlasmaTimesSec,
@@ -6707,6 +7566,11 @@ buildCurrentInputFunction(
             result.framePlasma;
     }
 
+    if (result.supportFrameCount == 0)
+    {
+        result.supportFrameCount = q->durations.size();
+    }
+
     if (result.frameModelPlasma.size() !=
         q->durations.size())
     {
@@ -6718,6 +7582,13 @@ buildCurrentInputFunction(
         }
         return false;
     }
+
+    // Cache the fully prepared IF. The result itself is independent of whether
+    // the immediate caller requires whole blood; that requirement is checked
+    // on retrieval as well. This avoids repeating an expensive Feng fit during
+    // routine UI/status refreshes.
+    this->cachedInputFunction = result;
+    this->inputFunctionCacheValid = true;
 
     if (requireWholeBlood &&
         !result.hasWholeBlood)
@@ -6864,18 +7735,13 @@ buildCurrentInputFunctionWeights(
 
         if (weighted)
         {
-            if (statistic == "Mean")
-            {
-                weight =
-                    1.0 /
-                    (vs.stddev + 1e-16);
-            }
-            else
-            {
-                weight =
-                    1.0 /
-                    (vs.iqr + 1e-16);
-            }
+            const double sigma =
+                statisticDispersionSigma(
+                    vs,
+                    statistic);
+            weight =
+                inverseVarianceWeightFromSigma(
+                    sigma);
         }
 
         if (excludeRemovedInputFrames && !vs.keep)
@@ -6884,6 +7750,11 @@ buildCurrentInputFunctionWeights(
         }
 
         weights.push_back(weight);
+    }
+
+    if (weighted)
+    {
+        normalizePositiveWeights(weights);
     }
 
     return true;
@@ -7194,10 +8065,10 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
       hasLiverDBIF
       ? QStringList{
             "", "K1", "k2", "k3", "k4", "ka", "fA",
-            "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu"}
+            "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "Bounds"}
       : QStringList{
             "", "K1", "k2", "k3", "k4",
-            "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu"};
+            "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "Bounds"};
 
   this->TCMResultsTable->setColumnCount(headers.size());
   this->TCMResultsTable->setHorizontalHeaderLabels(headers);
@@ -7239,13 +8110,37 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
       this->TCMResultsTable->setItem(row, 12, makeNumericItem(params.chi2));
     }
 
+    const QString boundStatus =
+        formatTCMBoundStatus(params.boundFlags);
+    auto* boundItem =
+        new QTableWidgetItem(
+            boundStatus.isEmpty()
+            ? QString()
+            : QString("BOUND: ") + boundStatus);
+    boundItem->setToolTip(
+        boundStatus.isEmpty()
+        ? QObject::tr("No fitted parameter is within 0.1% of an active bound.")
+        : QObject::tr("Parameter at/near an active optimization bound. "
+             "Consider whether the configured bound is appropriate before interpreting the estimate."));
+    this->TCMResultsTable->setItem(
+        row,
+        headers.size() - 1,
+        boundItem);
+
     totalRowHeight += this->TCMResultsTable->rowHeight(row);
     ++row;
   }
   totalRowHeight += this->TCMResultsTable->horizontalHeader()->height();
   totalRowHeight += 2 * this->TCMResultsTable->frameWidth();
-  this->TCMResultsTable->setMinimumHeight(totalRowHeight);
-  this->TCMResultsTable->setMaximumHeight(totalRowHeight);
+  const int minimumUsableTCMTableHeight =
+      this->TCMResultsTable->horizontalHeader()->height() +
+      3 * this->TCMResultsTable->verticalHeader()->defaultSectionSize() +
+      2 * this->TCMResultsTable->frameWidth();
+  this->TCMResultsTable->setMinimumHeight(
+      std::max(totalRowHeight, minimumUsableTCMTableHeight));
+  // Never collapse a one-model result table to a header-sized strip. Let the
+  // surrounding ROI layout allocate additional vertical space normally.
+  this->TCMResultsTable->setMaximumHeight(QWIDGETSIZE_MAX);
   // Make table read-only
   this->TCMResultsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
   this->TCMResultsTable->resizeColumnsToContents();
@@ -7313,8 +8208,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsMTGATable(std :: strin
   }
   totalRowHeight += this->MTGAResultsTable->horizontalHeader()->height();
   totalRowHeight += 4 * this->MTGAResultsTable->frameWidth();
-  this->MTGAResultsTable->setMinimumHeight(totalRowHeight);
-  this->MTGAResultsTable->setMaximumHeight(totalRowHeight);
+  const int minimumUsableMTGATableHeight =
+      this->MTGAResultsTable->horizontalHeader()->height() +
+      3 * this->MTGAResultsTable->verticalHeader()->defaultSectionSize() +
+      2 * this->MTGAResultsTable->frameWidth();
+  this->MTGAResultsTable->setMinimumHeight(
+      std::max(totalRowHeight, minimumUsableMTGATableHeight));
+  this->MTGAResultsTable->setMaximumHeight(QWIDGETSIZE_MAX);
   // Make table read-only
   this->MTGAResultsTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
   this->MTGAResultsTable->resizeColumnsToContents();
@@ -10298,21 +11198,30 @@ generateTCMOptimizedResult()
          outputFields)
     {
       QString unitCode = "1";
-      QString unitMeaning = "1";
+      QString unitMeaning = "no units";
 
-      if (field == "K1" ||
-          field == "k2" ||
-          field == "k3" ||
-          field == "k4" ||
-          field == "Ki")
+      if (field == "K1" || field == "Ki")
       {
-        unitCode = "/s";
-        unitMeaning = "per second";
+        unitCode = "mL/(cm3.min)";
+        unitMeaning =
+            "milliliters per cubic centimeter per minute";
+      }
+      else if (field == "k2" ||
+               field == "k3" ||
+               field == "k4")
+      {
+        unitCode = "/min";
+        unitMeaning = "per minute";
+      }
+      else if (field == "DV")
+      {
+        unitCode = "mL/cm3";
+        unitMeaning = "milliliters per cubic centimeter";
       }
       else if (field == "td")
       {
         unitCode = "s";
-        unitMeaning = "s";
+        unitMeaning = "seconds";
       }
 
       q->ProgressBar->setMinimum(0);
@@ -10471,7 +11380,7 @@ outputMTGAParametricResult(
           fields[fieldIndex];
 
       QString unitCode = "1";
-      QString unitMeaning = "1";
+      QString unitMeaning = "no units";
 
       bool requiresNormalizedTimeUnit = false;
 
@@ -10506,13 +11415,13 @@ outputMTGAParametricResult(
                 framingNorm - 60.0) < 1e-9)
         {
           unitCode = "min";
-          unitMeaning = "min";
+          unitMeaning = "minutes";
         }
         else if (std::abs(
                      framingNorm - 1.0) < 1e-9)
         {
           unitCode = "s";
-          unitMeaning = "s";
+          unitMeaning = "seconds";
         }
       }
 
@@ -11230,22 +12139,32 @@ outputTCMParametricResult(
           fields[fieldIndex];
 
       QString unitCode = "1";
-      QString unitMeaning = "1";
+      QString unitMeaning = "no units";
 
-      // TCM calculations use seconds as their time base.
-      if (field == "K1" ||
-          field == "k2" ||
-          field == "k3" ||
-          field == "k4" ||
-          field == "Ki")
+      // KMAP rate constants are parameterized per minute.  The convolution
+      // converts the second-based numerical integration step using td/60.
+      if (field == "K1" || field == "Ki")
       {
-        unitCode = "/s";
-        unitMeaning = "per second";
+        unitCode = "mL/(cm3.min)";
+        unitMeaning =
+            "milliliters per cubic centimeter per minute";
+      }
+      else if (field == "k2" ||
+               field == "k3" ||
+               field == "k4")
+      {
+        unitCode = "/min";
+        unitMeaning = "per minute";
+      }
+      else if (field == "DV")
+      {
+        unitCode = "mL/cm3";
+        unitMeaning = "milliliters per cubic centimeter";
       }
       else if (field == "td")
       {
         unitCode = "s";
-        unitMeaning = "s";
+        unitMeaning = "seconds";
       }
 
       const std::vector<double> values =
@@ -12457,6 +13376,8 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
   }
   this->dPETvalueType = *uniqueTypes.begin();
   d->updateQuantitativeUnitUI();
+  d->populateTimeBarMTGA();
+  d->populateTimeBarMTGAImg();
 
   d->populateNodeComboBox(d->SegSelector,
                           this->stuID,
@@ -13042,9 +13963,18 @@ QVariantMap qSlicerDynamicPETModuleWidget::TACtoPythonDict()
       {
         const auto& vs = statsVec[i];
         QVariantMap vsMap;
-        // Add time and duration
-        vsMap["Time(s)"] = timePoints[i];
-        vsMap["Duration"] = durations[i];
+        // PET measurements are frame averages.  Keep the familiar frame-end time
+        // in the primary Time(s) column while preserving exact start/mid/end bounds.
+        const double frameEndSec = timePoints[i];
+        const double frameStartSec = frameEndSec - durations[i];
+        const double frameMidSec =
+            frameStartSec + 0.5 * durations[i];
+
+        vsMap["Time(s)"] = frameEndSec;
+        vsMap["FrameStart_s"] = frameStartSec;
+        vsMap["FrameMid_s"] = frameMidSec;
+        vsMap["FrameEnd_s"] = frameEndSec;
+        vsMap["Duration_s"] = durations[i];
         // Add stats
         vsMap["VoxelCount"] = vs.count;
         vsMap["Mean"] = vs.mean;
@@ -13056,6 +13986,8 @@ QVariantMap qSlicerDynamicPETModuleWidget::TACtoPythonDict()
         vsMap["Q3"] = vs.q3;
         vsMap["IQR"] = vs.iqr;
         vsMap["Peak"] = vs.peak;
+        vsMap["PeakStDev"] = vs.peakStddev;
+        vsMap["PeakVoxelCount"] = vs.peakCount;
         vsMap["Volume(mm3)"] = vs.volume_mm3;
         vsMap["Volume(cm3)"] = vs.volume_cm3;
 
@@ -13100,6 +14032,7 @@ QVariantMap qSlicerDynamicPETModuleWidget::TCMParamsToPythonDict()
       row["BIC"]   = params.BIC;
       row["MASE"]  = params.MASE;
       row["chi^2_nu"]  = params.chi2;
+      row["BoundHits"] = formatTCMBoundStatus(params.boundFlags);
 
       rows.append(row);
     }
@@ -13172,7 +14105,16 @@ QVariantMap qSlicerDynamicPETModuleWidget::fittedTCMtoPythonDict()
     for (size_t i = 0; i < N; ++i)
     {
       QVariantMap row;
-      row["Time(s)"] = this->timePoints[i];
+      const double frameEndSec = this->timePoints[i];
+      const double frameStartSec =
+          frameEndSec - this->durations[i];
+      const double frameMidSec =
+          frameStartSec + 0.5 * this->durations[i];
+      row["Time(s)"] = frameEndSec;
+      row["FrameStart_s"] = frameStartSec;
+      row["FrameMid_s"] = frameMidSec;
+      row["FrameEnd_s"] = frameEndSec;
+      row["Duration_s"] = this->durations[i];
 
       // Add TAC VOI
       if (!tacvoi.empty() && tacvoi.size() == N)
@@ -13451,13 +14393,22 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
   timeArray->SetName("Time (min)");
   vtkNew<vtkStringArray> labelArray;
   labelArray->SetName("ToolTipLabelTAC");
-  for (int i=0; i < this->timePoints.size(); ++i) {
-    double t = this->timePoints[i];
-    timeArray->InsertNextValue(t/60.);
+  for (int i = 0; i < this->timePoints.size(); ++i)
+  {
+    const double frameEndSec = this->timePoints[i];
+    const double frameStartSec =
+        frameEndSec - this->durations[i];
+    const double frameMidSec =
+        frameStartSec + 0.5 * this->durations[i];
+
+    timeArray->InsertNextValue(frameEndSec / 60.0);
+
     std::ostringstream oss;
     oss << "Frame: " << i
-        << ", Time(s): " << this->timePoints[i]
-        << ", Time(min): " << this->timePoints[i]/60.0;
+        << ", start(s): " << frameStartSec
+        << ", midpoint(s): " << frameMidSec
+        << ", end(s): " << frameEndSec
+        << ", duration(s): " << this->durations[i];
     labelArray->InsertNextValue(oss.str());
   }
   tableNode->AddColumn(timeArray);
@@ -13945,8 +14896,14 @@ void qSlicerDynamicPETModuleWidget::onWFitImgclicked()
 void qSlicerDynamicPETModuleWidget::onSliderChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  double timeSec = this->timePoints[index-1];
-  double timeMin = timeSec / 60.0;
+  const double timeSec =
+      this->timePoints[index - 1];
+  const double timeMin = timeSec / 60.0;
+
+  if (d->timeEndSlider->value() < index)
+  {
+    d->timeEndSlider->setValue(index);
+  }
 
   d->frameEdit->setText(QString::number(index));
   d->timeSecEdit->setText(QString::number(timeSec, 'f', 2));
@@ -13956,8 +14913,14 @@ void qSlicerDynamicPETModuleWidget::onSliderChanged(int index)
 void qSlicerDynamicPETModuleWidget::onSliderImgChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  double timeSec = this->timePoints[index-1];
-  double timeMin = timeSec / 60.0;
+  const double timeSec =
+      this->timePoints[index - 1];
+  const double timeMin = timeSec / 60.0;
+
+  if (d->timeEndSliderImg->value() < index)
+  {
+    d->timeEndSliderImg->setValue(index);
+  }
 
   d->frameEditImg->setText(QString::number(index));
   d->timeSecEditImg->setText(QString::number(timeSec, 'f', 2));
@@ -14560,7 +15523,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       if (currentSelectedStatID == "Mean") {
         value = vs.mean;
         if (d->weightFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.stddev));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -14568,7 +15532,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       else if (currentSelectedStatID == "Median") {
         value = vs.median;
         if (d->weightFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.iqr / 1.3489795003921634));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -14576,7 +15541,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       else if (currentSelectedStatID == "Peak") {
         value = vs.peak;
         if (d->weightFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.peakStddev));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -14593,6 +15559,14 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       keeptacvec[segmentName].push_back(vs.keep);  // Adds one-element row (column vector)
     }
   }
+  if (d->weightFitCheckBox->isChecked())
+  {
+    for (auto& [segmentName, weights] : wgtVec)
+    {
+      normalizePositiveWeights(weights);
+    }
+  }
+
   this->segmentTAC4TCMfits = tac;
   this->segmentkeep4TCMfits = keeptacvec;
 
@@ -14616,6 +15590,19 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     return;
   }
 
+  const size_t requestedTCMEndCount =
+      std::clamp<size_t>(
+          static_cast<size_t>(d->TCMEndSlider->value()),
+          1,
+          static_cast<size_t>(Nframe));
+
+  const size_t ifSupportCount =
+      std::min(
+          ifResult.supportFrameCount > 0
+              ? ifResult.supportFrameCount
+              : static_cast<size_t>(Nframe),
+          static_cast<size_t>(Nframe));
+
   std::vector<std::vector<double>> Cp;
   std::vector<std::vector<double>> Cwb;
 
@@ -14638,8 +15625,56 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
   for (const std::string& segmentID : VOIsegmentIDs)
   {
     const auto& tacVOI = tac[segmentID];
-    auto tac_flatten = extractColumn(tacVOI);
-    wgt = &wgtVec[segmentID];
+
+    const auto statsIt = segmentTACs.find(segmentID);
+    if (statsIt == segmentTACs.end())
+    {
+      continue;
+    }
+
+    const size_t maximumFitCount =
+        std::min(requestedTCMEndCount, ifSupportCount);
+
+    size_t tissueSupportCount = 0;
+    for (size_t i = maximumFitCount; i > 0; --i)
+    {
+      if (statsIt->second[i - 1].keep)
+      {
+        tissueSupportCount = i;
+        break;
+      }
+    }
+
+    const size_t fitFrameCount =
+        std::min(maximumFitCount, tissueSupportCount);
+
+    if (fitFrameCount < 2)
+    {
+      QMessageBox::warning(
+          this,
+          tr("TCM fit range"),
+          tr("At least two retained tissue/IF frames are required for TCM fitting."));
+      continue;
+    }
+
+    std::vector<std::vector<double>> tacFit(
+        tacVOI.begin(),
+        tacVOI.begin() + fitFrameCount);
+    std::vector<std::vector<double>> cpFit(
+        Cp.begin(),
+        Cp.begin() + fitFrameCount);
+    std::vector<std::vector<double>> cwbFit(
+        Cwb.begin(),
+        Cwb.begin() + fitFrameCount);
+    std::vector<std::vector<double>> framingFit(
+        framing.begin(),
+        framing.begin() + fitFrameCount);
+    std::vector<double> weightFit(
+        wgtVec[segmentID].begin(),
+        wgtVec[segmentID].begin() + fitFrameCount);
+
+    wgt = &weightFit;
+    const long NframeFit = static_cast<long>(fitFrameCount);
 
     for (const std::string& modelID : modelsID)
     {
@@ -14648,7 +15683,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, 0.};
         double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, 0.};
         double init_1tcm[] = {vbInit,  k1Init,  k2Init,  0.};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, maxiter, 1,
                        this->segmentTCM[segmentID]["1TCM"],
@@ -14679,7 +15714,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, k2Lower, tdLower};
         double ub_1tcm[]   = {vbUpper, k1Upper, k2Upper, tdUpper};
         double init_1tcm[] = {vbInit,  k1Init,  k2Init,  tdInit};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, maxiter, 1,
                        this->segmentTCM[segmentID]["1TdCM"],
@@ -14710,7 +15745,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, 0., 0.};
         double ub_1tcm[]   = {vbUpper, k1Upper, 0., 0.};
         double init_1tcm[] = {vbInit,  k1Init,  0.,  0.};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, maxiter, 1,
                        this->segmentTCM[segmentID]["1TiCM"],
@@ -14741,7 +15776,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_1tcm[]   = {vbLower, k1Lower, 0., tdLower};
         double ub_1tcm[]   = {vbUpper, k1Upper, 0., tdUpper};
         double init_1tcm[] = {vbInit,  k1Init,  0.,  tdInit};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_1tcm, lb_1tcm, ub_1tcm, sens,
                        dk, timestep, maxiter, 1,
                        this->segmentTCM[segmentID]["1TidCM"],
@@ -14772,7 +15807,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, 0.};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, 0.};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  0.};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, maxiter, 2,
                        this->segmentTCM[segmentID]["2TCM"],
@@ -14803,7 +15838,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, k4Lower, tdLower};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, k4Upper, tdUpper};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  k4Init,  tdInit};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, maxiter, 2,
                        this->segmentTCM[segmentID]["2TdCM"],
@@ -14834,7 +15869,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., 0.};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., 0.};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0., 0.};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, maxiter, 2,
                        this->segmentTCM[segmentID]["2TiCM"],
@@ -14859,15 +15894,13 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
         //                     ub_2tcm, sens, dk, timestep, maxiter,
         //                     1, this->segmentTCM[segmentID]["2TiCM"]);
-        std::vector<double> fittedTCMvalues(this->segmentTCMfits[segmentID]["2TiCM"],
-                                            this->segmentTCMfits[segmentID]["2TiCM"] + Nframe);
       }
       else if (modelID == "2TidCM") {
         bool sens[] = {true, true, true, true, false, true};
         double lb_2tcm[]   = {vbLower, k1Lower, k2Lower, k3Lower, 0., tdLower};
         double ub_2tcm[]   = {vbUpper, k1Upper, k2Upper, k3Upper, 0., tdUpper};
         double init_2tcm[] = {vbInit,  k1Init,  k2Init,  k3Init,  0.,  tdInit};
-        logic->callTCM(tacVOI, Cp, Cwb, framing, Nframe, Nvox,
+        logic->callTCM(tacFit, cpFit, cwbFit, framingFit, NframeFit, Nvox,
                        init_2tcm, lb_2tcm, ub_2tcm, sens,
                        dk, timestep, maxiter, 2,
                        this->segmentTCM[segmentID]["2TidCM"],
@@ -14950,10 +15983,10 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         };
 
         logic->callLiverTCM(
-            tacVOI,
-            Cwb,
-            framing,
-            Nframe,
+            tacFit,
+            cwbFit,
+            framingFit,
+            NframeFit,
             init_liver,
             lb_liver,
             ub_liver,
@@ -14979,6 +16012,11 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;
       }
+
+      padFittedCurveToFullFrames(
+          this->segmentTCMfits[segmentID][modelID],
+          fitFrameCount,
+          static_cast<size_t>(Nframe));
     }
   }
   d->populateResultsVOI();
@@ -15171,10 +16209,38 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       return;
   }
 
-  const std::vector<double>& Cp_flatten =
-      ifResult.framePlasma;
-  const std::vector<double>& Cwb_flatten =
-      ifResult.frameWholeBlood;
+  const size_t requestedTCMEndCount =
+      std::clamp<size_t>(
+          static_cast<size_t>(d->TCMEndSliderImg->value()),
+          1,
+          static_cast<size_t>(Nframe));
+
+  const size_t ifSupportCount =
+      std::min(
+          ifResult.supportFrameCount > 0
+              ? ifResult.supportFrameCount
+              : static_cast<size_t>(Nframe),
+          static_cast<size_t>(Nframe));
+
+  const size_t fitFrameCount =
+      std::min(requestedTCMEndCount, ifSupportCount);
+
+  if (fitFrameCount < 2)
+  {
+    QMessageBox::warning(
+        this,
+        tr("TCM fit range"),
+        tr("At least two IF/PET frames are required for voxelwise TCM fitting."));
+    return;
+  }
+
+  std::vector<double> Cp_flatten(
+      ifResult.framePlasma.begin(),
+      ifResult.framePlasma.begin() + fitFrameCount);
+  std::vector<double> Cwb_flatten(
+      ifResult.frameWholeBlood.begin(),
+      ifResult.frameWholeBlood.begin() + fitFrameCount);
+  framing_flatten.resize(fitFrameCount);
 
   std::vector<double> inputWeights;
 
@@ -15192,6 +16258,8 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 
       return;
   }
+
+  inputWeights.resize(fitFrameCount);
 
   const std::vector<double>* wgt =
       &inputWeights;
@@ -15273,6 +16341,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
         // Common TCM settings
         appendDouble(key, dk);
         appendDouble(key, timestep);
+        key += "|fitFrameCount=" + QString::number(fitFrameCount);
 
         key += "|" + QString::number(maxiter);
 
@@ -15677,7 +16746,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       if (currentSelectedStatID == "Mean") {
         value = vs.mean;
         if (d->weightedFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.stddev+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.stddev));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -15685,7 +16755,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       else if (currentSelectedStatID == "Median") {
         value = vs.median;
         if (d->weightedFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.iqr / 1.3489795003921634));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -15693,7 +16764,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       else if (currentSelectedStatID == "Peak") {
         value = vs.peak;
         if (d->weightedFitCheckBox->isChecked()) {
-          wgtVec[segmentName].push_back(1./(vs.iqr+1e-16));
+          wgtVec[segmentName].push_back(
+              inverseVarianceWeightFromSigma(vs.peakStddev));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -15708,9 +16780,22 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     }
   }
 
+  if (d->weightedFitCheckBox->isChecked())
+  {
+    for (auto& [segmentName, weights] : wgtVec)
+    {
+      normalizePositiveWeights(weights);
+    }
+  }
+
   // const double timeOffset =  d->timeOffsetEdit->text().toDouble();
   const double framingNorm = d->framingNormEdit->text().toDouble();
-  const double timeOffset = this->timePoints[d->timeOffsetSlider->value()-1] / framingNorm;
+  const size_t startFrameIndex =
+      static_cast<size_t>(d->timeOffsetSlider->value() - 1);
+  const double timeOffset =
+      (this->timePoints[startFrameIndex]
+       - 0.5 * this->durations[startFrameIndex])
+      / framingNorm;
   const bool robust = d->robustFitCheckBox->isChecked();
   const bool std = d->standardizationCheckBox->isChecked();
   const double huber_tune = d->huberTuneEdit->text().toDouble();
@@ -15733,8 +16818,17 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     return;
   }
 
-  const std::vector<double>& Cp_flatten =
-      ifResult.frameModelPlasma;
+  const size_t requestedMTGAEndCount =
+      std::clamp<size_t>(
+          static_cast<size_t>(d->timeEndSlider->value()),
+          1,
+          static_cast<size_t>(Nframe));
+  const size_t ifSupportCount =
+      std::min(
+          ifResult.supportFrameCount > 0
+              ? ifResult.supportFrameCount
+              : static_cast<size_t>(Nframe),
+          static_cast<size_t>(Nframe));
 
   if (ifResult.frameKeep.size() == static_cast<size_t>(Nframe))
   {
@@ -15756,7 +16850,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       {
         const auto statsIt = segmentTACs.find(segmentID);
         if (statsIt == segmentTACs.end() ||
-            statsIt->second.size() != values.size())
+            statsIt->second.size() < values.size())
         {
           return false;
         }
@@ -15765,7 +16859,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         const bool hasRemoved =
             std::any_of(
                 stats.begin(),
-                stats.end(),
+                stats.begin() + values.size(),
                 [](const VoxelStatistics& vs)
                 {
                   return !vs.keep;
@@ -15776,16 +16870,13 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
           return true;
         }
 
-        if (stats.size() < 2 ||
-            !stats.front().keep ||
-            !stats.back().keep)
+        if (values.size() < 2 || !stats.front().keep)
         {
           QMessageBox::warning(
               this,
               tr("MTGA point exclusion"),
-              tr("For MTGA, the first and last tissue TAC observations "
-                 "must remain available because cumulative tissue integrals "
-                 "cannot be reconstructed without boundary extrapolation."));
+              tr("The first tissue TAC observation must remain available. "
+                 "A removed terminal observation is handled as a shorter acquisition."));
           return false;
         }
 
@@ -15836,23 +16927,67 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
   for (const std::string& segmentID : this->VOIMTGAsegmentIDs)
   {
     const auto& tacVOI = tac[segmentID];
+    const auto statsIt = segmentTACs.find(segmentID);
+    if (statsIt == segmentTACs.end())
+    {
+      continue;
+    }
+
+    const size_t maximumFitCount =
+        std::min(requestedMTGAEndCount, ifSupportCount);
+
+    size_t tissueSupportCount = 0;
+    for (size_t i = maximumFitCount; i > 0; --i)
+    {
+      if (statsIt->second[i - 1].keep)
+      {
+        tissueSupportCount = i;
+        break;
+      }
+    }
+
+    const size_t fitFrameCount =
+        std::min(maximumFitCount, tissueSupportCount);
+
+    if (fitFrameCount < 2 ||
+        startFrameIndex >= fitFrameCount ||
+        fitFrameCount - startFrameIndex < 2)
+    {
+      QMessageBox::warning(
+          this,
+          tr("MTGA fit range"),
+          tr("The selected MTGA start is outside the usable IF/tissue acquisition range."));
+      continue;
+    }
+
     auto tac_flatten = extractColumn(tacVOI);
+    tac_flatten.resize(fitFrameCount);
+
+    std::vector<double> cpFit(
+        ifResult.frameModelPlasma.begin(),
+        ifResult.frameModelPlasma.begin() + fitFrameCount);
+    std::vector<double> framingFit(
+        framing_flatten.begin(),
+        framing_flatten.begin() + fitFrameCount);
+    std::vector<double> weightFit(
+        wgtVec[segmentID].begin(),
+        wgtVec[segmentID].begin() + fitFrameCount);
 
     if (!reconstructRemovedTissueFrames(
             segmentID,
             tac_flatten))
     {
-      return;
+      continue;
     }
 
-    wgt = &wgtVec[segmentID];
+    wgt = &weightFit;
 
     for (const std::string& modelID : this->modelsMTGAID)
     {
       if (modelID == "Patlak") {
         logic->Patlak(tac_flatten,
-                      Cp_flatten,
-                      framing_flatten,
+                      cpFit,
+                      framingFit,
                       this->segmentMTGA[segmentID]["Patlak"],
                       wgt,
                       timeOffset,
@@ -15866,8 +17001,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       }
       else if (modelID == "Logan") {
         logic->Logan(tac_flatten,
-                     Cp_flatten,
-                     framing_flatten,
+                     cpFit,
+                     framingFit,
                      this->segmentMTGA[segmentID]["Logan"],
                      wgt,
                      timeOffset,
@@ -15881,8 +17016,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       }
       else if (modelID == "RE") {
         logic->RE(tac_flatten,
-                  Cp_flatten,
-                  framing_flatten,
+                  cpFit,
+                  framingFit,
                   this->segmentMTGA[segmentID]["RE"],
                   wgt,
                   timeOffset,
@@ -16046,8 +17181,38 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
       return;
   }
 
-  const std::vector<double>& Cp_flatten =
-      ifResult.frameModelPlasma;
+  const size_t requestedMTGAEndCount =
+      std::clamp<size_t>(
+          static_cast<size_t>(d->timeEndSliderImg->value()),
+          1,
+          static_cast<size_t>(Nframe));
+  const size_t ifSupportCount =
+      std::min(
+          ifResult.supportFrameCount > 0
+              ? ifResult.supportFrameCount
+              : static_cast<size_t>(Nframe),
+          static_cast<size_t>(Nframe));
+  const size_t fitFrameCount =
+      std::min(requestedMTGAEndCount, ifSupportCount);
+
+  const size_t startFrameIndex =
+      static_cast<size_t>(d->timeOffsetSliderImg->value() - 1);
+
+  if (fitFrameCount < 2 ||
+      startFrameIndex >= fitFrameCount ||
+      fitFrameCount - startFrameIndex < 2)
+  {
+    QMessageBox::warning(
+        this,
+        tr("MTGA fit range"),
+        tr("The selected MTGA start is outside the usable IF/PET acquisition range."));
+    return;
+  }
+
+  std::vector<double> Cp_flatten(
+      ifResult.frameModelPlasma.begin(),
+      ifResult.frameModelPlasma.begin() + fitFrameCount);
+  framing_flatten.resize(fitFrameCount);
 
   std::vector<double> inputWeights;
 
@@ -16065,11 +17230,15 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
       return;
   }
 
+  inputWeights.resize(fitFrameCount);
+
   const std::vector<double>* wgt =
       &inputWeights;
-  // const double timeOffset =  d->timeOffsetEdit->text().toDouble();
   const double framingNorm = d->framingNormEditImg->text().toDouble();
-  const double timeOffset = this->timePoints[d->timeOffsetSliderImg->value()-1] / framingNorm;
+  const double timeOffset =
+      (this->timePoints[startFrameIndex]
+       - 0.5 * this->durations[startFrameIndex])
+      / framingNorm;
   const bool robust = d->robustFitCheckBoxImg->isChecked();
   const bool std = d->standardizationCheckBoxImg->isChecked();
   const double huber_tune = d->huberTuneEditImg->text().toDouble();
@@ -16129,6 +17298,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 
         appendDouble(key, framingNorm);
         appendDouble(key, timeOffset);
+        key += "|fitFrameCount=" + QString::number(fitFrameCount);
 
         if (robust)
         {
@@ -16763,8 +17933,10 @@ void qSlicerDynamicPETModuleWidget::onPlotTCMbutton()
   // Add time column (convert to minutes)
   vtkNew<vtkDoubleArray> timeArray;
   timeArray->SetName("Time (min)");
-  for (double t : this->timePoints)
-    timeArray->InsertNextValue(t / 60.0);
+  for (size_t i = 0; i < this->timePoints.size(); ++i)
+  {
+    timeArray->InsertNextValue(this->timePoints[i] / 60.0);
+  }
   tableNode->AddColumn(timeArray);
 
   // Create plot chart

@@ -79,6 +79,8 @@ struct VoxelStatistics
   double volume_mm3 = 0.0;
   double volume_cm3 = 0.0;
   double peak = 0.0;
+  double peakStddev = 0.0;
+  int peakCount = 0;
   bool keep = true;
   bool empty = false;
 };
@@ -96,6 +98,40 @@ struct MTGAParameters
   std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
   std::vector<bool> keep;
+};
+
+
+enum TCMBoundFlag : unsigned int
+{
+  TCM_BOUND_NONE      = 0u,
+  TCM_BOUND_VB_LOWER  = 1u << 0,
+  TCM_BOUND_VB_UPPER  = 1u << 1,
+  TCM_BOUND_K1_LOWER  = 1u << 2,
+  TCM_BOUND_K1_UPPER  = 1u << 3,
+  TCM_BOUND_K2_LOWER  = 1u << 4,
+  TCM_BOUND_K2_UPPER  = 1u << 5,
+  TCM_BOUND_K3_LOWER  = 1u << 6,
+  TCM_BOUND_K3_UPPER  = 1u << 7,
+  TCM_BOUND_K4_LOWER  = 1u << 8,
+  TCM_BOUND_K4_UPPER  = 1u << 9,
+  TCM_BOUND_TD_LOWER  = 1u << 10,
+  TCM_BOUND_TD_UPPER  = 1u << 11,
+  TCM_BOUND_KA_LOWER  = 1u << 12,
+  TCM_BOUND_KA_UPPER  = 1u << 13,
+  TCM_BOUND_FA_LOWER  = 1u << 14,
+  TCM_BOUND_FA_UPPER  = 1u << 15
+};
+
+struct FengParameters
+{
+  double tau = std::numeric_limits<double>::quiet_NaN();
+  double A1 = std::numeric_limits<double>::quiet_NaN();
+  double A2 = std::numeric_limits<double>::quiet_NaN();
+  double A3 = std::numeric_limits<double>::quiet_NaN();
+  double lambda1 = std::numeric_limits<double>::quiet_NaN();
+  double lambda2 = std::numeric_limits<double>::quiet_NaN();
+  double lambda3 = std::numeric_limits<double>::quiet_NaN();
+  double SSE = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct TCMParameters
@@ -116,6 +152,7 @@ struct TCMParameters
   double chi2 = std::numeric_limits<double>::quiet_NaN();
   double loglik = std::numeric_limits<double>::quiet_NaN();
   int dof = 0;
+  unsigned int boundFlags = TCM_BOUND_NONE;
   std::vector<double> weights, r;
   std::vector<bool> keep;
 };
@@ -151,6 +188,22 @@ public:
   double computeLogLik(const std::vector<double>& y,
                        const std::vector<double>& fitted,
                        const std::vector<double>* weights);
+  bool FitFengInputFunction(
+      const std::vector<double>& timesSec,
+      const std::vector<double>& values,
+      const std::vector<double>* frameStartSec,
+      const std::vector<double>* frameEndSec,
+      bool observationsAreFrameAverages,
+      FengParameters& params,
+      std::vector<double>& fittedObservationValues,
+      std::string* errorMessage = nullptr);
+  double EvaluateFengInputFunction(
+      double timeSec,
+      const FengParameters& params) const;
+  double AverageFengInputFunction(
+      double frameStartSec,
+      double frameEndSec,
+      const FengParameters& params) const;
   void callTCM(
      std::vector<std::vector<double>> tac,
      std::vector<std::vector<double>> Cp,

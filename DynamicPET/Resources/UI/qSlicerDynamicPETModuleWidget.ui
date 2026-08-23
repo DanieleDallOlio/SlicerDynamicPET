@@ -418,21 +418,38 @@
                         <item row="0" column="1" colspan="3">
                           <widget class="QComboBox" name="IFSourceProcessingSelector">
                             <property name="toolTip">
-                              <string>Optional modelling or denoising of the measured patient-specific source curve before blood/plasma conversion and PBIF calibration. Only None is implemented in this checkpoint.</string>
+                              <string>Optional denoising or analytic modeling of the measured patient-specific source curve before blood/plasma conversion and PBIF calibration. LOWESS is a local robust smoother. Feng fits the standard seven-parameter analytic input-function model.</string>
                             </property>
                             <item><property name="text"><string>None</string></property></item>
-                            <item><property name="text"><string>Feng model (planned)</string></property></item>
-                            <item><property name="text"><string>Smoothing spline (planned)</string></property></item>
+                            <item><property name="text"><string>LOWESS smoothing</string></property></item>
+                            <item><property name="text"><string>Feng model</string></property></item>
+                          </widget>
+                        </item>
+
+                        <!-- LOWESS settings -->
+                        <item row="1" column="0">
+                          <widget class="QLabel" name="IFLowessSpanLabel">
+                            <property name="text"><string>LOWESS span</string></property>
+                            <property name="toolTip"><string>Fraction of retained source observations used in each local linear LOWESS fit. Two robust bisquare reweighting iterations are applied. Smaller spans follow the data more closely; larger spans smooth more strongly.</string></property>
+                          </widget>
+                        </item>
+                        <item row="1" column="1">
+                          <widget class="QDoubleSpinBox" name="IFLowessSpanSpinBox">
+                            <property name="decimals"><number>2</number></property>
+                            <property name="minimum"><double>0.050000000000000</double></property>
+                            <property name="maximum"><double>1.000000000000000</double></property>
+                            <property name="singleStep"><double>0.050000000000000</double></property>
+                            <property name="value"><double>0.250000000000000</double></property>
                           </widget>
                         </item>
 
                         <!-- Input interpolation -->
-                        <item row="1" column="0">
+                        <item row="2" column="0">
                           <widget class="QLabel" name="IFInterpolationLabel">
                             <property name="text"><string>Input interpolation</string></property>
                           </widget>
                         </item>
-                        <item row="1" column="1" colspan="3">
+                        <item row="2" column="1" colspan="3">
                           <widget class="QComboBox" name="IFInterpolationSelector">
                             <property name="toolTip">
                               <string>Interpolation used to evaluate the input function between available samples. Linear is recommended for most input functions. Piecewise constant holds frame/sample values between sampling locations.</string>
@@ -443,7 +460,7 @@
                         </item>
 
                         <!-- Fine time step -->
-                        <item row="2" column="0">
+                        <item row="3" column="0">
                           <widget class="QLabel" name="timeStepLabel">
                             <property name="text"><string>TCM integration time step</string></property>
                             <property name="toolTip">
@@ -451,19 +468,19 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="2" column="1">
+                        <item row="3" column="1">
                           <widget class="QLineEdit" name="timeStepEdit">
                             <property name="text"><string>1.0</string></property>
                           </widget>
                         </item>
-                        <item row="2" column="2">
+                        <item row="3" column="2">
                           <widget class="QLabel" name="timeStepUnitLabel">
                             <property name="text"><string>s</string></property>
                           </widget>
                         </item>
 
                         <!-- Plasma / whole-blood -->
-                        <item row="3" column="0">
+                        <item row="4" column="0">
                           <widget class="QLabel" name="pbrpLabel">
                             <property name="text"><string>Plasma / whole-blood ratio</string></property>
                             <property name="toolTip">
@@ -471,19 +488,19 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="3" column="1">
+                        <item row="4" column="1">
                           <widget class="QLineEdit" name="pbrp1Edit">
                             <property name="text"><string>1.0</string></property>
                             <property name="toolTip"><string>p1</string></property>
                           </widget>
                         </item>
-                        <item row="3" column="2">
+                        <item row="4" column="2">
                           <widget class="QLineEdit" name="pbrp2Edit">
                             <property name="text"><string>0.0</string></property>
                             <property name="toolTip"><string>p2</string></property>
                           </widget>
                         </item>
-                        <item row="3" column="3">
+                        <item row="4" column="3">
                           <widget class="QLineEdit" name="pbrp3Edit">
                             <property name="text"><string>0.0</string></property>
                             <property name="toolTip"><string>p3</string></property>
@@ -491,7 +508,7 @@
                         </item>
 
                         <!-- PBIF calibration -->
-                        <item row="4" column="0" colspan="4">
+                        <item row="5" column="0" colspan="4">
                           <widget class="QCheckBox" name="PBIFOptionCheckBox">
                             <property name="text"><string>Use PBIF calibration</string></property>
                             <property name="toolTip">
@@ -499,43 +516,43 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="5" column="0">
+                        <item row="6" column="0">
                           <widget class="QLabel" name="PBIFFileLabel">
                             <property name="text"><string>PBIF template CSV</string></property>
                             <property name="toolTip"><string>Format: time_s,template_value.</string></property>
                           </widget>
                         </item>
-                        <item row="5" column="1" colspan="3">
+                        <item row="6" column="1" colspan="3">
                           <layout class="QHBoxLayout" name="PBIFFileLayout">
                             <item><widget class="QLineEdit" name="PBIFPathEdit"><property name="readOnly"><bool>true</bool></property><property name="placeholderText"><string>No PBIF selected</string></property></widget></item>
                             <item><widget class="QPushButton" name="PBIFBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
                             <item><widget class="QPushButton" name="PBIFPreviewButton"><property name="text"><string>Preview</string></property></widget></item>
                           </layout>
                         </item>
-                        <item row="6" column="0">
+                        <item row="7" column="0">
                           <widget class="QLabel" name="PBIFDomainLabel"><property name="text"><string>PBIF template represents</string></property></widget>
                         </item>
-                        <item row="6" column="1" colspan="3">
+                        <item row="7" column="1" colspan="3">
                           <widget class="QComboBox" name="PBIFDomainSelector">
                             <item><property name="text"><string>Match patient calibration curve</string></property></item>
                             <item><property name="text"><string>Whole blood</string></property></item>
                             <item><property name="text"><string>Total plasma</string></property></item>
                           </widget>
                         </item>
-                        <item row="7" column="0">
+                        <item row="8" column="0">
                           <widget class="QLabel" name="PBIFCalibrationIntervalLabel"><property name="text"><string>AUC calibration interval</string></property></widget>
                         </item>
-                        <item row="7" column="1">
+                        <item row="8" column="1">
                           <widget class="QDoubleSpinBox" name="PBIFCalibrationStartSpinBox">
                             <property name="decimals"><number>3</number></property>
                             <property name="maximum"><double>1000000.000000000000000</double></property>
                             <property name="suffix"><string> s</string></property>
                           </widget>
                         </item>
-                        <item row="7" column="2">
+                        <item row="8" column="2">
                           <widget class="QLabel" name="PBIFCalibrationToLabel"><property name="text"><string>to</string></property></widget>
                         </item>
-                        <item row="7" column="3">
+                        <item row="8" column="3">
                           <widget class="QDoubleSpinBox" name="PBIFCalibrationEndSpinBox">
                             <property name="decimals"><number>3</number></property>
                             <property name="maximum"><double>1000000.000000000000000</double></property>
@@ -544,7 +561,7 @@
                         </item>
 
                         <!-- Metabolite / parent-fraction correction -->
-                        <item row="8" column="0" colspan="4">
+                        <item row="9" column="0" colspan="4">
                           <widget class="QCheckBox" name="MetaboliteCorrectionCheckBox">
                             <property name="text"><string>Apply parent-fraction correction</string></property>
                             <property name="toolTip">
@@ -552,23 +569,23 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="9" column="0">
+                        <item row="10" column="0">
                           <widget class="QLabel" name="ParentFractionFileLabel">
                             <property name="text"><string>Parent-fraction CSV</string></property>
                             <property name="toolTip"><string>Format: time_s,parent_fraction with values between 0 and 1.</string></property>
                           </widget>
                         </item>
-                        <item row="9" column="1" colspan="3">
+                        <item row="10" column="1" colspan="3">
                           <layout class="QHBoxLayout" name="ParentFractionFileLayout">
                             <item><widget class="QLineEdit" name="ParentFractionPathEdit"><property name="readOnly"><bool>true</bool></property><property name="placeholderText"><string>No parent-fraction CSV selected</string></property></widget></item>
                             <item><widget class="QPushButton" name="ParentFractionBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
                             <item><widget class="QPushButton" name="ParentFractionPreviewButton"><property name="text"><string>Preview</string></property></widget></item>
                           </layout>
                         </item>
-                        <item row="10" column="0">
+                        <item row="11" column="0">
                           <widget class="QLabel" name="ParentFractionProcessingLabel"><property name="text"><string>Parent-fraction processing</string></property></widget>
                         </item>
-                        <item row="10" column="1" colspan="3">
+                        <item row="11" column="1" colspan="3">
                           <widget class="QComboBox" name="ParentFractionProcessingSelector">
                             <item><property name="text"><string>Linear interpolation</string></property></item>
                             <item><property name="text"><string>Hill model (planned)</string></property></item>
@@ -847,7 +864,7 @@
                   <item row="0" column="0">
                     <widget class="QLabel" name="timeOffsetLabel">
                       <property name="text">
-                        <string>Time Offset</string>
+                        <string>Regression start (frame end)</string>
                       </property>
                     </widget>
                   </item>
@@ -909,7 +926,7 @@
                             <item>
                               <widget class="QLabel" name="timeSecLabel">
                                 <property name="text">
-                                  <string>Time (s)</string>
+                                  <string>Frame end (s)</string>
                                 </property>
                                 <property name="alignment">
                                   <set>Qt::AlignCenter</set>
@@ -941,7 +958,7 @@
                             <item>
                               <widget class="QLabel" name="timeMinLabel">
                                 <property name="text">
-                                  <string>Time (min)</string>
+                                  <string>Frame end (min)</string>
                                 </property>
                                 <property name="alignment">
                                   <set>Qt::AlignCenter</set>
@@ -970,21 +987,21 @@
                       </layout>
                     </widget>
                   </item>
-                  <item row="2" column="0">
+                  <item row="2" column="0"><widget class="QLabel" name="timeEndLabel"><property name="text"><string>Regression end (frame end)</string></property></widget></item><item row="2" column="1"><widget class="QSlider" name="timeEndSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>100</number></property><property name="value"><number>100</number></property><property name="toolTip"><string>Last PET frame included in the MTGA regression. The UI reports the frame end time; the graphical analysis still uses the selected frame midpoint internally.</string></property></widget></item><item row="3" column="1"><widget class="QLineEdit" name="timeEndInfoEdit"><property name="readOnly"><bool>true</bool></property><property name="toolTip"><string>Selected end frame and its complete frame end time.</string></property></widget></item><item row="4" column="0">
                     <widget class="QLabel" name="framingNormLabel">
                       <property name="text">
                         <string>Framing Norm (s)</string>
                       </property>
                     </widget>
                   </item>
-                  <item row="2" column="1">
+                  <item row="4" column="1">
                     <widget class="QLineEdit" name="framingNormEdit">
                       <property name="text">
                         <string>60.0</string>
                       </property>
                     </widget>
                   </item>
-                  <item row="3" column="0" colspan="2">
+                  <item row="5" column="0" colspan="2">
                     <widget class="QCheckBox" name="standardizationCheckBox">
                       <property name="text">
                         <string>Standardize Data</string>
@@ -994,14 +1011,14 @@
                       </property>
                     </widget>
                   </item>
-                  <item row="4" column="0">
+                  <item row="6" column="0">
                     <widget class="QLabel" name="regressionmodel">
                       <property name="text">
                         <string>Regression Model:</string>
                       </property>
                     </widget>
                   </item>
-                  <item row="5" column="0" colspan="4">
+                  <item row="7" column="0" colspan="4">
                     <layout class="QHBoxLayout" name="fitOptionsLayout">
                       <item>
                         <widget class="QCheckBox" name="olsFitCheckBox">
@@ -1025,7 +1042,7 @@
                             <bool>false</bool>
                           </property>
                           <property name="toolTip">
-                           <string>Weighted Least Squares (using standard deviation or inter-quantile range as weights).</string>
+                           <string>Weighted Least Squares using inverse-variance proxy weights: ROI SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.</string>
                           </property>
                         </widget>
                       </item>
@@ -1038,13 +1055,13 @@
                             <bool>false</bool>
                           </property>
                           <property name="toolTip">
-                           <string>Robust Least Square (Iteratively Reweighted Least Squares - Huber).</string>
+                           <string>Robust Least Squares using Huber IRLS with a MAD-based residual scale. Huber tune 1.345 is the standard Gaussian-efficiency default.</string>
                           </property>
                         </widget>
                       </item>
                     </layout>
                   </item>
-                  <item row="6" column="0" colspan="4">
+                  <item row="8" column="0" colspan="4">
                     <widget class="QWidget" name="robustParamsWidget">
                       <property name="visible">
                         <bool>false</bool>
@@ -1483,7 +1500,7 @@
                   <item row="1" column="3">
                     <widget class="QLineEdit" name="k1Upper">
                       <property name="text">
-                        <string>2.0</string>
+                        <string>5.0</string>
                       </property>
                     </widget>
                   </item>
@@ -1514,7 +1531,7 @@
                   <item row="2" column="3">
                     <widget class="QLineEdit" name="k2Upper">
                       <property name="text">
-                        <string>2.0</string>
+                        <string>5.0</string>
                       </property>
                     </widget>
                   </item>
@@ -1545,7 +1562,7 @@
                   <item row="3" column="3">
                     <widget class="QLineEdit" name="k3Upper">
                       <property name="text">
-                        <string>2.0</string>
+                        <string>5.0</string>
                       </property>
                     </widget>
                   </item>
@@ -1576,7 +1593,7 @@
                   <item row="4" column="3">
                     <widget class="QLineEdit" name="k4Upper">
                       <property name="text">
-                        <string>0.5</string>
+                        <string>2.0</string>
                       </property>
                     </widget>
                   </item>
@@ -1654,7 +1671,10 @@
                       <item>
                         <widget class="QCheckBox" name="standardFitCheckBox">
                           <property name="text">
-                            <string>Standard Fit</string>
+                            <string>Standardize MTGA variables</string>
+                          </property>
+                          <property name="toolTip">
+                            <string>Z-standardize each model's graphical X/Y variables before regression. Kinetic slope/intercept are transformed back to physical graphical units, while residual-based model-selection diagnostics are retained in standardized space to reduce scale differences across Patlak/Logan/RE transformations. These standardized diagnostics are comparative heuristics, not likelihoods on one common response scale.</string>
                           </property>
                           <property name="checked">
                             <bool>true</bool>
@@ -1668,6 +1688,9 @@
                           </property>
                           <property name="checked">
                             <bool>false</bool>
+                          </property>
+                          <property name="toolTip">
+                            <string>ROI WLS uses normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.</string>
                           </property>
                         </widget>
                       </item>
@@ -1775,7 +1798,7 @@
                       </property>
                     </widget>
                   </item>
-                </layout>
+                <item row="13" column="0"><widget class="QLabel" name="TCMEndLabel"><property name="text"><string>Fit end (last complete frame)</string></property></widget></item><item row="13" column="1" colspan="3"><widget class="QSlider" name="TCMEndSlider"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>100</number></property><property name="value"><number>100</number></property><property name="toolTip"><string>Last complete PET frame included in the compartment-model fit.</string></property></widget></item><item row="14" column="1" colspan="3"><widget class="QLineEdit" name="TCMEndInfoEdit"><property name="readOnly"><bool>true</bool></property></widget></item></layout>
               </widget>
             </item>
             <item>
@@ -2300,7 +2323,7 @@
                           <item row="0" column="0">
                             <widget class="QLabel" name="timeOffsetLabelImg">
                               <property name="text">
-                                <string>Time Offset</string>
+                                <string>Regression start (frame end)</string>
                               </property>
                             </widget>
                           </item>
@@ -2362,7 +2385,7 @@
                                     <item>
                                       <widget class="QLabel" name="timeSecLabelImg">
                                         <property name="text">
-                                          <string>Time (s)</string>
+                                          <string>Frame end (s)</string>
                                         </property>
                                         <property name="alignment">
                                           <set>Qt::AlignCenter</set>
@@ -2394,7 +2417,7 @@
                                     <item>
                                       <widget class="QLabel" name="timeMinLabelImg">
                                         <property name="text">
-                                          <string>Time (min)</string>
+                                          <string>Frame end (min)</string>
                                         </property>
                                         <property name="alignment">
                                           <set>Qt::AlignCenter</set>
@@ -2423,21 +2446,21 @@
                               </layout>
                             </widget>
                           </item>
-                          <item row="2" column="0">
+                          <item row="2" column="0"><widget class="QLabel" name="timeEndLabelImg"><property name="text"><string>Regression end (frame end)</string></property></widget></item><item row="2" column="1"><widget class="QSlider" name="timeEndSliderImg"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>100</number></property><property name="value"><number>100</number></property><property name="toolTip"><string>Last PET frame included in the MTGA regression. The UI reports the frame end time; the graphical analysis still uses the selected frame midpoint internally.</string></property></widget></item><item row="3" column="1"><widget class="QLineEdit" name="timeEndInfoEditImg"><property name="readOnly"><bool>true</bool></property><property name="toolTip"><string>Selected end frame and its complete frame end time.</string></property></widget></item><item row="4" column="0">
                             <widget class="QLabel" name="framingNormLabelImg">
                               <property name="text">
                                 <string>Framing Norm (s)</string>
                               </property>
                             </widget>
                           </item>
-                          <item row="2" column="1">
+                          <item row="4" column="1">
                             <widget class="QLineEdit" name="framingNormEditImg">
                               <property name="text">
                                 <string>60.0</string>
                               </property>
                             </widget>
                           </item>
-                          <item row="3" column="0" colspan="2">
+                          <item row="5" column="0" colspan="2">
                             <widget class="QCheckBox" name="standardizationCheckBoxImg">
                               <property name="text">
                                 <string>Standardize Data</string>
@@ -2447,14 +2470,14 @@
                               </property>
                             </widget>
                           </item>
-                          <item row="4" column="0">
+                          <item row="6" column="0">
                             <widget class="QLabel" name="regressionmodelImg">
                               <property name="text">
                                 <string>Regression Model:</string>
                               </property>
                             </widget>
                           </item>
-                          <item row="5" column="0" colspan="4">
+                          <item row="7" column="0" colspan="4">
                             <layout class="QHBoxLayout" name="fitOptionsLayoutImg">
                               <item>
                                 <widget class="QCheckBox" name="olsFitCheckBoxImg">
@@ -2478,7 +2501,7 @@
                                     <bool>false</bool>
                                   </property>
                                   <property name="toolTip">
-                                   <string>Weighted Least Squares (using standard deviation or inter-quantile range as weights).</string>
+                                   <string>Experimental global frame WLS using inverse-variance proxy weights from the selected segment-derived IDIF dispersion. This is not yet a per-voxel PET noise model.</string>
                                   </property>
                                 </widget>
                               </item>
@@ -2491,27 +2514,27 @@
                                     <bool>false</bool>
                                   </property>
                                   <property name="toolTip">
-                                   <string>Robust Least Square (Iteratively Reweighted Least Squares - Huber).</string>
+                                   <string>Robust Least Squares using Huber IRLS with a MAD-based residual scale. Huber tune 1.345 is the standard Gaussian-efficiency default.</string>
                                   </property>
                                 </widget>
                               </item>
                             </layout>
                           </item>
-                          <item row="6" column="0">
+                          <item row="8" column="0">
                             <widget class="QLabel" name="numThreadsMTGALabel">
                               <property name="text">
                                 <string>Number of threads</string>
                               </property>
                             </widget>
                           </item>
-                          <item row="6" column="1">
+                          <item row="8" column="1">
                             <widget class="QLineEdit" name="numThreadsMTGA">
                               <property name="text">
                                 <string>1</string>
                               </property>
                             </widget>
                           </item>
-                          <item row="7" column="0" colspan="4">
+                          <item row="9" column="0" colspan="4">
                             <widget class="QWidget" name="robustParamsWidgetImg">
                               <property name="visible">
                                 <bool>false</bool>
@@ -2900,7 +2923,7 @@
                           <item row="1" column="3">
                             <widget class="QLineEdit" name="k1UpperImg">
                               <property name="text">
-                                <string>2.0</string>
+                                <string>5.0</string>
                               </property>
                             </widget>
                           </item>
@@ -2931,7 +2954,7 @@
                           <item row="2" column="3">
                             <widget class="QLineEdit" name="k2UpperImg">
                               <property name="text">
-                                <string>2.0</string>
+                                <string>5.0</string>
                               </property>
                             </widget>
                           </item>
@@ -2962,7 +2985,7 @@
                           <item row="3" column="3">
                             <widget class="QLineEdit" name="k3UpperImg">
                               <property name="text">
-                                <string>2.0</string>
+                                <string>5.0</string>
                               </property>
                             </widget>
                           </item>
@@ -2993,7 +3016,7 @@
                           <item row="4" column="3">
                             <widget class="QLineEdit" name="k4UpperImg">
                               <property name="text">
-                                <string>0.5</string>
+                                <string>2.0</string>
                               </property>
                             </widget>
                           </item>
@@ -3071,7 +3094,10 @@
                               <item>
                                 <widget class="QCheckBox" name="standardFitCheckBoxImg">
                                   <property name="text">
-                                    <string>Standard Fit</string>
+                                    <string>Standardize MTGA variables</string>
+                                  </property>
+                                  <property name="toolTip">
+                                    <string>Z-standardize each model's graphical X/Y variables before regression. Kinetic slope/intercept are transformed back to physical graphical units, while residual-based model-selection diagnostics are retained in standardized space to reduce scale differences across Patlak/Logan/RE transformations.</string>
                                   </property>
                                   <property name="checked">
                                     <bool>true</bool>
@@ -3086,6 +3112,9 @@
                                   <property name="checked">
                                     <bool>false</bool>
                                   </property>
+                          <property name="toolTip">
+                            <string>Experimental global frame weighting for voxelwise TCM using the selected segment-derived IDIF dispersion estimate when available. This is not yet a per-voxel PET noise model.</string>
+                          </property>
                                 </widget>
                               </item>
                             </layout>
@@ -3132,7 +3161,7 @@
                               </property>
                             </widget>
                           </item>
-                        </layout>
+                        <item row="14" column="0"><widget class="QLabel" name="TCMEndLabelImg"><property name="text"><string>Fit end (last complete frame)</string></property></widget></item><item row="14" column="1" colspan="3"><widget class="QSlider" name="TCMEndSliderImg"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="minimum"><number>1</number></property><property name="maximum"><number>100</number></property><property name="value"><number>100</number></property><property name="toolTip"><string>Last complete PET frame included in voxelwise compartment-model fitting.</string></property></widget></item><item row="15" column="1" colspan="3"><widget class="QLineEdit" name="TCMEndInfoEditImg"><property name="readOnly"><bool>true</bool></property></widget></item></layout>
                       </widget>
                     </item>
 

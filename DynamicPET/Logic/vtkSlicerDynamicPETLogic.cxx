@@ -60,6 +60,120 @@
 namespace
 {
 
+  double*
+  FineSampleExplicitInputFunction(
+      const std::vector<double>& timesSec,
+      const std::vector<double>& values,
+      double endTimeSec,
+      double timeStepSec,
+      const std::string& interpolationType,
+      long int& numberOfSamples)
+  {
+      if (timesSec.size() < 2 ||
+          timesSec.size() != values.size() ||
+          timeStepSec <= 0.0 ||
+          timesSec.front() > 0.0 ||
+          timesSec.back() < endTimeSec)
+      {
+          throw std::invalid_argument(
+              "Invalid explicit input-function sampling.");
+      }
+
+      numberOfSamples =
+          static_cast<long int>(
+              endTimeSec /
+              timeStepSec);
+
+      if (numberOfSamples <= 0)
+      {
+          throw std::invalid_argument(
+              "Invalid TCM integration grid.");
+      }
+
+      double* output =
+          new double[numberOfSamples];
+
+      for (long int i = 0;
+           i < numberOfSamples;
+           ++i)
+      {
+          const double t =
+              (static_cast<double>(i) + 0.5) *
+              timeStepSec;
+
+          if (t < timesSec.front() ||
+              t > timesSec.back())
+          {
+              delete[] output;
+
+              throw std::runtime_error(
+                  "Input-function extrapolation "
+                  "would be required.");
+          }
+
+          const auto upper =
+              std::upper_bound(
+                  timesSec.begin(),
+                  timesSec.end(),
+                  t);
+
+          if (upper == timesSec.end())
+          {
+              output[i] =
+                  values.back();
+
+              continue;
+          }
+
+          if (upper == timesSec.begin())
+          {
+              output[i] =
+                  values.front();
+
+              continue;
+          }
+
+          const size_t right =
+              static_cast<size_t>(
+                  std::distance(
+                      timesSec.begin(),
+                      upper));
+
+          const size_t left =
+              right - 1;
+
+          if (interpolationType == "const")
+          {
+              output[i] =
+                  values[left];
+          }
+          else
+          {
+              const double t1 =
+                  timesSec[left];
+
+              const double t2 =
+                  timesSec[right];
+
+              const double y1 =
+                  values[left];
+
+              const double y2 =
+                  values[right];
+
+              output[i] =
+                  std::max(
+                      0.0,
+                      y1 +
+                      (y2 - y1) *
+                      (t - t1) /
+                      (t2 - t1));
+          }
+      }
+
+      return output;
+  }
+
 std::vector<double> GaussianSmooth1D(
     const std::vector<double>& input,
     double sigma)
@@ -1231,24 +1345,27 @@ double vtkSlicerDynamicPETLogic::computeLogLik(const std::vector<double>& y,
 }
 
 
-void vtkSlicerDynamicPETLogic::callTCM(std :: vector< std :: vector<double> > tac,
-                                 std :: vector< std :: vector<double> > Cp,
-                                 std :: vector< std :: vector<double> > framing,
-                                 long int Nframe,
-                                 long int Nvox,
-                                 double* kinit,
-                                 double* lb,
-                                 double* ub,
-                                 const bool* sens,
-                                 const double dk,
-                                 const double timestep,
-                                 const double pbrp[],
-                                 const int maxiter,
-                                 const int n_tc,
-                                 TCMParameters& params,
-                                 double *& fitted_curve,
-                                 const std::vector<double>* wgt
-                                 )
+void vtkSlicerDynamicPETLogic::callTCM(
+    std::vector<std::vector<double>> tac,
+    std::vector<std::vector<double>> Cp,
+    std::vector<std::vector<double>> framing,
+    long int Nframe,
+    long int Nvox,
+    double* kinit,
+    double* lb,
+    double* ub,
+    const bool* sens,
+    const double dk,
+    const double timestep,
+    const double pbrp[],
+    const int maxiter,
+    const int n_tc,
+    TCMParameters& params,
+    double*& fitted_curve,
+    const std::vector<double>* wgt,
+    const std::string& interpolationType,
+    const std::vector<double>* nativeInputTimesSec,
+    const std::vector<double>* nativeInputCp)
 {
   const int nth = 1;
 
@@ -1290,31 +1407,132 @@ void vtkSlicerDynamicPETLogic::callTCM(std :: vector< std :: vector<double> > ta
     cumsum[i] = cum;
   }
 
-  double **scant = new double * [Nframe];
-  double t, pbr;
-  std :: vector< std :: vector<double> > cwb; // whole blood concentration
-  scant[0L] = new double[2];
-  scant[0L][0L] = 0.;
-  scant[0L][1L] = cumsum[0L];
-  t = (scant[0L][0L] + scant[0L][1L]) * 0.5;
-  pbr = pbrp[0L] * exp(-pbrp[1L] * t / 60L) + pbrp[2L];
-  std :: vector<double> cwb_r;
-  cwb_r.push_back(Cp[0L][0L] / pbr);
-  cwb.push_back(cwb_r);
-  for (long int i = 1L; i < Nframe; ++i){
-    cwb_r.clear();
-    scant[i] = new double[2];
-    scant[i][0L] = cumsum[i-1];
-    scant[i][1L] = cumsum[i];
-    t = (scant[i][0L] + scant[i][1L]) * 0.5;
-    pbr = pbrp[0L] * exp(-pbrp[1L] * t / 60L) + pbrp[2L];
-    cwb_r.push_back(Cp[i][0L] / pbr);
-    cwb.push_back(cwb_r);
+  double** scant =
+      new double*[Nframe];
+
+  std::vector<std::vector<double>> cwb;
+  cwb.reserve(Nframe);
+
+  for (long int i = 0;
+       i < Nframe;
+       ++i)
+  {
+      scant[i] =
+          new double[2];
+
+      scant[i][0] =
+          (i == 0)
+          ? 0.0
+          : cumsum[i - 1];
+
+      scant[i][1] =
+          cumsum[i];
+
+      const double t =
+          0.5 *
+          (scant[i][0] +
+           scant[i][1]);
+
+      const double pbr =
+          pbrp[0] *
+          std::exp(
+              -pbrp[1] * t / 60.0)
+          + pbrp[2];
+
+      if (!std::isfinite(pbr) ||
+          pbr <= 1e-12)
+      {
+          throw std::runtime_error(
+              "Plasma/whole-blood ratio "
+              "must remain positive.");
+      }
+
+      cwb.push_back(
+          {
+              Cp[i][0] / pbr
+          });
   }
 
-  long int N_cp;
-  double *Cp_new = finesample(scant, Cp, Nframe, N_cp, timestep, "linear");
-  double *cwb_new = finesample(scant, cwb, Nframe, N_cp, timestep, "linear");
+  long int N_cp = 0;
+
+  double* Cp_new = nullptr;
+  double* cwb_new = nullptr;
+
+  const bool useNativeInput =
+      nativeInputTimesSec &&
+      nativeInputCp &&
+      nativeInputTimesSec->size() >= 2 &&
+      nativeInputTimesSec->size() ==
+          nativeInputCp->size();
+
+  if (useNativeInput)
+  {
+      const double scanEndSec =
+          cumsum[Nframe - 1];
+
+      Cp_new =
+          FineSampleExplicitInputFunction(
+              *nativeInputTimesSec,
+              *nativeInputCp,
+              scanEndSec,
+              timestep,
+              interpolationType,
+              N_cp);
+
+      cwb_new =
+          new double[N_cp];
+
+      constexpr double EPS = 1e-12;
+
+      for (long int i = 0;
+           i < N_cp;
+           ++i)
+      {
+          const double t =
+              (static_cast<double>(i) + 0.5) *
+              timestep;
+
+          const double pbr =
+              pbrp[0] *
+              std::exp(
+                  -pbrp[1] * t / 60.0)
+              + pbrp[2];
+
+          if (!std::isfinite(pbr) ||
+              pbr <= EPS)
+          {
+              delete[] Cp_new;
+              delete[] cwb_new;
+
+              throw std::runtime_error(
+                  "Plasma/whole-blood ratio "
+                  "must remain positive.");
+          }
+
+          cwb_new[i] =
+              Cp_new[i] / pbr;
+      }
+  }
+  else
+  {
+      Cp_new =
+          finesample(
+              scant,
+              Cp,
+              Nframe,
+              N_cp,
+              timestep,
+              interpolationType);
+
+      cwb_new =
+          finesample(
+              scant,
+              cwb,
+              Nframe,
+              N_cp,
+              timestep,
+              interpolationType);
+  }
 
   double * tac_flatten = new double[Nframe*Nvox];
   for (int i=0; i<Nframe; ++i) {
@@ -4738,9 +4956,12 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     std::atomic<bool>& stopRequested,
     const std::vector<double>* wgt_global /*= nullptr*/,
     int numThreads /*= 0 */,
-    std::function<void(int)> progressCallback, /*= nullptr*/
-    std::function<bool()> stopCallback /*= nullptr*/
-)
+    std::function<void(int)> progressCallback,
+    std::function<bool()> stopCallback,
+    const std::string& interpolationType,
+    const std::vector<double>* nativeInputTimesSec,
+    const std::vector<double>* nativeInputCp
+    )
 {
     const double EPS = 1e-12;
     const int Nframe = static_cast<int>(Cp.size());
@@ -4794,10 +5015,12 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         scant[i][1] = cumsum[i];
         double t = 0.5*(scant[i][0]+scant[i][1]);
         double pbr = pbrp[0]*exp(-pbrp[1]*t/60.0)+pbrp[2];
-        if (std::abs(pbr) < EPS)
+        if (!std::isfinite(pbr) ||
+            pbr <= EPS)
         {
-            pbr =
-                (pbr < 0.0) ? -EPS : EPS;
+            throw std::runtime_error(
+                "Plasma/whole-blood ratio "
+                "must remain positive.");
         }
         // std :: cout << "Cp[i] = " << Cp[i] << std :: endl;
         cwb[i] = Cp[i]/pbr;
@@ -4805,11 +5028,75 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
 
     // ---------- 4) Fine-sample ----------
     long int N_cp = 0;
-    double* Cp_new  = finesample2(scant, Cp,  N_cp, timestep, "linear");
-    // for (int i = 0; i < N_cp; ++i) {
-    //   std :: cout << "Cp_new[i] = " << Cp_new[i] << std :: endl;
-    // }
-    double* cwb_new = finesample2(scant, cwb, N_cp, timestep, "linear");
+
+    double* Cp_new = nullptr;
+    double* cwb_new = nullptr;
+
+    const bool useNativeInput =
+        nativeInputTimesSec &&
+        nativeInputCp &&
+        nativeInputTimesSec->size() >= 2 &&
+        nativeInputTimesSec->size() ==
+            nativeInputCp->size();
+
+    if (useNativeInput)
+    {
+        Cp_new =
+            FineSampleExplicitInputFunction(
+                *nativeInputTimesSec,
+                *nativeInputCp,
+                cumsum.back(),
+                timestep,
+                interpolationType,
+                N_cp);
+
+        cwb_new =
+            new double[N_cp];
+
+        for (long int i = 0;
+             i < N_cp;
+             ++i)
+        {
+            const double t =
+                (static_cast<double>(i) + 0.5) *
+                timestep;
+
+            double pbr =
+                pbrp[0] *
+                std::exp(
+                    -pbrp[1] * t / 60.0)
+                + pbrp[2];
+
+            if (!std::isfinite(pbr) ||
+                pbr <= EPS)
+            {
+                throw std::runtime_error(
+                    "Plasma/whole-blood ratio "
+                    "must remain positive.");
+            }
+
+            cwb_new[i] =
+                Cp_new[i] / pbr;
+        }
+    }
+    else
+    {
+        Cp_new =
+            finesample2(
+                scant,
+                Cp,
+                N_cp,
+                timestep,
+                interpolationType);
+
+        cwb_new =
+            finesample2(
+                scant,
+                cwb,
+                N_cp,
+                timestep,
+                interpolationType);
+    }
 
     // ---------- 5) Preallocate output ----------
     const int num_par = (n_tc == 1) ? 4 : 6;

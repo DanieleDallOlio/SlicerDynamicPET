@@ -226,7 +226,10 @@ public:
               int maxiter,
               std::atomic<bool>& stopRequested,
               const std::vector<double>* wgt_global = nullptr,
-              int numThreads = 1)
+              int numThreads = 1,
+              const std::string& interpolationType = "linear",
+              const std::vector<double>* nativeInputTimesSec = nullptr,
+              const std::vector<double>* nativeInputCp = nullptr)
         : logic(logic),
           voxels(voxels),
           Cp(Cp),
@@ -237,7 +240,8 @@ public:
           timestep(timestep),
           maxiter(maxiter),
           stopRequested(stopRequested),
-          numThreads(numThreads)
+          numThreads(numThreads),
+          interpolationType(interpolationType)
     {
       std::copy(pbrp, pbrp+3, this->pbrp);
       if (wgt_global) wgt_copy = *wgt_global;
@@ -248,6 +252,22 @@ public:
       this->k3Init = k3Init; this->k3Lower = k3Lower; this->k3Upper = k3Upper;
       this->k4Init = k4Init; this->k4Lower = k4Lower; this->k4Upper = k4Upper;
       this->tdInit = tdInit; this->tdLower = tdLower; this->tdUpper = tdUpper;
+
+      if (nativeInputTimesSec &&
+          nativeInputCp &&
+          nativeInputTimesSec->size() ==
+              nativeInputCp->size() &&
+          nativeInputTimesSec->size() >= 2)
+      {
+          this->nativeInputTimesSec =
+              *nativeInputTimesSec;
+
+          this->nativeInputCp =
+              *nativeInputCp;
+
+          this->hasNativeInput = true;
+      }
+
     }
 
     std::vector<TCMParameters> results;
@@ -260,6 +280,13 @@ signals:
     void modelStarted(const QString& modelID);
 
 protected:
+
+    std::string interpolationType;
+
+    std::vector<double> nativeInputTimesSec;
+    std::vector<double> nativeInputCp;
+
+    bool hasNativeInput{false};
     void run() override
     {
         for (size_t i = 0; i < modelIDs.size(); ++i) {
@@ -303,7 +330,14 @@ protected:
               {
                   return stopRequested.load(
                       std::memory_order_relaxed);
-              });
+              },
+              this->interpolationType,
+              this->hasNativeInput
+                  ? &this->nativeInputTimesSec
+                  : nullptr,
+              this->hasNativeInput
+                  ? &this->nativeInputCp
+                  : nullptr);
             if (stopRequested) {
                 emit canceled(QString::fromStdString(modelID));
                 break;

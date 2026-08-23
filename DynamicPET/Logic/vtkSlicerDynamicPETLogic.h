@@ -149,24 +149,27 @@ public:
   double computeLogLik(const std::vector<double>& y,
                        const std::vector<double>& fitted,
                        const std::vector<double>* weights);
-  void callTCM(std :: vector< std :: vector<double> > tac,
-               std :: vector< std :: vector<double> > Cp,
-               std :: vector< std :: vector<double> > framing,
-               long int Nframe,
-               long int Nvox,
-               double* kinit,
-               double* lb,
-               double* ub,
-               const bool* sens,
-               const double dk,
-               const double timestep,
-               const double pbrp[],
-               const int maxiter,
-               const int n_tc,
-               TCMParameters& params,
-               double*& fitted_curve,
-               const std::vector<double>* wgt
-               );
+  void callTCM(
+     std::vector<std::vector<double>> tac,
+     std::vector<std::vector<double>> Cp,
+     std::vector<std::vector<double>> framing,
+     long int Nframe,
+     long int Nvox,
+     double* kinit,
+     double* lb,
+     double* ub,
+     const bool* sens,
+     const double dk,
+     const double timestep,
+     const double pbrp[],
+     const int maxiter,
+     const int n_tc,
+     TCMParameters& params,
+     double*& fitted_curve,
+     const std::vector<double>* wgt,
+     const std::string& interpolationType = "linear",
+     const std::vector<double>* nativeInputTimesSec = nullptr,
+     const std::vector<double>* nativeInputCp = nullptr);
   // void getFittedTCM(double *& fitted_curve,
   //                   std :: vector< std :: vector<double> > Cp,
   //                   std :: vector< std :: vector<double> > framing,
@@ -387,12 +390,13 @@ public:
       const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       const std::vector<double>* wgt_global = nullptr,
-      // QProgressBar* progressBar = nullptr,
       int numThreads = 1,
-      // QPushButton* stopButton = nullptr,
       std::function<void(int)> progressCallback = nullptr,
-      std::function<bool()> stopCallback = nullptr
-  );
+      std::function<bool()> stopCallback = nullptr,
+      const std::string& interpolationType = "linear",
+      const std::vector<double>* nativeInputTimesSec = nullptr,
+      const std::vector<double>* nativeInputCp = nullptr
+      );
   std::vector<double> ExtractParameter(
       const std::vector<TCMParameters>& outputParams,
       const std::string& field);

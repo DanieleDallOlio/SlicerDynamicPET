@@ -143,8 +143,6 @@ public slots:
   void onSaveMTGAfittedExcelbutton();
   void onPlotbutton();
   void onIFSelectionChanged(int index);
-  void onIFMTGASelectionChanged(int index);
-  void onIFImgSelectionChanged(int index);
   void onVOISelectAllbutton();
   void onVOIMTGASelectAllbutton();
   void onFITbutton();

@@ -18,7 +18,7 @@
       <widget class="QTabWidget" name="PlotsTabWidget">
         <widget class="QWidget" name="TACwidget">
           <attribute name="title">
-           <string>Setup &amp; TAC</string>
+           <string>Setup &amp;&amp; TAC</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayout">
             <item>
@@ -140,6 +140,309 @@
                <bool>true</bool>
               </property>
              </widget>
+            </item>
+            <item>
+              <widget class="ctkCollapsibleButton" name="InputFunctionCollapsibleButton">
+                <property name="text">
+                  <string>Input Function</string>
+                </property>
+                <property name="collapsed">
+                  <bool>false</bool>
+                </property>
+
+                <layout class="QGridLayout" name="InputFunctionLayout">
+
+                  <!-- Source -->
+                  <item row="0" column="0">
+                    <widget class="QLabel" name="IFSourceLabel">
+                      <property name="text">
+                        <string>Source:</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="0" column="1">
+                    <widget class="QComboBox" name="IFSourceSelector">
+                      <item>
+                        <property name="text">
+                          <string>Segment (IDIF)</string>
+                        </property>
+                      </item>
+                      <item>
+                        <property name="text">
+                          <string>External CSV</string>
+                        </property>
+                      </item>
+                      <item>
+                        <property name="text">
+                          <string>Population-based</string>
+                        </property>
+                      </item>
+                    </widget>
+                  </item>
+
+                  <!-- IDIF segment -->
+                  <item row="1" column="0">
+                    <widget class="QLabel" name="IFLabel">
+                      <property name="text">
+                        <string>IDIF segment:</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="1" column="1">
+                    <widget class="QComboBox" name="IFSelector">
+                      <property name="toolTip">
+                        <string>The selected segment TAC is used as the image-derived input function. No metabolite correction is currently applied.</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <!-- IDIF statistic -->
+                  <item row="2" column="0">
+                    <widget class="QLabel" name="IFStatLabel">
+                      <property name="text">
+                        <string>IDIF statistic:</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="2" column="1">
+                    <widget class="QComboBox" name="IFStatSelector">
+                      <property name="toolTip">
+                        <string>Choose Mean, Median, or Peak for the segment-derived input function.</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="3" column="0">
+                    <widget class="QLabel" name="IFCSVFileLabel">
+                      <property name="text">
+                        <string>CSV file:</string>
+                      </property>
+                      <property name="toolTip">
+                        <string>CSV format must be exactly two columns with header time_s,concentration. Time is in seconds and concentration must use the same activity-concentration units as the PET data.</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="3" column="1">
+                    <layout class="QHBoxLayout" name="IFCSVFileLayout">
+                      <item>
+                        <widget class="QLineEdit" name="IFCSVPathEdit">
+                          <property name="readOnly">
+                            <bool>true</bool>
+                          </property>
+                          <property name="placeholderText">
+                            <string>No CSV selected</string>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="IFCSVBrowseButton">
+                          <property name="text">
+                            <string>Browse...</string>
+                          </property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+
+                  <item row="4" column="0">
+                    <widget class="QLabel" name="IFCurveTypeLabel">
+                      <property name="text">
+                        <string>Curve represents:</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="4" column="1">
+                    <widget class="QComboBox" name="IFCurveTypeSelector">
+                      <property name="toolTip">
+                        <string>Interpretation of the selected input curve. If Plasma input Cp is selected, the curve is used as Cp(t) and whole blood is computed as Cb(t) = Cp(t) / PBR(t). If Whole blood Cb is selected, plasma input is computed as Cp(t) = Cb(t) * PBR(t). PBR(t) = p1·exp(-p2·t/60) + p3.</string>
+                      </property>
+                      <item>
+                        <property name="text">
+                          <string>Plasma input Cp</string>
+                        </property>
+                      </item>
+                      <item>
+                        <property name="text">
+                          <string>Whole blood Cb</string>
+                        </property>
+                      </item>
+                    </widget>
+                  </item>
+
+                  <!-- Status -->
+                  <item row="5" column="0" colspan="2">
+                    <widget class="QLabel" name="IFStatusLabel">
+                      <property name="text">
+                        <string>No input function selected.</string>
+                      </property>
+                      <property name="wordWrap">
+                        <bool>true</bool>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <item row="6" column="0" colspan="2">
+                    <widget class="QPushButton" name="IFPreviewButton">
+                      <property name="text">
+                        <string>Preview input function</string>
+                      </property>
+                      <property name="toolTip">
+                        <string>Plot the original input-function samples and the effective plasma and whole-blood curves used by the kinetic models.</string>
+                      </property>
+                    </widget>
+                  </item>
+
+                  <!-- Advanced -->
+                  <item row="7" column="0" colspan="2">
+                    <widget class="ctkCollapsibleButton" name="IFAdvancedCollapsibleButton">
+                      <property name="text">
+                        <string>Advanced</string>
+                      </property>
+                      <property name="collapsed">
+                        <bool>true</bool>
+                      </property>
+
+                      <layout class="QGridLayout" name="IFAdvancedLayout">
+
+                        <item row="0" column="0">
+                          <widget class="QLabel" name="IFInterpolationLabel">
+                            <property name="text">
+                              <string>Input interpolation</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="0" column="1" colspan="2">
+                          <widget class="QComboBox" name="IFInterpolationSelector">
+                            <property name="toolTip">
+                              <string>Interpolation used to evaluate the input function between available samples. Linear is recommended for most input functions. Piecewise constant holds each sample value until the next sample.</string>
+                            </property>
+                            <item>
+                              <property name="text">
+                                <string>Linear</string>
+                              </property>
+                            </item>
+                            <item>
+                              <property name="text">
+                                <string>Piecewise constant</string>
+                              </property>
+                            </item>
+                          </widget>
+                        </item>
+
+                        <!-- Fine time step -->
+                        <item row="1" column="0">
+                          <widget class="QLabel" name="timeStepLabel">
+                            <property name="text">
+                              <string>TCM integration time step</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>Uniform internal time step used to fine-sample the input function and evaluate TCM convolution and time-delay correction. Smaller values increase temporal resolution and computation time.</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="1" column="1">
+                          <widget class="QLineEdit" name="timeStepEdit">
+                            <property name="text">
+                              <string>1.0</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="1" column="2">
+                          <widget class="QLabel" name="timeStepUnitLabel">
+                            <property name="text">
+                              <string>s</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <!-- Plasma / whole-blood -->
+                        <item row="2" column="0">
+                          <widget class="QLabel" name="pbrpLabel">
+                            <property name="text">
+                              <string>Plasma / whole-blood ratio</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>PBR(t) = p1·exp(-p2·t/60) + p3 defines the plasma-to-whole-blood relationship. If the configured input is plasma Cp, whole blood is derived as Cb(t) = Cp(t) / PBR(t). If the configured input is whole blood Cb, plasma is derived as Cp(t) = Cb(t) * PBR(t). Defaults p1=1, p2=0, p3=0 make Cp(t) = Cb(t).</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="2" column="1">
+                          <widget class="QLineEdit" name="pbrp1Edit">
+                            <property name="text">
+                              <string>1.0</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>p1</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="2" column="2">
+                          <widget class="QLineEdit" name="pbrp2Edit">
+                            <property name="text">
+                              <string>0.0</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>p2</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="2" column="3">
+                          <widget class="QLineEdit" name="pbrp3Edit">
+                            <property name="text">
+                              <string>0.0</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>p3</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <!-- Planned options -->
+                        <item row="3" column="0" colspan="4">
+                          <widget class="QCheckBox" name="PBIFOptionCheckBox">
+                            <property name="enabled">
+                              <bool>false</bool>
+                            </property>
+                            <property name="text">
+                              <string>Population-based input function (planned)</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>Planned functionality; not available in this version.</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                        <item row="4" column="0" colspan="4">
+                          <widget class="QCheckBox" name="MetaboliteCorrectionCheckBox">
+                            <property name="enabled">
+                              <bool>false</bool>
+                            </property>
+                            <property name="text">
+                              <string>Metabolite correction (planned)</string>
+                            </property>
+                            <property name="toolTip">
+                              <string>Planned functionality; not available in this version.</string>
+                            </property>
+                          </widget>
+                        </item>
+
+                      </layout>
+                    </widget>
+                  </item>
+
+                </layout>
+              </widget>
             </item>
             <item>
               <widget class="ctkCollapsibleButton" name="TACCollapsibleButton">
@@ -322,28 +625,14 @@
                   <item row="0" column="0">
                    <widget class="QLabel" name="inputstatMTGA">
                     <property name="text">
-                     <string>Input stat</string>
+                     <string>Tissue TAC statistic</string>
                     </property>
                    </widget>
                   </item>
                   <item row="0" column="1">
-                   <widget class="QComboBox" name="StatSelectorMTGA">
+                     <widget class="QComboBox" name="StatSelectorMTGA">
                      <property name="toolTip">
                       <string>Choose Input statistics.</string>
-                     </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="0">
-                   <widget class="QLabel" name="IFMTGA">
-                    <property name="text">
-                     <string>Input Function</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="1">
-                   <widget class="QComboBox" name="IFSelectorMTGA">
-                     <property name="toolTip">
-                      <string>Choose Input Function.</string>
                      </property>
                    </widget>
                   </item>
@@ -925,7 +1214,7 @@
                   <item row="0" column="0">
                    <widget class="QLabel" name="inputstat">
                     <property name="text">
-                     <string>Input stat</string>
+                     <string>Tissue TAC statistic</string>
                     </property>
                    </widget>
                   </item>
@@ -933,20 +1222,6 @@
                    <widget class="QComboBox" name="StatSelector">
                      <property name="toolTip">
                       <string>Choose Input statistics.</string>
-                     </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="0">
-                   <widget class="QLabel" name="IF">
-                    <property name="text">
-                     <string>Input Function</string>
-                    </property>
-                   </widget>
-                  </item>
-                  <item row="1" column="1">
-                   <widget class="QComboBox" name="IFSelector">
-                     <property name="toolTip">
-                      <string>Choose Input Function.</string>
                      </property>
                    </widget>
                   </item>
@@ -1272,48 +1547,6 @@
                       </property>
                     </widget>
                   </item>
-                  <item row="10" column="0">
-                    <widget class="QLabel" name="timeStepLabel">
-                      <property name="text">
-                        <string>Time Step (s)</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="10" column="1">
-                    <widget class="QLineEdit" name="timeStepEdit">
-                      <property name="text">
-                        <string>1.0</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="11" column="0">
-                    <widget class="QLabel" name="pbrpLabel">
-                      <property name="text">
-                        <string>Peripheral Blood Params</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="11" column="1">
-                    <widget class="QLineEdit" name="pbrp1Edit">
-                      <property name="text">
-                        <string>1.0</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="11" column="2">
-                    <widget class="QLineEdit" name="pbrp2Edit">
-                      <property name="text">
-                        <string>0.0</string>
-                      </property>
-                    </widget>
-                  </item>
-                  <item row="11" column="3">
-                    <widget class="QLineEdit" name="pbrp3Edit">
-                      <property name="text">
-                        <string>0.0</string>
-                      </property>
-                    </widget>
-                  </item>
                   <item row="12" column="0">
                     <widget class="QLabel" name="maxIterTCMLabel">
                       <property name="text">
@@ -1618,40 +1851,6 @@
             <string>Parametric Imaging</string>
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayoutImg">
-
-            <!-- First section: Input Function -->
-            <item>
-              <layout class="QFormLayout" name="formLayoutIFImg">
-                <item row="0" column="0">
-                 <widget class="QLabel" name="inputstatImg">
-                  <property name="text">
-                   <string>Input stat</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="0" column="1">
-                 <widget class="QComboBox" name="StatSelectorImg">
-                   <property name="toolTip">
-                    <string>Choose Input statistics.</string>
-                   </property>
-                 </widget>
-                </item>
-                <item row="1" column="0">
-                  <widget class="QLabel" name="IFImg">
-                    <property name="text">
-                      <string>Input Function</string>
-                    </property>
-                  </widget>
-                </item>
-                <item row="1" column="1">
-                  <widget class="QComboBox" name="IFSelectorImg">
-                    <property name="toolTip">
-                      <string>Choose Input Function.</string>
-                    </property>
-                  </widget>
-                </item>
-              </layout>
-            </item>
 
             <item>
               <widget class="ctkCollapsibleButton" name="BodySupportCollapsibleButtonImg">
@@ -2217,7 +2416,7 @@
                           <string>Fit selected MTGA models voxelwise and generate their parametric maps using the selected output options.</string>
                         </property>
                         <property name="text">
-                          <string>Fit &amp; generate MTGA maps</string>
+                          <string>Fit &amp;&amp; generate MTGA maps</string>
                         </property>
                       </widget>
                     </item>
@@ -2353,8 +2552,7 @@
                                 <bool>true</bool>
                               </property>
                               <property name="text">
-                                <string>Display scaling is initialized automatically from robust Ki and DV value ranges. Quantitative Ki and DV values are never rescaled. Adjust their display ranges in Slicer and refresh the RGB visualization if desired.</string>
-                              </property>
+                                <string>Ki and DV are quantitative scalar maps. Their initial display window/level is determined automatically by Slicer. Adjust the display ranges in the Volumes module if desired, then refresh the RGB visualization to apply the current Ki and DV display ranges.</string>                              </property>
                             </widget>
                           </item>
 
@@ -2692,48 +2890,6 @@
                               </property>
                             </widget>
                           </item>
-                          <item row="10" column="0">
-                            <widget class="QLabel" name="timeStepLabelImg">
-                              <property name="text">
-                                <string>Time Step (s)</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="10" column="1">
-                            <widget class="QLineEdit" name="timeStepEditImg">
-                              <property name="text">
-                                <string>1.0</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="11" column="0">
-                            <widget class="QLabel" name="pbrpLabelImg">
-                              <property name="text">
-                                <string>Peripheral Blood Params</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="11" column="1">
-                            <widget class="QLineEdit" name="pbrp1EditImg">
-                              <property name="text">
-                                <string>1.0</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="11" column="2">
-                            <widget class="QLineEdit" name="pbrp2EditImg">
-                              <property name="text">
-                                <string>0.0</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="11" column="3">
-                            <widget class="QLineEdit" name="pbrp3EditImg">
-                              <property name="text">
-                                <string>0.0</string>
-                              </property>
-                            </widget>
-                          </item>
                           <item row="12" column="0">
                             <widget class="QLabel" name="maxIterTCMLabelImg">
                               <property name="text">
@@ -2812,7 +2968,7 @@
                           <string>Fit selected TCM models voxelwise and generate their parametric maps using the selected output options.</string>
                         </property>
                         <property name="text">
-                          <string>Fit &amp; generate TCM maps</string>
+                          <string>Fit &amp;&amp; generate TCM maps</string>
                         </property>
                       </widget>
                     </item>

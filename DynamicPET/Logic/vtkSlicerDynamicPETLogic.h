@@ -134,6 +134,31 @@ struct FengParameters
   double SSE = std::numeric_limits<double>::quiet_NaN();
 };
 
+enum class ParentFractionModel
+{
+  Linear = 0,
+  Hill = 1,
+  ExtendedHill = 2,
+  ExponentialPlateau = 3
+};
+
+struct ParentFractionFitParameters
+{
+  // Hill / extended-Hill lower asymptote.
+  double A = std::numeric_limits<double>::quiet_NaN();
+  // Hill / extended-Hill shape.
+  double B = std::numeric_limits<double>::quiet_NaN();
+  double C = std::numeric_limits<double>::quiet_NaN();
+  // Extended-Hill initial plateau and delay (minutes).
+  double D = std::numeric_limits<double>::quiet_NaN();
+  double E = std::numeric_limits<double>::quiet_NaN();
+  // Exponential-to-plateau parameters. Rate is in min^-1.
+  double plateau = std::numeric_limits<double>::quiet_NaN();
+  double rate = std::numeric_limits<double>::quiet_NaN();
+  double SSE = std::numeric_limits<double>::quiet_NaN();
+  int numberOfObservations = 0;
+};
+
 struct TCMParameters
 {
   double K1 = std::numeric_limits<double>::quiet_NaN();
@@ -204,6 +229,17 @@ public:
       double frameStartSec,
       double frameEndSec,
       const FengParameters& params) const;
+  bool FitParentFraction(
+      const std::vector<double>& timesSec,
+      const std::vector<double>& values,
+      ParentFractionModel model,
+      ParentFractionFitParameters& params,
+      std::vector<double>& fittedObservationValues,
+      std::string* errorMessage = nullptr);
+  double EvaluateParentFraction(
+      double timeSec,
+      ParentFractionModel model,
+      const ParentFractionFitParameters& params) const;
   void callTCM(
      std::vector<std::vector<double>> tac,
      std::vector<std::vector<double>> Cp,

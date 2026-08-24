@@ -22,6 +22,141 @@
           </attribute>
           <layout class="QVBoxLayout" name="verticalLayout">
             <item>
+             <widget class="QWidget" name="AnalysisModeRow" native="true">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <layout class="QHBoxLayout" name="AnalysisModeLayout">
+               <property name="leftMargin"><number>0</number></property>
+               <property name="topMargin"><number>0</number></property>
+               <property name="rightMargin"><number>0</number></property>
+               <property name="bottomMargin"><number>0</number></property>
+               <item>
+                <spacer name="AnalysisModeSpacer">
+                 <property name="orientation"><enum>Qt::Horizontal</enum></property>
+                 <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
+                 <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+                </spacer>
+               </item>
+               <item>
+                <widget class="QCheckBox" name="TableBasedAnalysisCheckBox">
+                 <property name="toolTip">
+                  <string>Switch to image-independent table analysis using ROI TACs and timing from an Excel workbook. Image mode remains the default; external CSV input-function processing is shared while selections and removed points remain mode-specific.</string>
+                 </property>
+                 <property name="text"><string>Table-mode</string></property>
+                 <property name="checked"><bool>false</bool></property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="TableSetupGroupBox">
+              <property name="visible">
+               <bool>false</bool>
+              </property>
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                <horstretch>0</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="title">
+               <string>Table Setup</string>
+              </property>
+              <layout class="QFormLayout" name="TableSetupFormLayout">
+               <item row="0" column="0">
+                <widget class="QLabel" name="TableWorkbookLabel">
+                 <property name="text">
+                  <string>TAC workbook:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QWidget" name="TableWorkbookRow" native="true">
+                 <layout class="QHBoxLayout" name="TableWorkbookRowLayout">
+                  <property name="leftMargin"><number>0</number></property>
+                  <property name="topMargin"><number>0</number></property>
+                  <property name="rightMargin"><number>0</number></property>
+                  <property name="bottomMargin"><number>0</number></property>
+                  <item>
+                   <widget class="QLineEdit" name="TableWorkbookPathEdit">
+                    <property name="readOnly"><bool>true</bool></property>
+                    <property name="placeholderText"><string>Select ROI TAC workbook (.xlsx)</string></property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="TableWorkbookBrowseButton">
+                    <property name="text"><string>Browse...</string></property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="TableWorkbookClearButton">
+                    <property name="text"><string>Clear</string></property>
+                   </widget>
+                  </item>
+                 </layout>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="TableTimeModeLabel">
+                 <property name="text"><string>Time represents:</string></property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QComboBox" name="TableTimeModeSelector">
+                 <property name="toolTip">
+                  <string>Interpret representative time values when exact frame start/end columns are unavailable. Frame end is the default. Auto recognizes explicit midpoint/end columns and treats an otherwise generic time column as frame end.</string>
+                 </property>
+                 <property name="currentIndex"><number>2</number></property>
+                 <item><property name="text"><string>Auto</string></property></item>
+                 <item><property name="text"><string>Frame midpoint</string></property></item>
+                 <item><property name="text"><string>Frame end</string></property></item>
+                </widget>
+               </item>
+               <item row="2" column="0">
+                <widget class="QLabel" name="TableActivityUnitLabel">
+                 <property name="text"><string>TAC activity unit:</string></property>
+                </widget>
+               </item>
+               <item row="2" column="1">
+                <widget class="QComboBox" name="TableActivityUnitSelector">
+                 <property name="toolTip">
+                  <string>Physical scale of the imported tissue TAC values. This is the model scale used to convert the external input function.</string>
+                 </property>
+                 <item><property name="text"><string>Bq/mL</string></property></item>
+                 <item><property name="text"><string>kBq/mL</string></property></item>
+                 <item><property name="text"><string>SUVbw</string></property></item>
+                </widget>
+               </item>
+               <item row="3" column="0">
+                <widget class="QLabel" name="TableSUVbwFactorLabel">
+                 <property name="text"><string>SUVbw factor:</string></property>
+                </widget>
+               </item>
+               <item row="3" column="1">
+                <widget class="QLineEdit" name="TableSUVbwFactorEdit">
+                 <property name="toolTip">
+                  <string>Conversion convention: SUVbw = (Bq/mL) × factor; therefore Bq/mL = SUVbw / factor. Required only when conversion between SUVbw and activity concentration is needed.</string>
+                 </property>
+                 <property name="placeholderText">
+                  <string>SUVbw per (Bq/mL)</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="4" column="0" colspan="2">
+                <widget class="QLabel" name="TableStatusLabel">
+                 <property name="text"><string>No table TAC workbook loaded.</string></property>
+                 <property name="wordWrap"><bool>true</bool></property>
+                </widget>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
               <layout class="QFormLayout" name="formLayout_1">
                 <item row="0" column="0">
                  <widget class="QLabel" name="label1">
@@ -225,7 +360,7 @@
                   <item row="1" column="1">
                     <widget class="QComboBox" name="IFSelector">
                       <property name="toolTip">
-                        <string>The selected segment TAC is used as the image-derived input function. No metabolite correction is currently applied.</string>
+                        <string>The selected segment or table ROI TAC is used as the input function and treated as total whole blood. The same downstream plasma conversion, optional PBIF calibration, source processing, and parent-fraction correction are then applied.</string>
                       </property>
                     </widget>
                   </item>
@@ -385,14 +520,20 @@
                   </item>
 
                   <item row="7" column="0" colspan="2">
-                    <widget class="QPushButton" name="IFPreviewButton">
-                      <property name="text">
-                        <string>Preview input function</string>
-                      </property>
-                      <property name="toolTip">
-                        <string>Plot the original input-function samples and the effective plasma and whole-blood curves used by the kinetic models.</string>
-                      </property>
-                    </widget>
+                    <layout class="QHBoxLayout" name="IFPreviewExportLayout">
+                      <item>
+                        <widget class="QPushButton" name="IFPreviewButton">
+                          <property name="text"><string>Preview input function</string></property>
+                          <property name="toolTip"><string>Plot the original input-function samples and the effective plasma and whole-blood curves used by the kinetic models. External CSV source observations can be selected in this preview and excluded with Delete.</string></property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="IFExportButton">
+                          <property name="text"><string>Export final IF CSV...</string></property>
+                          <property name="toolTip"><string>Export the final plasma curve used by the kinetic model after the selected source processing, plasma/whole-blood conversion, PBIF scaling, and parent-fraction correction. The CSV uses the standard time_s,concentration format and the currently selected display activity unit.</string></property>
+                        </widget>
+                      </item>
+                    </layout>
                   </item>
 
                   <!-- Advanced -->
@@ -583,14 +724,14 @@
                           </layout>
                         </item>
                         <item row="11" column="0">
-                          <widget class="QLabel" name="ParentFractionProcessingLabel"><property name="text"><string>Parent-fraction processing</string></property></widget>
+                          <widget class="QLabel" name="ParentFractionProcessingLabel"><property name="text"><string>Parent-fraction processing</string></property><property name="toolTip"><string>Linear uses the supplied measurements directly. Hill and exponential models start at parent fraction 1. Extended Hill also estimates an initial plateau and delay. Parametric fits may extrapolate beyond the last metabolite sample; linear interpolation does not.</string></property></widget>
                         </item>
                         <item row="11" column="1" colspan="3">
                           <widget class="QComboBox" name="ParentFractionProcessingSelector">
                             <item><property name="text"><string>Linear interpolation</string></property></item>
-                            <item><property name="text"><string>Hill model (planned)</string></property></item>
-                            <item><property name="text"><string>Exponential model (planned)</string></property></item>
-                            <item><property name="text"><string>Power model (planned)</string></property></item>
+                            <item><property name="text"><string>Hill</string></property></item>
+                            <item><property name="text"><string>Extended Hill</string></property></item>
+                            <item><property name="text"><string>Exponential to plateau</string></property></item>
                           </widget>
                         </item>
 
@@ -670,7 +811,7 @@
                       <item>
                         <widget class="QCheckBox" name="PlotLiveSegEdit">
                          <property name="toolTip">
-                          <string>TAC will adjust live on segment corrections.</string>
+                          <string>Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections.</string>
                          </property>
                          <property name="text">
                           <string>SegmentEditor corrections</string>

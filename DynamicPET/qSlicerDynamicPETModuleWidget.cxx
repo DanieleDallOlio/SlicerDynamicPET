@@ -35,6 +35,11 @@
 #include <QTextStream>
 #include <QDoubleSpinBox>
 #include <QTimer>
+#include <QGroupBox>
+#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QFileInfo>
+#include <QSignalBlocker>
 
 #include <vtkWeakPointer.h>
 
@@ -144,6 +149,25 @@ struct PreviewCurve
   std::vector<double> times;
   std::vector<double> values;
   bool pointsOnly{false};
+  bool sourceObservations{false};
+  std::string observationRole;
+};
+
+struct TACModeState
+{
+  bool valid{false};
+  std::map<std::string, std::vector<VoxelStatistics>> segmentTACs;
+  std::map<std::string, std::string> segmentTACsnames;
+  std::vector<double> timePoints;
+  std::vector<double> durations;
+  int numberOfTimepoints{0};
+  std::vector<std::string> segmentDisplayOrder;
+};
+
+struct TACStatisticOption
+{
+  QString label;
+  std::string id;
 };
 
 static std::vector<double> lowessPredict(
@@ -549,7 +573,46 @@ public:
 
   void updateInputFunctionUI();
 
+  // Image-based / table-based analysis mode.  Table mode intentionally
+  // reuses the same ROI fitting, plotting and external-IF pipeline after
+  // normalizing workbook data into the active TAC representation.
+  void initializeTableBasedUI();
+  void setTableBasedMode(bool enabled);
+  bool isTableBasedMode() const { return this->tableBasedMode; }
+  void setImageSetupVisible(bool visible);
+  void captureActiveTACState(TACModeState& state);
+  void restoreActiveTACState(const TACModeState& state);
+  void clearActiveTACState();
+  bool loadTableWorkbook(const QString& filePath, QString* errorMessage = nullptr);
+  void clearTableWorkbook();
+  void rebuildTACStatisticUI();
+  void updateTableWeightingAvailability();
+  void updateTableUnitUI();
+  ActivityUnit selectedTableActivityUnit() const;
+  QString selectedTableTimeMode() const;
+  double tissueSigmaForWeighting(
+      const std::string& segmentID,
+      size_t frameIndex,
+      const std::string& statistic,
+      const VoxelStatistics& stats) const;
+
   void invalidateInputFunctionResults();
+
+  std::vector<bool>& activeExternalIFKeep();
+  const std::vector<bool>& activeExternalIFKeep() const;
+  ParentFractionModel selectedParentFractionModel() const;
+  void logToPythonConsole(const QString& message) const;
+  bool exportFinalInputFunctionCSV(
+      const QString& filePath,
+      QString* errorMessage = nullptr);
+  bool buildProcessedParentFraction(
+      double requiredEndTimeSec,
+      std::vector<double>& processedTimesSec,
+      std::vector<double>& processedValues,
+      ParentFractionFitParameters* fitParameters = nullptr,
+      QString* processingLabel = nullptr,
+      QString* fitSummary = nullptr,
+      QString* errorMessage = nullptr);
 
   bool loadExternalInputFunctionCSV(
       const QString& filePath,
@@ -632,9 +695,32 @@ public:
       double& pbr,
       QString* errorMessage = nullptr) const;
 
+  bool tableBasedMode{false};
+  bool tableDataLoaded{false};
+  TACModeState imageTACState;
+  TACModeState tableTACState;
+  int imageIFSourceIndex{0};
+  std::string imageIFID;
+  int tableIFSourceIndex{1};
+  std::string tableIFID;
+
+  QString tableWorkbookPath;
+  bool tableFramingExact{false};
+  QString tableTimingSummary;
+  std::vector<double> tablePlotTimesSec;
+  std::vector<TACStatisticOption> tableFitStatistics;
+  std::vector<TACStatisticOption> tablePlotStatistics;
+  std::map<std::string, std::map<std::string, std::vector<double>>> tableSigma;
+
   QString externalIFPath;
   std::vector<double> externalIFTimesSec;
   std::vector<double> externalIFConcentrations;
+  std::vector<bool> imageExternalIFKeep;
+  std::vector<bool> tableExternalIFKeep;
+  std::vector<size_t> externalIFPreviewIndexMap;
+  std::vector<double> externalIFPreviewTimesSec;
+  std::vector<double> externalIFPreviewDisplayValues;
+  int externalIFPreviewSelectedIndex{-1};
   bool externalIFZeroAnchorAdded{false};
 
   QString externalWholeBloodPath;
@@ -1130,7 +1216,20 @@ showCurvePreview(
 
     int curveIndex = 0;
 
-    for (const PreviewCurve& curve : curves)
+    // Draw derived curves first and measured/selectable observations last.
+    // VTK therefore renders the source markers on top instead of hiding them
+    // underneath continuous plasma/IF curves.
+    std::vector<PreviewCurve> orderedCurves = curves;
+    std::stable_sort(
+        orderedCurves.begin(),
+        orderedCurves.end(),
+        [](const PreviewCurve& a, const PreviewCurve& b)
+        {
+            return static_cast<int>(a.sourceObservations) <
+                   static_cast<int>(b.sourceObservations);
+        });
+
+    for (const PreviewCurve& curve : orderedCurves)
     {
         if (curve.times.empty() ||
             curve.times.size() != curve.values.size())
@@ -1174,6 +1273,18 @@ showCurvePreview(
         seriesNode->SetAttribute(
             "SlicerDynamicPET.IFPreviewGroup",
             groupName.c_str());
+        if (curve.sourceObservations)
+        {
+            seriesNode->SetAttribute(
+                "SlicerDynamicPET.SourceObservations",
+                "1");
+            if (!curve.observationRole.empty())
+            {
+                seriesNode->SetAttribute(
+                    "SlicerDynamicPET.SourceObservationRole",
+                    curve.observationRole.c_str());
+            }
+        }
         seriesNode->SetPlotType(
             vtkMRMLPlotSeriesNode::PlotTypeScatter);
         seriesNode->SetAndObserveTableNodeID(
@@ -1185,6 +1296,7 @@ showCurvePreview(
         {
             seriesNode->SetLineStyle(
                 vtkMRMLPlotSeriesNode::LineStyleNone);
+            seriesNode->SetMarkerSize(14.0f);
         }
         else
         {
@@ -1222,6 +1334,25 @@ showCurvePreview(
     {
         plotViewNode->SetPlotChartNodeID(
             chartNode->GetID());
+
+        if (qSlicerApplication::application())
+        {
+            qSlicerLayoutManager* layoutManager =
+                qSlicerApplication::application()->layoutManager();
+            qMRMLPlotWidget* plotWidget =
+                layoutManager ? layoutManager->plotWidget(0) : nullptr;
+            qMRMLPlotView* plotView =
+                plotWidget ? plotWidget->plotView() : nullptr;
+            if (plotView)
+            {
+                QObject::connect(
+                    plotView,
+                    SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
+                    q,
+                    SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)),
+                    Qt::UniqueConnection);
+            }
+        }
     }
 }
 
@@ -1269,6 +1400,11 @@ previewInputFunction()
 
     InputFunctionResult result;
     QString error;
+
+    this->externalIFPreviewIndexMap.clear();
+    this->externalIFPreviewTimesSec.clear();
+    this->externalIFPreviewDisplayValues.clear();
+    this->externalIFPreviewSelectedIndex = -1;
 
     if (!this->buildCurrentInputFunction(
             result,
@@ -1322,14 +1458,30 @@ previewInputFunction()
     }
     else
     {
-        sourceTimes = this->externalIFTimesSec;
-        sourceValues = this->externalIFConcentrations;
-
-        if (this->externalIFZeroAnchorAdded &&
-            !sourceValues.empty())
+        const std::vector<bool>& keep = this->activeExternalIFKeep();
+        for (size_t i = 0; i < this->externalIFTimesSec.size(); ++i)
         {
-            sourceValues[0] =
-                std::numeric_limits<double>::quiet_NaN();
+            const bool retained =
+                keep.size() == this->externalIFTimesSec.size()
+                ? keep[i]
+                : true;
+            if (!retained)
+            {
+                continue;
+            }
+
+            // An automatically inserted (0 s, 0) anchor belongs to the
+            // interpolation definition, not to the measured observations.
+            // Keep it in the fitting source, but omit it from the selectable
+            // raw-point preview entirely so point indices remain unambiguous.
+            if (this->externalIFZeroAnchorAdded && i == 0)
+            {
+                continue;
+            }
+
+            sourceTimes.push_back(this->externalIFTimesSec[i]);
+            sourceValues.push_back(this->externalIFConcentrations[i]);
+            this->externalIFPreviewIndexMap.push_back(i);
         }
     }
 
@@ -1354,6 +1506,12 @@ previewInputFunction()
             QObject::tr("Input Function"),
             error);
         return;
+    }
+
+    if (!segmentSource)
+    {
+        this->externalIFPreviewTimesSec = sourceTimes;
+        this->externalIFPreviewDisplayValues = sourceDisplayValues;
     }
 
     auto toDisplay =
@@ -1401,7 +1559,9 @@ previewInputFunction()
         {QObject::tr("Original source"),
          sourceTimes,
          sourceDisplayValues,
-         true});
+         true,
+         !segmentSource,
+         !segmentSource ? "ExternalIF" : ""});
 
     if (result.sourceProcessingApplied &&
         !result.processedSourcePreviewTimesSec.empty() &&
@@ -1694,55 +1854,70 @@ previewParentFraction()
         return;
     }
 
-    std::vector<double> rawValues =
-        this->parentFractionValues;
+    std::vector<double> measuredTimes;
+    std::vector<double> measuredValues;
 
-    if (this->parentFractionZeroAnchorAdded &&
-        !rawValues.empty())
+    for (size_t i = 0; i < this->parentFractionTimesSec.size(); ++i)
     {
-        rawValues[0] =
-            std::numeric_limits<double>::quiet_NaN();
+        if (this->parentFractionZeroAnchorAdded && i == 0)
+            continue;
+
+        measuredTimes.push_back(this->parentFractionTimesSec[i]);
+        measuredValues.push_back(this->parentFractionValues[i]);
     }
 
-    const double endTime =
-        this->parentFractionTimesSec.back();
-    const int n = 300;
+    const double requiredEndTimeSec =
+        !q->timePoints.empty()
+        ? q->timePoints.back()
+        : this->parentFractionTimesSec.back();
 
-    std::vector<double> denseTimes;
-    std::vector<double> denseValues;
-    denseTimes.reserve(n);
-    denseValues.reserve(n);
+    std::vector<double> processedTimes;
+    std::vector<double> processedValues;
+    ParentFractionFitParameters fitParameters;
+    QString processingLabel;
+    QString fitSummary;
+    QString error;
 
-    for (int i = 0; i < n; ++i)
+    if (!this->buildProcessedParentFraction(
+            requiredEndTimeSec,
+            processedTimes,
+            processedValues,
+            &fitParameters,
+            &processingLabel,
+            &fitSummary,
+            &error))
     {
-        const double t =
-            endTime *
-            static_cast<double>(i) /
-            static_cast<double>(n - 1);
-
-        denseTimes.push_back(t);
-        denseValues.push_back(
-            this->interpolateInputFunction(
-                this->parentFractionTimesSec,
-                this->parentFractionValues,
-                t,
-                "linear"));
+        QMessageBox::warning(q, QObject::tr("Parent fraction"), error);
+        return;
     }
+
+    QString title = QObject::tr("Parent Fraction");
+    if (!processingLabel.isEmpty())
+    {
+        title += QObject::tr(" - %1").arg(processingLabel);
+    }
+
+    std::vector<PreviewCurve> curves;
+    curves.push_back(
+        {processingLabel,
+         processedTimes,
+         processedValues,
+         false,
+         false,
+         ""});
+    curves.push_back(
+        {QObject::tr("Measured parent fraction"),
+         measuredTimes,
+         measuredValues,
+         true,
+         false,
+         ""});
 
     this->showCurvePreview(
         "ParentFractionPreview",
-        QObject::tr("Parent Fraction"),
+        title,
         QObject::tr("Parent fraction"),
-        {
-          {QObject::tr("Measured parent fraction"),
-           this->parentFractionTimesSec,
-           rawValues,
-           true},
-          {QObject::tr("Linear interpolation"),
-           denseTimes,
-           denseValues,
-           false}
-        });
+        curves);
 }
 
 void
@@ -1825,6 +2000,12 @@ resetInputFunctionData(
         this->externalIFPath.clear();
         this->externalIFTimesSec.clear();
         this->externalIFConcentrations.clear();
+        this->imageExternalIFKeep.clear();
+        this->tableExternalIFKeep.clear();
+        this->externalIFPreviewIndexMap.clear();
+        this->externalIFPreviewTimesSec.clear();
+        this->externalIFPreviewDisplayValues.clear();
+        this->externalIFPreviewSelectedIndex = -1;
         this->externalIFZeroAnchorAdded = false;
         this->IFCSVPathEdit->clear();
 
@@ -1977,6 +2158,12 @@ qSlicerDynamicPETModuleWidgetPrivate::
 petStoredActivityUnit() const
 {
     Q_Q(const qSlicerDynamicPETModuleWidget);
+
+    if (this->tableBasedMode)
+    {
+        return this->selectedTableActivityUnit();
+    }
+
     return q->dPETvalueType == "SUVbw"
         ? ActivityUnit::SUVbw
         : ActivityUnit::BqPerMl;
@@ -2006,6 +2193,37 @@ getCommonSUVbwFactor(
     Q_Q(const qSlicerDynamicPETModuleWidget);
 
     factor = 0.0;
+
+    if (this->tableBasedMode)
+    {
+        if (!this->TableSUVbwFactorEdit)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "A SUVbw conversion factor is required for this table-based unit conversion.");
+            }
+            return false;
+        }
+
+        bool ok = false;
+        const double tableFactor =
+            this->TableSUVbwFactorEdit->text().trimmed().toDouble(&ok);
+
+        if (!ok || !std::isfinite(tableFactor) || tableFactor <= 0.0)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "Enter a positive SUVbw conversion factor in Table Setup. "
+                    "It is interpreted using the same convention as the image-based PET SUVbw factor.");
+            }
+            return false;
+        }
+
+        factor = tableFactor;
+        return true;
+    }
 
     if (!this->suvbwFactorValidated || q->suvFactors.empty())
     {
@@ -2153,14 +2371,16 @@ updateQuantitativeUnitUI()
 {
     Q_Q(qSlicerDynamicPETModuleWidget);
 
-    const bool hasPET =
-        q->petID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID &&
-        q->sequencePETNode != nullptr;
+    const bool hasQuantitativeSource =
+        this->tableBasedMode
+        ? this->tableDataLoaded
+        : (q->petID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID &&
+           q->sequencePETNode != nullptr);
 
-    this->QuantitativeDisplayUnitLabel->setEnabled(hasPET);
-    this->QuantitativeDisplayUnitSelector->setEnabled(hasPET);
+    this->QuantitativeDisplayUnitLabel->setEnabled(hasQuantitativeSource);
+    this->QuantitativeDisplayUnitSelector->setEnabled(hasQuantitativeSource);
 
-    if (!hasPET)
+    if (!hasQuantitativeSource)
     {
         return;
     }
@@ -2182,15 +2402,935 @@ updateQuantitativeUnitUI()
 
         if (suvItem)
         {
+            double factor = 0.0;
+            const bool hasSUVFactor = this->getCommonSUVbwFactor(factor, nullptr);
             suvItem->setEnabled(
-                nativeUnit == ActivityUnit::SUVbw || this->suvbwFactorValidated);
+                nativeUnit == ActivityUnit::SUVbw || hasSUVFactor);
         }
         if (bqItem)
         {
+            double factor = 0.0;
+            const bool hasSUVFactor = this->getCommonSUVbwFactor(factor, nullptr);
             bqItem->setEnabled(
-                nativeUnit == ActivityUnit::BqPerMl || this->suvbwFactorValidated);
+                nativeUnit == ActivityUnit::BqPerMl ||
+                nativeUnit == ActivityUnit::KBqPerMl ||
+                hasSUVFactor);
         }
     }
+}
+
+//-----------------------------------------------------------------------------
+ActivityUnit
+qSlicerDynamicPETModuleWidgetPrivate::
+selectedTableActivityUnit() const
+{
+    if (!this->TableActivityUnitSelector)
+    {
+        return ActivityUnit::BqPerMl;
+    }
+
+    switch (this->TableActivityUnitSelector->currentIndex())
+    {
+      case 1:
+        return ActivityUnit::KBqPerMl;
+      case 2:
+        return ActivityUnit::SUVbw;
+      default:
+        return ActivityUnit::BqPerMl;
+    }
+}
+
+//-----------------------------------------------------------------------------
+QString
+qSlicerDynamicPETModuleWidgetPrivate::
+selectedTableTimeMode() const
+{
+    if (!this->TableTimeModeSelector)
+    {
+        return QStringLiteral("end");
+    }
+
+    switch (this->TableTimeModeSelector->currentIndex())
+    {
+      case 1:
+        return QStringLiteral("midpoint");
+      case 0:
+        return QStringLiteral("auto");
+      case 2:
+      default:
+        return QStringLiteral("end");
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+captureActiveTACState(TACModeState& state)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    state.segmentTACs = q->segmentTACs;
+    state.segmentTACsnames = q->segmentTACsnames;
+    state.timePoints = q->timePoints;
+    state.durations = q->durations;
+    state.numberOfTimepoints = q->numberOfTimepoints;
+    state.segmentDisplayOrder = this->segmentDisplayOrder;
+    state.valid = true;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+restoreActiveTACState(const TACModeState& state)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!state.valid)
+    {
+        this->clearActiveTACState();
+        return;
+    }
+
+    q->segmentTACs = state.segmentTACs;
+    q->segmentTACsnames = state.segmentTACsnames;
+    q->timePoints = state.timePoints;
+    q->durations = state.durations;
+    q->numberOfTimepoints = state.numberOfTimepoints;
+    this->segmentDisplayOrder = state.segmentDisplayOrder;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+clearActiveTACState()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    q->segmentTACs.clear();
+    q->segmentTACsnames.clear();
+    q->timePoints.clear();
+    q->durations.clear();
+    q->numberOfTimepoints = 0;
+    this->segmentDisplayOrder.clear();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+setImageSetupVisible(bool visible)
+{
+    this->label1->setVisible(visible);
+    this->PatSelector->setVisible(visible);
+    this->label2->setVisible(visible);
+    this->StuSelector->setVisible(visible);
+    this->label3->setVisible(visible);
+    this->CTSelector->setVisible(visible);
+    this->label4->setVisible(visible);
+    this->PETSelector->setVisible(visible);
+    this->labseg->setVisible(visible);
+    this->SegSelector->setVisible(visible);
+    this->labsegments->setVisible(visible);
+    this->segmentSelectAll->setVisible(visible);
+    this->SegmentCheckScrollArea->setVisible(visible);
+    this->TACbutton->setVisible(visible);
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateTableUnitUI()
+{
+    const bool isSUV =
+        this->selectedTableActivityUnit() == ActivityUnit::SUVbw;
+
+    if (this->TableSUVbwFactorLabel)
+    {
+        this->TableSUVbwFactorLabel->setVisible(isSUV);
+    }
+    if (this->TableSUVbwFactorEdit)
+    {
+        this->TableSUVbwFactorEdit->setVisible(isSUV);
+    }
+
+    this->updateQuantitativeUnitUI();
+}
+
+//-----------------------------------------------------------------------------
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+tissueSigmaForWeighting(
+    const std::string& segmentID,
+    size_t frameIndex,
+    const std::string& statistic,
+    const VoxelStatistics& stats) const
+{
+    if (this->tableBasedMode)
+    {
+        const auto segmentIt = this->tableSigma.find(segmentID);
+        if (segmentIt != this->tableSigma.end())
+        {
+            const auto statIt = segmentIt->second.find(statistic);
+            if (statIt != segmentIt->second.end() &&
+                frameIndex < statIt->second.size())
+            {
+                const double sigma = statIt->second[frameIndex];
+                if (std::isfinite(sigma) && sigma > 0.0)
+                {
+                    return sigma;
+                }
+            }
+        }
+
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    return statisticDispersionSigma(stats, statistic);
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateTableWeightingAvailability()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->tableBasedMode)
+    {
+        this->weightedFitCheckBox->setEnabled(true);
+        this->weightFitCheckBox->setEnabled(true);
+        this->weightFitCheckBox->setToolTip(
+            QObject::tr("ROI WLS uses normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak."));
+        this->weightedFitCheckBox->setToolTip(
+            QObject::tr("Weighted Least Squares using inverse-variance proxy weights: ROI SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak."));
+        return;
+    }
+
+    auto hasCompleteSigma =
+        [this](const std::string& statistic)
+        {
+            if (statistic.empty() || this->tableTACState.segmentTACs.empty())
+            {
+                return false;
+            }
+
+            for (const auto& pair : this->tableTACState.segmentTACs)
+            {
+                const auto segIt = this->tableSigma.find(pair.first);
+                if (segIt == this->tableSigma.end())
+                {
+                    return false;
+                }
+                const auto statIt = segIt->second.find(statistic);
+                if (statIt == segIt->second.end() ||
+                    statIt->second.size() != pair.second.size())
+                {
+                    return false;
+                }
+                for (double sigma : statIt->second)
+                {
+                    if (!std::isfinite(sigma) || sigma <= 0.0)
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        };
+
+    const int tcmIndex = this->StatSelector->currentIndex();
+    const std::string tcmStat =
+        tcmIndex >= 0
+        ? this->StatSelector->itemData(tcmIndex).toString().toStdString()
+        : std::string();
+
+    const int mtgaIndex = this->StatSelectorMTGA->currentIndex();
+    const std::string mtgaStat =
+        mtgaIndex >= 0
+        ? this->StatSelectorMTGA->itemData(mtgaIndex).toString().toStdString()
+        : std::string();
+
+    const bool tcmHasSigma = hasCompleteSigma(tcmStat);
+    const bool mtgaHasSigma = hasCompleteSigma(mtgaStat);
+
+    if (!tcmHasSigma && this->weightFitCheckBox->isChecked())
+    {
+        this->weightFitCheckBox->setChecked(false);
+    }
+    if (!mtgaHasSigma && this->weightedFitCheckBox->isChecked())
+    {
+        this->weightedFitCheckBox->setChecked(false);
+    }
+
+    this->weightFitCheckBox->setEnabled(tcmHasSigma);
+    this->weightedFitCheckBox->setEnabled(mtgaHasSigma);
+
+    this->weightFitCheckBox->setToolTip(
+        tcmHasSigma
+        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty.")
+        : QObject::tr("Weighted least squares is unavailable because the selected table TAC does not provide a complete positive uncertainty series."));
+
+    this->weightedFitCheckBox->setToolTip(
+        mtgaHasSigma
+        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty.")
+        : QObject::tr("Weighted least squares is unavailable because the selected table TAC does not provide a complete positive uncertainty series."));
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+rebuildTACStatisticUI()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    std::vector<TACStatisticOption> fitOptions;
+    std::vector<TACStatisticOption> plotOptions;
+
+    if (this->tableBasedMode)
+    {
+        fitOptions = this->tableFitStatistics;
+        plotOptions = this->tablePlotStatistics;
+    }
+    else
+    {
+        fitOptions = {
+            {QObject::tr("Mean"), "Mean"},
+            {QObject::tr("Median"), "Median"},
+            {QObject::tr("Peak"), "Peak"}
+        };
+        plotOptions = {
+            {QObject::tr("Mean"), "Mean"},
+            {QObject::tr("Median"), "Median"},
+            {QObject::tr("Peak"), "Peak"},
+            {QObject::tr("Min"), "Min"},
+            {QObject::tr("Max"), "Max"}
+        };
+    }
+
+    auto rebuildCombo =
+        [](QComboBox* combo, const std::vector<TACStatisticOption>& options)
+        {
+            QSignalBlocker blocker(combo);
+            combo->clear();
+            for (const TACStatisticOption& option : options)
+            {
+                combo->addItem(option.label, QString::fromStdString(option.id));
+            }
+            if (combo->count() > 0)
+            {
+                combo->setCurrentIndex(0);
+            }
+        };
+
+    rebuildCombo(this->StatSelector, fitOptions);
+    rebuildCombo(this->StatSelectorMTGA, fitOptions);
+
+    while (QLayoutItem* item = this->PlotStatsCheckLayout->takeAt(0))
+    {
+        delete item->widget();
+        delete item;
+    }
+
+    for (const TACStatisticOption& option : plotOptions)
+    {
+        QCheckBox* cb = new QCheckBox(option.label, this->PlotStatsCheckContents);
+        cb->setProperty("StatID", QString::fromStdString(option.id));
+        this->PlotStatsCheckLayout->addWidget(cb);
+    }
+
+    this->updateTableWeightingAvailability();
+    q->clearFITdata();
+    q->clearFITMTGAdata();
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+loadTableWorkbook(
+    const QString& filePath,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (filePath.trimmed().isEmpty() || !QFileInfo::exists(filePath))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("The selected TAC workbook does not exist.");
+        }
+        return false;
+    }
+
+    PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+    const QVariant resultVariant = mainContext.call(
+        "DPE_load_tac_workbook",
+        QVariantList{filePath, this->selectedTableTimeMode()});
+
+    const QVariantMap result = resultVariant.toMap();
+    if (!result.value("ok").toBool())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = result.value("error").toString();
+        }
+        return false;
+    }
+
+    TACModeState newState;
+    newState.valid = true;
+    this->tableSigma.clear();
+    this->tableFitStatistics.clear();
+    this->tablePlotStatistics.clear();
+    this->tablePlotTimesSec.clear();
+
+    const QVariantList fitStats = result.value("fit_stats").toList();
+    for (const QVariant& statVariant : fitStats)
+    {
+        const QVariantMap stat = statVariant.toMap();
+        TACStatisticOption option;
+        option.id = stat.value("id").toString().toStdString();
+        option.label = stat.value("label").toString();
+        if (!option.id.empty())
+        {
+            this->tableFitStatistics.push_back(option);
+        }
+    }
+
+    const QVariantList plotStats = result.value("plot_stats").toList();
+    for (const QVariant& statVariant : plotStats)
+    {
+        const QVariantMap stat = statVariant.toMap();
+        TACStatisticOption option;
+        option.id = stat.value("id").toString().toStdString();
+        option.label = stat.value("label").toString();
+        if (!option.id.empty())
+        {
+            this->tablePlotStatistics.push_back(option);
+        }
+    }
+
+    const QVariantList plotTimes = result.value("plot_times_sec").toList();
+    for (const QVariant& value : plotTimes)
+    {
+        this->tablePlotTimesSec.push_back(value.toDouble());
+    }
+
+    const QVariantList rois = result.value("rois").toList();
+    if (rois.isEmpty())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("The workbook contains no usable ROI sheets.");
+        }
+        return false;
+    }
+
+    auto numericOrNaN = [](const QVariantMap& row, const QString& key)
+    {
+        const QVariant value = row.value(key);
+        if (!value.isValid() || value.isNull())
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        bool ok = false;
+        const double d = value.toDouble(&ok);
+        return ok ? d : std::numeric_limits<double>::quiet_NaN();
+    };
+
+    bool timingInitialized = false;
+    int roiCounter = 0;
+
+    for (const QVariant& roiVariant : rois)
+    {
+        const QVariantMap roi = roiVariant.toMap();
+        const QString roiName = roi.value("name").toString().trimmed();
+        const QVariantList rows = roi.value("rows").toList();
+
+        if (roiName.isEmpty() || rows.isEmpty())
+        {
+            continue;
+        }
+
+        const std::string segmentID =
+            std::string("table::") + std::to_string(roiCounter++);
+
+        std::vector<VoxelStatistics> statsVector;
+        statsVector.reserve(rows.size());
+
+        std::map<std::string, std::vector<double>> sigmaByStat;
+        sigmaByStat["Mean"].reserve(rows.size());
+        sigmaByStat["Median"].reserve(rows.size());
+        sigmaByStat["Peak"].reserve(rows.size());
+
+        std::vector<double> localEnds;
+        std::vector<double> localDurations;
+        localEnds.reserve(rows.size());
+        localDurations.reserve(rows.size());
+
+        for (const QVariant& rowVariant : rows)
+        {
+            const QVariantMap row = rowVariant.toMap();
+
+            VoxelStatistics vs;
+            vs.mean = numericOrNaN(row, "Mean");
+            vs.median = numericOrNaN(row, "Median");
+            vs.min = numericOrNaN(row, "Min");
+            vs.max = numericOrNaN(row, "Max");
+            vs.stddev = numericOrNaN(row, "StDev");
+            vs.q1 = numericOrNaN(row, "Q1");
+            vs.q3 = numericOrNaN(row, "Q3");
+            vs.iqr = numericOrNaN(row, "IQR");
+            vs.volume_mm3 = numericOrNaN(row, "Volume(mm3)");
+            vs.volume_cm3 = numericOrNaN(row, "Volume(cm3)");
+            vs.peak = numericOrNaN(row, "Peak");
+            vs.peakStddev = numericOrNaN(row, "PeakStDev");
+            vs.count = row.value("VoxelCount").toInt();
+            vs.peakCount = row.value("PeakVoxelCount").toInt();
+            vs.keep = true;
+            vs.empty = false;
+            statsVector.push_back(vs);
+
+            sigmaByStat["Mean"].push_back(numericOrNaN(row, "MeanSigma"));
+            sigmaByStat["Median"].push_back(numericOrNaN(row, "MedianSigma"));
+            sigmaByStat["Peak"].push_back(numericOrNaN(row, "PeakSigma"));
+
+            localEnds.push_back(row.value("FrameEnd_s").toDouble());
+            localDurations.push_back(row.value("Duration_s").toDouble());
+        }
+
+        if (!timingInitialized)
+        {
+            newState.timePoints = localEnds;
+            newState.durations = localDurations;
+            newState.numberOfTimepoints = static_cast<int>(rows.size());
+            timingInitialized = true;
+        }
+
+        newState.segmentTACs[segmentID] = std::move(statsVector);
+        newState.segmentTACsnames[segmentID] = roiName.toStdString();
+        newState.segmentDisplayOrder.push_back(segmentID);
+        this->tableSigma[segmentID] = std::move(sigmaByStat);
+    }
+
+    if (newState.segmentTACs.empty() ||
+        newState.timePoints.empty() ||
+        newState.durations.size() != newState.timePoints.size())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("The workbook did not produce a valid shared TAC time grid.");
+        }
+        return false;
+    }
+
+    this->tableTACState = std::move(newState);
+    this->tableDataLoaded = true;
+    this->tableWorkbookPath = filePath;
+    this->tableFramingExact = result.value("framing_exact").toBool();
+    this->tableTimingSummary = result.value("timing_summary").toString();
+
+    // A newly loaded workbook must never inherit a conversion factor from
+    // the previously loaded table. Metadata below may repopulate it.
+    this->TableSUVbwFactorEdit->clear();
+
+    const QVariantMap metadata = result.value("metadata").toMap();
+    QString activityUnit = metadata.value("ActivityUnit").toString().trimmed();
+    if (activityUnit.isEmpty())
+    {
+        activityUnit = result.value("suggested_activity_unit").toString().trimmed();
+    }
+
+    if (!activityUnit.isEmpty())
+    {
+        QSignalBlocker blocker(this->TableActivityUnitSelector);
+        if (activityUnit.compare("SUVbw", Qt::CaseInsensitive) == 0 ||
+            activityUnit.compare("SUV", Qt::CaseInsensitive) == 0)
+        {
+            this->TableActivityUnitSelector->setCurrentIndex(2);
+        }
+        else if (activityUnit.compare("kBq/mL", Qt::CaseInsensitive) == 0)
+        {
+            this->TableActivityUnitSelector->setCurrentIndex(1);
+        }
+        else if (activityUnit.compare("Bq/mL", Qt::CaseInsensitive) == 0)
+        {
+            this->TableActivityUnitSelector->setCurrentIndex(0);
+        }
+    }
+
+    const QVariant factor = metadata.value("SUVbwFactor");
+    if (factor.isValid() && !factor.isNull())
+    {
+        bool ok = false;
+        const double value = factor.toDouble(&ok);
+        if (ok && std::isfinite(value) && value > 0.0)
+        {
+            this->TableSUVbwFactorEdit->setText(QString::number(value, 'g', 12));
+        }
+    }
+
+    this->TableWorkbookPathEdit->setText(filePath);
+    this->updateTableUnitUI();
+
+    if (this->tableBasedMode)
+    {
+        this->restoreActiveTACState(this->tableTACState);
+        this->rebuildTACStatisticUI();
+        this->populatePlotSegmentCheckboxes();
+
+        // A new workbook is a new table dataset. Do not silently carry a
+        // table-ROI IF identity across files, but keep the chosen source type.
+        this->tableIFID.clear();
+        q->IFID.clear();
+        this->populateIF();
+        this->populateVOI(std::string());
+        this->populateVOIMTGA(std::string());
+        this->populateTimeBarMTGA();
+        this->invalidateInputFunctionResults();
+        this->updateInputFunctionStatus();
+        this->setPostTACEnabled(true);
+    }
+
+    const QString framingLabel = this->tableFramingExact
+        ? QObject::tr("exact framing")
+        : QObject::tr("inferred framing");
+
+    const double acquisitionEndSec =
+        this->tableTACState.timePoints.empty()
+        ? 0.0
+        : this->tableTACState.timePoints.back();
+
+    this->TableStatusLabel->setText(
+        QObject::tr("Loaded %1 ROIs, %2 frames | end=%3 s | %4 | %5")
+            .arg(static_cast<qulonglong>(this->tableTACState.segmentTACs.size()))
+            .arg(this->tableTACState.numberOfTimepoints)
+            .arg(acquisitionEndSec, 0, 'g', 10)
+            .arg(framingLabel)
+            .arg(this->tableTimingSummary));
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+clearTableWorkbook()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    this->tableDataLoaded = false;
+    this->tableTACState = TACModeState{};
+    this->tableSigma.clear();
+    this->tableFitStatistics.clear();
+    this->tablePlotStatistics.clear();
+    this->tablePlotTimesSec.clear();
+    this->tableWorkbookPath.clear();
+    this->tableFramingExact = false;
+    this->tableTimingSummary.clear();
+
+    if (this->TableWorkbookPathEdit)
+    {
+        this->TableWorkbookPathEdit->clear();
+    }
+    if (this->TableSUVbwFactorEdit)
+    {
+        this->TableSUVbwFactorEdit->clear();
+    }
+    if (this->TableStatusLabel)
+    {
+        this->TableStatusLabel->setText(QObject::tr("No table TAC workbook loaded."));
+    }
+
+    if (this->tableBasedMode)
+    {
+        this->tableIFID.clear();
+        q->IFID.clear();
+        this->clearActiveTACState();
+        this->rebuildTACStatisticUI();
+        this->populateIF();
+        this->populatePlotSegmentCheckboxes();
+        this->populateVOI(std::string());
+        this->populateVOIMTGA(std::string());
+        this->invalidateInputFunctionResults();
+        this->updateInputFunctionStatus();
+        this->setPostTACEnabled(false);
+        this->updateQuantitativeUnitUI();
+        q->RemoveExistingPlotChartAndTable();
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+setTableBasedMode(bool enabled)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (enabled == this->tableBasedMode)
+    {
+        return;
+    }
+
+    q->RemoveExistingPlotChartAndTable();
+    q->clearFITdata();
+    q->clearFITMTGAdata();
+
+    if (enabled)
+    {
+        // Save image-mode state before switching sources.
+        this->captureActiveTACState(this->imageTACState);
+        this->imageIFSourceIndex = this->IFSourceSelector->currentIndex();
+        this->imageIFID = q->IFID;
+
+        this->tableBasedMode = true;
+        this->setImageSetupVisible(false);
+        this->TableSetupGroupBox->setVisible(true);
+        this->IFSourceSelector->setItemText(0, QObject::tr("Table ROI (IDIF)"));
+        this->IFLabel->setText(QObject::tr("IDIF table ROI:"));
+
+        if (this->tableDataLoaded)
+        {
+            this->restoreActiveTACState(this->tableTACState);
+        }
+        else
+        {
+            this->clearActiveTACState();
+        }
+
+        q->IFID = this->tableIFID;
+        this->rebuildTACStatisticUI();
+        this->populateIF();
+
+        {
+            QSignalBlocker blocker(this->IFSourceSelector);
+            this->IFSourceSelector->setCurrentIndex(
+                std::clamp(this->tableIFSourceIndex, 0, 1));
+        }
+
+        if (this->tableIFSourceIndex == 0)
+        {
+            const int index = this->IFSelector->findData(
+                QString::fromStdString(this->tableIFID));
+            QSignalBlocker blocker(this->IFSelector);
+            this->IFSelector->setCurrentIndex(index >= 0 ? index : 0);
+            q->IFID = index >= 0 ? this->tableIFID : std::string();
+        }
+        else
+        {
+            q->IFID.clear();
+        }
+
+        this->populatePlotSegmentCheckboxes();
+        this->populateVOI(this->tableIFSourceIndex == 0 ? q->IFID : std::string());
+        this->populateVOIMTGA(this->tableIFSourceIndex == 0 ? q->IFID : std::string());
+        if (this->tableDataLoaded)
+        {
+            this->populateTimeBarMTGA();
+        }
+    }
+    else
+    {
+        if (this->tableDataLoaded)
+        {
+            this->captureActiveTACState(this->tableTACState);
+        }
+        this->tableIFSourceIndex = this->IFSourceSelector->currentIndex();
+        this->tableIFID = q->IFID;
+
+        this->tableBasedMode = false;
+        this->setImageSetupVisible(true);
+        this->TableSetupGroupBox->setVisible(false);
+        this->IFSourceSelector->setItemText(0, QObject::tr("Segment (IDIF)"));
+        this->IFLabel->setText(QObject::tr("IDIF segment:"));
+
+        this->restoreActiveTACState(this->imageTACState);
+        q->IFID = this->imageIFID;
+        this->rebuildTACStatisticUI();
+        this->populateIF();
+
+        {
+            QSignalBlocker blocker(this->IFSourceSelector);
+            this->IFSourceSelector->setCurrentIndex(
+                std::clamp(this->imageIFSourceIndex, 0, 1));
+        }
+
+        if (this->imageIFSourceIndex == 0)
+        {
+            const int index = this->IFSelector->findData(
+                QString::fromStdString(this->imageIFID));
+            QSignalBlocker blocker(this->IFSelector);
+            this->IFSelector->setCurrentIndex(index >= 0 ? index : 0);
+            q->IFID = index >= 0 ? this->imageIFID : std::string();
+        }
+        else
+        {
+            q->IFID.clear();
+        }
+
+        this->populatePlotSegmentCheckboxes();
+        this->populateVOI(this->imageIFSourceIndex == 0 ? q->IFID : std::string());
+        this->populateVOIMTGA(this->imageIFSourceIndex == 0 ? q->IFID : std::string());
+        if (!q->timePoints.empty())
+        {
+            this->populateTimeBarMTGA();
+        }
+
+        // The subject hierarchy may have changed while table mode was active.
+        q->onSubjectHierarchyChanged();
+    }
+
+    // Both source choices are valid in either mode: source 0 is an image
+    // Segment IDIF in Image mode and a table ROI IDIF in Table mode; source 1
+    // is the shared external CSV workflow. Re-enable explicitly so no stale
+    // item state survives a mode switch.
+    if (QStandardItemModel* sourceModel =
+            qobject_cast<QStandardItemModel*>(this->IFSourceSelector->model()))
+    {
+        if (sourceModel->item(0)) sourceModel->item(0)->setEnabled(true);
+        if (sourceModel->item(1)) sourceModel->item(1)->setEnabled(true);
+    }
+
+    // Image-only controls are hidden, not merely disabled, in table mode.
+    this->PlotLiveSegEdit->setVisible(!this->tableBasedMode);
+    this->Plottacsave->setVisible(!this->tableBasedMode);
+    this->direxcel->setVisible(!this->tableBasedMode);
+    this->fileexcel->setVisible(!this->tableBasedMode);
+    this->saveExcelButton->setVisible(!this->tableBasedMode);
+
+    const int imagingIndex = this->PlotsTabWidget->indexOf(this->ImagingWidget);
+    if (imagingIndex >= 0)
+    {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        this->PlotsTabWidget->setTabVisible(imagingIndex, !this->tableBasedMode);
+#else
+        this->PlotsTabWidget->setTabEnabled(imagingIndex, !this->tableBasedMode);
+#endif
+    }
+
+    this->externalIFPreviewSelectedIndex = -1;
+    this->invalidateInputFunctionResults();
+    this->updateTableUnitUI();
+    this->updateInputFunctionStatus();
+    this->setPostTACEnabled(!q->segmentTACs.empty());
+    this->updateParametricImagingAvailability();
+
+    // Force layouts to recompute after a mode switch; this minimizes dead
+    // vertical space without adding another nested/scrolling UI hierarchy.
+    this->verticalLayout->invalidate();
+    this->TACwidget->adjustSize();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+initializeTableBasedUI()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    // All widgets in this section are defined in the .ui file so the layout
+    // remains editable in Qt Designer. Do not create duplicate controls here.
+    this->TableSetupGroupBox->setVisible(false);
+    this->verticalLayout->setAlignment(Qt::AlignTop);
+
+    QObject::connect(
+        this->TableBasedAnalysisCheckBox,
+        &QCheckBox::toggled,
+        q,
+        [this](bool checked)
+        {
+            this->setTableBasedMode(checked);
+        });
+
+    QObject::connect(
+        this->TableWorkbookBrowseButton,
+        &QPushButton::clicked,
+        q,
+        [this, q]()
+        {
+            const QString path = QFileDialog::getOpenFileName(
+                q,
+                QObject::tr("Select ROI TAC workbook"),
+                this->tableWorkbookPath,
+                QObject::tr("Excel workbooks (*.xlsx)"));
+
+            if (path.isEmpty())
+            {
+                return;
+            }
+
+            QString error;
+            if (!this->loadTableWorkbook(path, &error))
+            {
+                QMessageBox::warning(q, QObject::tr("Table-based TACs"), error);
+            }
+        });
+
+    QObject::connect(
+        this->TableWorkbookClearButton,
+        &QPushButton::clicked,
+        q,
+        [this]()
+        {
+            this->clearTableWorkbook();
+        });
+
+    QObject::connect(
+        this->TableTimeModeSelector,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        q,
+        [this, q](int)
+        {
+            if (this->tableWorkbookPath.isEmpty())
+            {
+                return;
+            }
+            QString error;
+            if (!this->loadTableWorkbook(this->tableWorkbookPath, &error))
+            {
+                QMessageBox::warning(q, QObject::tr("Table-based TACs"), error);
+            }
+        });
+
+    QObject::connect(
+        this->TableActivityUnitSelector,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        q,
+        [this](int)
+        {
+            this->updateTableUnitUI();
+            this->invalidateInputFunctionResults();
+            this->updateInputFunctionStatus();
+        });
+
+    QObject::connect(
+        this->TableSUVbwFactorEdit,
+        &QLineEdit::editingFinished,
+        q,
+        [this]()
+        {
+            this->updateTableUnitUI();
+            this->invalidateInputFunctionResults();
+            this->updateInputFunctionStatus();
+        });
+
+    QObject::connect(
+        this->StatSelector,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        q,
+        [this](int)
+        {
+            this->updateTableWeightingAvailability();
+        });
+
+    QObject::connect(
+        this->StatSelectorMTGA,
+        QOverload<int>::of(&QComboBox::currentIndexChanged),
+        q,
+        [this](int)
+        {
+            this->updateTableWeightingAvailability();
+        });
+
+    this->updateTableUnitUI();
 }
 
 //-----------------------------------------------------------------------------
@@ -2198,6 +3338,14 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
   this->setupUi(q);
+  this->initializeTableBasedUI();
+
+  this->PlotLiveSegEdit->setToolTip(
+      QObject::tr(
+          "Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections."));
+  this->RESETbutton->setToolTip(
+      QObject::tr(
+          "Restore points removed from the active mode's tissue TACs and external input function."));
 
   this->suvbwFactorValidated = false;
   this->updateQuantitativeUnitUI();
@@ -2229,6 +3377,11 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
         q,
         [this, q](int source)
         {
+            if (this->tableBasedMode)
+                this->tableIFSourceIndex = source;
+            else
+                this->imageIFSourceIndex = source;
+
             if (source == 0)
             {
                 const int index =
@@ -2260,7 +3413,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                 excludedVOI);
 
             this->invalidateInputFunctionResults();
-            this->updateInputFunctionUI();
+            this->updateInputFunctionStatus();
         });
 
     QObject::connect(
@@ -2317,7 +3470,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                 setText(path);
 
             this->invalidateInputFunctionResults();
-            this->updateInputFunctionUI();
+            this->updateInputFunctionStatus();
         });
 
 
@@ -2357,20 +3510,6 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
         q,
         onPBRChanged);
 
-  }
-
-  // Future parent-fraction models are visible but disabled.
-  if (QStandardItemModel* model =
-          qobject_cast<QStandardItemModel*>(
-              this->ParentFractionProcessingSelector->model()))
-  {
-      for (int i = 1; i < model->rowCount(); ++i)
-      {
-          if (model->item(i))
-          {
-              model->item(i)->setEnabled(false);
-          }
-      }
   }
 
   this->IFCurveTypeSelector->setCurrentIndex(0);
@@ -2713,6 +3852,31 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           this->previewInputFunction();
       });
 
+  QObject::connect(
+      this->IFExportButton,
+      &QPushButton::clicked,
+      q,
+      [this, q]()
+      {
+          QString filePath = QFileDialog::getSaveFileName(
+              q,
+              QObject::tr("Export final input function"),
+              QStringLiteral("DynamicPET_final_IF.csv"),
+              QObject::tr("CSV files (*.csv)"));
+          if (filePath.isEmpty())
+              return;
+          if (!filePath.endsWith(".csv", Qt::CaseInsensitive))
+              filePath += ".csv";
+
+          QString error;
+          if (!this->exportFinalInputFunctionCSV(filePath, &error))
+          {
+              QMessageBox::warning(q, QObject::tr("Export input function"), error);
+          }
+      });
+
+
+  this->IFExportButton->setEnabled(false);
 
   this->StuSelector->setEnabled(false);
   this->CTSelector->setEnabled(false);
@@ -2984,6 +4148,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   for (const QString& name : q->checkboxNames)
   {
     QCheckBox* cb = new QCheckBox(name, this->PlotStatsCheckContents);
+    cb->setProperty("StatID", name);
     this->PlotStatsCheckLayout->addWidget(cb);
   }
 
@@ -3002,10 +4167,19 @@ except ImportError:
     import slicer
     slicer.util.pip_install("xlsxwriter")
 
+try:
+    import openpyxl
+except ImportError:
+    import slicer
+    slicer.util.pip_install("openpyxl")
+
 import importlib
 import importlib.metadata
 import sys
 import slicer
+
+def DPE_console_message(message):
+    print(message)
 
 DPE_HIGHDICOM_REQUIRED_VERSION = "0.28.1"
 
@@ -3069,15 +4243,376 @@ except ImportError:
     import slicer
     slicer.util.pip_install("numpy")
 
-def DPE_save_multisheet_excel(filepath, sheet_data_dict):
+def DPE_save_multisheet_excel(filepath, sheet_data_dict, metadata=None):
     """
-    filepath: str - full path to xlsx
-    sheet_data_dict: dict[str, list[list[str]]] - sheet name to 2D table
+    Save the detailed DynamicPET TAC workbook.  ROI sheet names remain ROI
+    names.  The optional _DynamicPET sheet is deliberately small and optional
+    so that externally produced workbooks do not need to reproduce it.
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
             df = pd.DataFrame(data)[["Time(s)", "FrameStart_s", "FrameMid_s", "FrameEnd_s", "Duration_s", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "Peak", "PeakStDev", "PeakVoxelCount", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
             df.to_excel(writer, sheet_name=sheet, index=False)
+
+        if metadata:
+            md = pd.DataFrame(
+                [{"Key": str(k), "Value": v} for k, v in metadata.items()]
+            )
+            md.to_excel(writer, sheet_name="_DynamicPET", index=False)
+
+
+def DPE_load_tac_workbook(filepath, time_mode="auto"):
+    """
+    Normalize a sheet-per-ROI workbook for the C++ widget.
+
+    Minimum per ROI sheet:
+      * one numeric time column
+      * one numeric TAC value column
+
+    Exact frame start/end/duration columns are used when available.  If only a
+    representative time exists, a contiguous frame schedule is inferred.  A
+    generic time is interpreted as frame end in Auto mode.
+    """
+    import math
+    import re
+
+    def norm(name):
+        return re.sub(r"[^a-z0-9]+", "", str(name).strip().lower())
+
+    def col_lookup(df):
+        return {norm(c): c for c in df.columns}
+
+    def find_col(lookup, aliases):
+        for alias in aliases:
+            key = norm(alias)
+            if key in lookup:
+                return lookup[key]
+        return None
+
+    def numeric_list(df, column):
+        if column is None:
+            return None
+        values = pd.to_numeric(df[column], errors="coerce")
+        if values.isna().any():
+            return None
+        return [float(v) for v in values.tolist()]
+
+    def optional_value(row, column):
+        if column is None:
+            return None
+        value = row[column]
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    try:
+        xls = pd.ExcelFile(filepath)
+    except Exception as exc:
+        return {"ok": False, "error": "Could not open Excel workbook: " + str(exc)}
+
+    metadata = {}
+    if "_DynamicPET" in xls.sheet_names:
+        try:
+            md = pd.read_excel(filepath, sheet_name="_DynamicPET")
+            if "Key" in md.columns and "Value" in md.columns:
+                for _, row in md.iterrows():
+                    key = str(row["Key"]).strip()
+                    if key and key.lower() != "nan":
+                        value = row["Value"]
+                        if not pd.isna(value):
+                            metadata[key] = value.item() if hasattr(value, "item") else value
+        except Exception:
+            metadata = {}
+
+    roi_sheet_names = [s for s in xls.sheet_names if s != "_DynamicPET"]
+    if not roi_sheet_names:
+        return {"ok": False, "error": "No ROI worksheets were found."}
+
+    normalized_rois = []
+    reference_ends = None
+    reference_durations = None
+    reference_plot_times = None
+    framing_exact_all = True
+    timing_summaries = []
+    common_fit_ids = None
+    common_plot_ids = None
+    labels_by_id = {}
+    suggested_units = []
+
+    for sheet_name in roi_sheet_names:
+        try:
+            df = pd.read_excel(filepath, sheet_name=sheet_name)
+        except Exception as exc:
+            return {"ok": False, "error": f"Could not read ROI sheet '{sheet_name}': {exc}"}
+
+        df = df.dropna(how="all").reset_index(drop=True)
+        if df.empty:
+            continue
+
+        df.columns = [str(c).strip() for c in df.columns]
+        lookup = col_lookup(df)
+
+        start_col = find_col(lookup, ["FrameStart_s", "FrameStart", "Start_s", "Start"])
+        mid_col = find_col(lookup, ["FrameMid_s", "FrameMid", "MidTime_s", "MidTime", "Midpoint_s", "Midpoint"])
+        end_col = find_col(lookup, ["FrameEnd_s", "FrameEnd", "End_s", "End"])
+        duration_col = find_col(lookup, ["Duration_s", "FrameDuration_s", "Duration", "FrameDuration"])
+        generic_time_col = find_col(lookup, ["Time(s)", "Time_s", "Time", "time_sec", "Seconds"])
+
+        starts = numeric_list(df, start_col)
+        mids = numeric_list(df, mid_col)
+        ends = numeric_list(df, end_col)
+        durations = numeric_list(df, duration_col)
+        generic_times = numeric_list(df, generic_time_col)
+
+        exact_framing = starts is not None and ends is not None
+
+        if exact_framing:
+            if durations is None:
+                durations = [b - a for a, b in zip(starts, ends)]
+            if mids is None:
+                mids = [a + 0.5 * d for a, d in zip(starts, durations)]
+            plot_times = generic_times if generic_times is not None else mids
+            timing_summary = "exact frame start/end"
+        else:
+            framing_exact_all = False
+            rep = None
+            convention = str(time_mode or "auto").lower()
+
+            if convention == "auto":
+                if mids is not None:
+                    rep = mids
+                    convention = "midpoint"
+                elif ends is not None:
+                    rep = ends
+                    convention = "end"
+                elif generic_times is not None:
+                    rep = generic_times
+                    convention = "end"
+                else:
+                    return {"ok": False, "error": f"ROI sheet '{sheet_name}' has no usable time column."}
+            elif convention == "midpoint":
+                rep = mids if mids is not None else generic_times
+                if rep is None:
+                    rep = ends
+            elif convention == "end":
+                rep = ends if ends is not None else generic_times
+                if rep is None:
+                    rep = mids
+            else:
+                return {"ok": False, "error": "Unknown table time convention."}
+
+            if rep is None or len(rep) < 2:
+                return {"ok": False, "error": f"ROI sheet '{sheet_name}' needs at least two time points when framing must be inferred."}
+
+            if any(rep[i] <= rep[i - 1] for i in range(1, len(rep))):
+                return {"ok": False, "error": f"Time values in ROI sheet '{sheet_name}' must be strictly increasing."}
+
+            if durations is not None:
+                if convention == "midpoint":
+                    mids = rep
+                    starts = [t - 0.5 * d for t, d in zip(rep, durations)]
+                    ends = [t + 0.5 * d for t, d in zip(rep, durations)]
+                else:
+                    ends = rep
+                    starts = [t - d for t, d in zip(rep, durations)]
+                    mids = [a + 0.5 * d for a, d in zip(starts, durations)]
+            elif convention == "end":
+                ends = rep
+                starts = [0.0] + list(rep[:-1])
+                durations = [b - a for a, b in zip(starts, ends)]
+                mids = [a + 0.5 * d for a, d in zip(starts, durations)]
+            else:
+                mids = rep
+                boundaries = [max(0.0, rep[0] - 0.5 * (rep[1] - rep[0]))]
+                boundaries += [0.5 * (rep[i - 1] + rep[i]) for i in range(1, len(rep))]
+                boundaries += [rep[-1] + 0.5 * (rep[-1] - rep[-2])]
+                starts = boundaries[:-1]
+                ends = boundaries[1:]
+                durations = [b - a for a, b in zip(starts, ends)]
+
+            plot_times = rep
+            timing_summary = "inferred from " + ("frame midpoint" if convention == "midpoint" else "frame end")
+
+        if any((not math.isfinite(d)) or d <= 0.0 for d in durations):
+            return {"ok": False, "error": f"ROI sheet '{sheet_name}' produced non-positive frame durations."}
+
+        if any(s < -1e-9 for s in starts):
+            return {"ok": False, "error": f"ROI sheet '{sheet_name}' produced a frame start before 0 s. Check the selected time convention."}
+
+        # TAC columns. DynamicPET columns are recognized first; a simple foreign
+        # workbook can instead supply Value/TAC/Activity/Concentration/SUV.
+        mean_col = find_col(lookup, ["Mean"])
+        median_col = find_col(lookup, ["Median"])
+        peak_col = find_col(lookup, ["Peak", "SUVpeak"])
+        generic_value_col = find_col(lookup, ["Value", "TAC", "Activity", "Concentration", "Radioactivity", "SUVbw", "SUV"])
+
+        stat_columns = {}
+        stat_labels = {}
+        if mean_col is not None:
+            stat_columns["Mean"] = mean_col
+            stat_labels["Mean"] = "Mean"
+        if median_col is not None:
+            stat_columns["Median"] = median_col
+            stat_labels["Median"] = "Median"
+        if peak_col is not None:
+            stat_columns["Peak"] = peak_col
+            stat_labels["Peak"] = "Peak"
+
+        if not stat_columns and generic_value_col is not None:
+            stat_columns["Mean"] = generic_value_col
+            stat_labels["Mean"] = str(generic_value_col)
+            n = norm(generic_value_col)
+            if "suv" in n:
+                suggested_units.append("SUVbw")
+
+        if not stat_columns:
+            return {"ok": False, "error": f"ROI sheet '{sheet_name}' has no recognized TAC value column (for example Mean, Value, TAC, Activity, Concentration, or SUV)."}
+
+        # Require the chosen fit statistic to exist for every ROI. The common
+        # set is exposed to the GUI after all sheets have been inspected.
+        fit_ids = set(stat_columns.keys())
+
+        min_col = find_col(lookup, ["Min", "Minimum"])
+        max_col = find_col(lookup, ["Max", "Maximum"])
+        plot_ids = set(fit_ids)
+        if min_col is not None:
+            plot_ids.add("Min")
+            stat_labels["Min"] = "Min"
+        if max_col is not None:
+            plot_ids.add("Max")
+            stat_labels["Max"] = "Max"
+
+        common_fit_ids = fit_ids if common_fit_ids is None else common_fit_ids.intersection(fit_ids)
+        common_plot_ids = plot_ids if common_plot_ids is None else common_plot_ids.intersection(plot_ids)
+        for key, value in stat_labels.items():
+            labels_by_id.setdefault(key, []).append(value)
+
+        stdev_col = find_col(lookup, ["StDev", "StdDev", "StandardDeviation", "SD"])
+        iqr_col = find_col(lookup, ["IQR", "InterquartileRange"])
+        peak_stdev_col = find_col(lookup, ["PeakStDev", "PeakStdDev", "SUVpeakStDev"])
+        generic_sigma_col = find_col(lookup, ["Sigma", "Uncertainty", "Error", "SEM", "StandardError"])
+
+        q1_col = find_col(lookup, ["Q1"])
+        q3_col = find_col(lookup, ["Q3"])
+        voxel_count_col = find_col(lookup, ["VoxelCount", "Count"])
+        peak_count_col = find_col(lookup, ["PeakVoxelCount"])
+        vol_mm3_col = find_col(lookup, ["Volume(mm3)", "Volume_mm3", "VolumeMM3"])
+        vol_cm3_col = find_col(lookup, ["Volume(cm3)", "Volume_cm3", "VolumeCC", "Volume(cc)"])
+
+        rows = []
+        for i, (_, source_row) in enumerate(df.iterrows()):
+            row = {
+                "FrameStart_s": float(starts[i]),
+                "FrameMid_s": float(mids[i]),
+                "FrameEnd_s": float(ends[i]),
+                "Duration_s": float(durations[i]),
+            }
+
+            for stat_id, column in stat_columns.items():
+                row[stat_id] = optional_value(source_row, column)
+
+            row["Min"] = optional_value(source_row, min_col)
+            row["Max"] = optional_value(source_row, max_col)
+            row["StDev"] = optional_value(source_row, stdev_col)
+            row["IQR"] = optional_value(source_row, iqr_col)
+            row["Q1"] = optional_value(source_row, q1_col)
+            row["Q3"] = optional_value(source_row, q3_col)
+            row["PeakStDev"] = optional_value(source_row, peak_stdev_col)
+            row["VoxelCount"] = optional_value(source_row, voxel_count_col)
+            row["PeakVoxelCount"] = optional_value(source_row, peak_count_col)
+            row["Volume(mm3)"] = optional_value(source_row, vol_mm3_col)
+            row["Volume(cm3)"] = optional_value(source_row, vol_cm3_col)
+
+            # Normalize uncertainty to one-sigma values for WLS, irrespective
+            # of whether the workbook stored SD, IQR or an explicit sigma/SEM.
+            mean_sigma = optional_value(source_row, stdev_col)
+            if mean_sigma is None and "Mean" in stat_columns:
+                mean_sigma = optional_value(source_row, generic_sigma_col)
+
+            median_sigma = None
+            iqr = optional_value(source_row, iqr_col)
+            if iqr is not None:
+                median_sigma = iqr / 1.3489795003921634
+            elif "Median" in stat_columns:
+                median_sigma = optional_value(source_row, generic_sigma_col)
+
+            peak_sigma = optional_value(source_row, peak_stdev_col)
+            if peak_sigma is None and "Peak" in stat_columns:
+                peak_sigma = optional_value(source_row, generic_sigma_col)
+
+            row["MeanSigma"] = mean_sigma
+            row["MedianSigma"] = median_sigma
+            row["PeakSigma"] = peak_sigma
+            rows.append(row)
+
+        if reference_ends is None:
+            reference_ends = list(ends)
+            reference_durations = list(durations)
+            reference_plot_times = list(plot_times)
+        else:
+            if len(ends) != len(reference_ends):
+                return {"ok": False, "error": "All ROI sheets must contain the same number of observations."}
+            for a, b, da, db in zip(ends, reference_ends, durations, reference_durations):
+                tol = 1e-6 * max(1.0, abs(a), abs(b), abs(da), abs(db))
+                if abs(a - b) > tol or abs(da - db) > tol:
+                    return {"ok": False, "error": "All ROI sheets must describe the same temporal grid."}
+
+        timing_summaries.append(timing_summary)
+        normalized_rois.append({"name": str(sheet_name), "rows": rows})
+
+    if not normalized_rois:
+        return {"ok": False, "error": "No non-empty ROI worksheets were found."}
+
+    if not common_fit_ids:
+        return {"ok": False, "error": "The ROI sheets do not share a common usable TAC value type."}
+
+    order = ["Mean", "Median", "Peak", "Min", "Max"]
+
+    def display_label(stat_id):
+        labels = labels_by_id.get(stat_id, [stat_id])
+        first = labels[0] if labels else stat_id
+        if all(str(x) == str(first) for x in labels):
+            return str(first)
+        return stat_id
+
+    fit_stats = [
+        {"id": stat_id, "label": display_label(stat_id)}
+        for stat_id in order
+        if stat_id in common_fit_ids
+    ]
+    plot_stats = [
+        {"id": stat_id, "label": display_label(stat_id)}
+        for stat_id in order
+        if stat_id in common_plot_ids
+    ]
+
+    timing_summary = timing_summaries[0] if len(set(timing_summaries)) == 1 else "mixed source columns, common normalized grid"
+    suggested_activity_unit = "SUVbw" if suggested_units and all(x == "SUVbw" for x in suggested_units) else ""
+
+    # Convert any numpy scalar metadata to plain Python/Qt-friendly values.
+    clean_metadata = {}
+    for key, value in metadata.items():
+        if hasattr(value, "item"):
+            value = value.item()
+        clean_metadata[str(key)] = value
+
+    return {
+        "ok": True,
+        "rois": normalized_rois,
+        "fit_stats": fit_stats,
+        "plot_stats": plot_stats,
+        "plot_times_sec": [float(x) for x in reference_plot_times],
+        "framing_exact": bool(framing_exact_all),
+        "timing_summary": timing_summary,
+        "metadata": clean_metadata,
+        "suggested_activity_unit": suggested_activity_unit,
+    }
 
 def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
@@ -5172,12 +6707,19 @@ updateInputFunctionUI()
     const bool segmentSource = source == 0;
     const bool csvSource = source == 1;
 
+    const std::vector<bool>& externalKeep = this->activeExternalIFKeep();
+    const size_t retainedExternalSamples =
+        externalKeep.size() == this->externalIFTimesSec.size()
+        ? static_cast<size_t>(std::count(externalKeep.begin(), externalKeep.end(), true))
+        : this->externalIFTimesSec.size();
+
     const bool primarySourceSelected =
         segmentSource
         ? !q->IFID.empty()
         : (this->externalIFTimesSec.size() >= 2 &&
            this->externalIFTimesSec.size() ==
-               this->externalIFConcentrations.size());
+               this->externalIFConcentrations.size() &&
+           retainedExternalSamples >= 2);
 
     // Keep source selection available, but do not expose an active
     // processing pipeline when there is no actual IF selected.
@@ -5194,6 +6736,10 @@ updateInputFunctionUI()
     this->IFLowessSpanLabel->setVisible(lowessSelected);
     this->IFLowessSpanSpinBox->setVisible(lowessSelected);
 
+    this->IFLabel->setText(
+        this->tableBasedMode
+        ? QObject::tr("IDIF table ROI:")
+        : QObject::tr("IDIF segment:"));
     this->IFLabel->setVisible(segmentSource);
     this->IFSelector->setVisible(segmentSource);
     this->IFStatLabel->setVisible(segmentSource);
@@ -5302,6 +6848,8 @@ updateInputFunctionUI()
             &error);
 
     this->IFPreviewButton->setEnabled(
+        validForPlasmaModel);
+    this->IFExportButton->setEnabled(
         validForPlasmaModel);
 
     if (validForPlasmaModel)
@@ -5421,11 +6969,17 @@ updateInputFunctionUI()
                     " | TCM requires companion whole blood");
         }
 
-        this->IFStatusLabel->setText(status);
+        this->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET IF] %1").arg(status));
+        this->IFStatusLabel->clear();
+        this->IFStatusLabel->setToolTip(status);
+        this->IFStatusLabel->setVisible(false);
     }
     else
     {
         this->IFStatusLabel->setText(error);
+        this->IFStatusLabel->setToolTip(error);
+        this->IFStatusLabel->setVisible(!error.isEmpty());
     }
 
     // External CSV and processed IF stages do not yet carry
@@ -5512,6 +7066,12 @@ updateParametricImagingAvailability()
     }
 
     bool enabled = false;
+
+    if (this->tableBasedMode)
+    {
+        this->PlotsTabWidget->setTabEnabled(imagingIndex, false);
+        return;
+    }
 
     if (q->petID !=
             vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID &&
@@ -5762,6 +7322,356 @@ loadTwoColumnCurveCSV(
     return true;
 }
 
+std::vector<bool>&
+qSlicerDynamicPETModuleWidgetPrivate::
+activeExternalIFKeep()
+{
+    return this->tableBasedMode
+        ? this->tableExternalIFKeep
+        : this->imageExternalIFKeep;
+}
+
+const std::vector<bool>&
+qSlicerDynamicPETModuleWidgetPrivate::
+activeExternalIFKeep() const
+{
+    return this->tableBasedMode
+        ? this->tableExternalIFKeep
+        : this->imageExternalIFKeep;
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+logToPythonConsole(const QString& message) const
+{
+    PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+    mainContext.call(
+        "DPE_console_message",
+        QVariantList{message});
+}
+
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+exportFinalInputFunctionCSV(
+    const QString& filePath,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    InputFunctionResult result;
+    QString error;
+    if (!this->buildCurrentInputFunction(result, false, &error))
+    {
+        if (errorMessage)
+            *errorMessage = error;
+        return false;
+    }
+
+    if (result.supportFrameCount < 1 ||
+        result.supportFrameCount > q->timePoints.size())
+    {
+        if (errorMessage)
+            *errorMessage = QObject::tr("The current input function has no supported TAC frames to export.");
+        return false;
+    }
+
+    bool stepOk = false;
+    double sampleStepSec = this->timeStepEdit->text().toDouble(&stepOk);
+    if (!stepOk || !std::isfinite(sampleStepSec) || sampleStepSec <= 0.0)
+        sampleStepSec = 1.0;
+    sampleStepSec = std::max(0.01, sampleStepSec);
+
+    const double endTimeSec =
+        q->timePoints[result.supportFrameCount - 1];
+    if (!std::isfinite(endTimeSec) || endTimeSec <= 0.0)
+    {
+        if (errorMessage)
+            *errorMessage = QObject::tr("The supported input-function end time is invalid.");
+        return false;
+    }
+
+    const std::string plasmaInterpolation =
+        result.pbifApplied ? std::string("linear") : this->selectedIFInterpolation();
+
+    std::vector<double> exportTimes;
+    std::vector<double> exportValuesNative;
+    const size_t reserveCount =
+        static_cast<size_t>(std::ceil(endTimeSec / sampleStepSec)) + 1;
+    exportTimes.reserve(reserveCount);
+    exportValuesNative.reserve(reserveCount);
+
+    auto finalPlasmaAt =
+        [&](double timeSec) -> double
+        {
+            double plasma = std::numeric_limits<double>::quiet_NaN();
+            if (!result.nativePlasmaTimesSec.empty() &&
+                result.nativePlasmaTimesSec.size() == result.nativePlasmaValues.size())
+            {
+                plasma = this->interpolateInputFunction(
+                    result.nativePlasmaTimesSec,
+                    result.nativePlasmaValues,
+                    timeSec,
+                    plasmaInterpolation);
+            }
+            else
+            {
+                plasma = this->evaluateFrameCurve(
+                    result.framePlasma,
+                    timeSec,
+                    plasmaInterpolation);
+            }
+
+            if (!std::isfinite(plasma))
+                return plasma;
+
+            if (result.applyParentFraction)
+            {
+                const double fraction = this->interpolateInputFunction(
+                    result.parentFractionTimesSec,
+                    result.parentFractionValues,
+                    timeSec,
+                    "linear");
+                if (!std::isfinite(fraction))
+                    return std::numeric_limits<double>::quiet_NaN();
+                plasma *= fraction;
+            }
+            return plasma;
+        };
+
+    for (double t = 0.0; t < endTimeSec; t += sampleStepSec)
+    {
+        const double value = finalPlasmaAt(t);
+        if (!std::isfinite(value))
+        {
+            if (errorMessage)
+                *errorMessage = QObject::tr("The final input function produced a non-finite value at %1 s.")
+                    .arg(t, 0, 'g', 10);
+            return false;
+        }
+        exportTimes.push_back(t);
+        exportValuesNative.push_back(value);
+    }
+
+    if (exportTimes.empty() ||
+        std::fabs(exportTimes.back() - endTimeSec) > 1e-9)
+    {
+        const double value = finalPlasmaAt(endTimeSec);
+        if (!std::isfinite(value))
+        {
+            if (errorMessage)
+                *errorMessage = QObject::tr("The final input function produced a non-finite value at the supported end time.");
+            return false;
+        }
+        exportTimes.push_back(endTimeSec);
+        exportValuesNative.push_back(value);
+    }
+
+    std::vector<double> exportValues;
+    if (!this->convertActivityVector(
+            exportValuesNative,
+            this->petStoredActivityUnit(),
+            this->selectedDisplayActivityUnit(),
+            exportValues,
+            errorMessage))
+    {
+        return false;
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate))
+    {
+        if (errorMessage)
+            *errorMessage = QObject::tr("Could not open the selected CSV for writing: %1")
+                .arg(file.errorString());
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream.setRealNumberNotation(QTextStream::SmartNotation);
+    stream.setRealNumberPrecision(12);
+    stream << "time_s,concentration\n";
+    for (size_t i = 0; i < exportTimes.size(); ++i)
+    {
+        stream << exportTimes[i] << ',' << exportValues[i] << '\n';
+    }
+    file.close();
+
+    const QString domain =
+        (result.plasmaIsParent || result.applyParentFraction)
+        ? QObject::tr("parent plasma")
+        : QObject::tr("total plasma");
+
+    this->logToPythonConsole(
+        QObject::tr("[SlicerDynamicPET IF] Exported final %1 to %2 | %3 samples | step=%4 s | unit=%5")
+            .arg(domain)
+            .arg(QDir::toNativeSeparators(filePath))
+            .arg(exportTimes.size())
+            .arg(sampleStepSec, 0, 'g', 8)
+            .arg(this->activityUnitLabel(this->selectedDisplayActivityUnit())));
+
+    return true;
+}
+
+ParentFractionModel
+qSlicerDynamicPETModuleWidgetPrivate::
+selectedParentFractionModel() const
+{
+    switch (this->ParentFractionProcessingSelector->currentIndex())
+    {
+      case 1:
+        return ParentFractionModel::Hill;
+      case 2:
+        return ParentFractionModel::ExtendedHill;
+      case 3:
+        return ParentFractionModel::ExponentialPlateau;
+      default:
+        return ParentFractionModel::Linear;
+    }
+}
+
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+buildProcessedParentFraction(
+    double requiredEndTimeSec,
+    std::vector<double>& processedTimesSec,
+    std::vector<double>& processedValues,
+    ParentFractionFitParameters* fitParameters,
+    QString* processingLabel,
+    QString* fitSummary,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    processedTimesSec.clear();
+    processedValues.clear();
+    if (fitParameters)
+        *fitParameters = ParentFractionFitParameters{};
+    if (processingLabel)
+        processingLabel->clear();
+    if (fitSummary)
+        fitSummary->clear();
+
+    if (this->parentFractionTimesSec.size() < 2 ||
+        this->parentFractionTimesSec.size() != this->parentFractionValues.size())
+    {
+        if (errorMessage)
+            *errorMessage = QObject::tr("Load a valid time_s,parent_fraction CSV first.");
+        return false;
+    }
+
+    const std::vector<double>& retainedTimes = this->parentFractionTimesSec;
+    const std::vector<double>& retainedValues = this->parentFractionValues;
+
+    const ParentFractionModel model = this->selectedParentFractionModel();
+    if (model == ParentFractionModel::Linear)
+    {
+        processedTimesSec = retainedTimes;
+        processedValues = retainedValues;
+        if (processingLabel)
+            *processingLabel = QObject::tr("Linear interpolation");
+        return true;
+    }
+
+    // The automatically inserted (0,1) point defines interpolation support,
+    // but it is not a measured metabolite sample and must not bias a nonlinear fit.
+    std::vector<double> fitTimes = retainedTimes;
+    std::vector<double> fitValues = retainedValues;
+    if (this->parentFractionZeroAnchorAdded &&
+        !fitTimes.empty() && fitTimes.front() == 0.0)
+    {
+        fitTimes.erase(fitTimes.begin());
+        fitValues.erase(fitValues.begin());
+    }
+
+    vtkSlicerDynamicPETLogic* logic =
+        vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+    if (!logic)
+    {
+        if (errorMessage)
+            *errorMessage = QObject::tr("DynamicPET logic is unavailable.");
+        return false;
+    }
+
+    ParentFractionFitParameters params;
+    std::vector<double> fittedObservations;
+    std::string fitError;
+    if (!logic->FitParentFraction(
+            fitTimes,
+            fitValues,
+            model,
+            params,
+            fittedObservations,
+            &fitError))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("Parent-fraction fit failed: %1")
+                .arg(QString::fromStdString(fitError));
+        }
+        return false;
+    }
+
+    const double endTimeSec = std::max(
+        requiredEndTimeSec,
+        retainedTimes.back());
+    const double denseStepSec = 1.0;
+    for (double t = 0.0; t < endTimeSec; t += denseStepSec)
+    {
+        const double value = logic->EvaluateParentFraction(t, model, params);
+        if (!std::isfinite(value))
+        {
+            if (errorMessage)
+                *errorMessage = QObject::tr("Parent-fraction model produced a non-finite value.");
+            return false;
+        }
+        processedTimesSec.push_back(t);
+        processedValues.push_back(value);
+    }
+    processedTimesSec.push_back(endTimeSec);
+    processedValues.push_back(logic->EvaluateParentFraction(endTimeSec, model, params));
+
+    QString label;
+    QString summary;
+    if (model == ParentFractionModel::Hill)
+    {
+        label = QObject::tr("Hill fit");
+        summary = QObject::tr("Hill: A=%1, B=%2, C=%3, SSE=%4")
+            .arg(params.A, 0, 'g', 5)
+            .arg(params.B, 0, 'g', 5)
+            .arg(params.C, 0, 'g', 5)
+            .arg(params.SSE, 0, 'g', 5);
+    }
+    else if (model == ParentFractionModel::ExtendedHill)
+    {
+        label = QObject::tr("Extended Hill fit");
+        summary = QObject::tr("Extended Hill: A=%1, B=%2, C=%3, D=%4, E=%5 min, SSE=%6")
+            .arg(params.A, 0, 'g', 5)
+            .arg(params.B, 0, 'g', 5)
+            .arg(params.C, 0, 'g', 5)
+            .arg(params.D, 0, 'g', 5)
+            .arg(params.E, 0, 'g', 5)
+            .arg(params.SSE, 0, 'g', 5);
+    }
+    else
+    {
+        label = QObject::tr("Exponential-to-plateau fit");
+        summary = QObject::tr("Exponential: plateau=%1, k=%2 min^-1, SSE=%3")
+            .arg(params.plateau, 0, 'g', 5)
+            .arg(params.rate, 0, 'g', 5)
+            .arg(params.SSE, 0, 'g', 5);
+    }
+
+    this->logToPythonConsole(
+        QObject::tr("[SlicerDynamicPET parent fraction] %1").arg(summary));
+    if (fitParameters)
+        *fitParameters = params;
+    if (processingLabel)
+        *processingLabel = label;
+    if (fitSummary)
+        *fitSummary = summary;
+    return true;
+}
+
 bool
 qSlicerDynamicPETModuleWidgetPrivate::
 loadExternalInputFunctionCSV(
@@ -5789,6 +7699,12 @@ loadExternalInputFunctionCSV(
     this->externalIFPath = filePath;
     this->externalIFTimesSec = std::move(times);
     this->externalIFConcentrations = std::move(values);
+    this->imageExternalIFKeep.assign(this->externalIFTimesSec.size(), true);
+    this->tableExternalIFKeep.assign(this->externalIFTimesSec.size(), true);
+    this->externalIFPreviewIndexMap.clear();
+    this->externalIFPreviewTimesSec.clear();
+    this->externalIFPreviewDisplayValues.clear();
+    this->externalIFPreviewSelectedIndex = -1;
     this->externalIFZeroAnchorAdded = zeroAnchorAdded;
 
     // A companion whole-blood curve is specifically paired with an
@@ -6493,6 +8409,7 @@ buildCurrentInputFunction(
 
     const double petEndTimeSec =
         q->timePoints.back();
+    double modelEndTimeSec = petEndTimeSec;
 
     const std::string inputInterpolation =
         this->selectedIFInterpolation();
@@ -6504,17 +8421,18 @@ buildCurrentInputFunction(
         [&](const std::vector<double>& times,
             const std::vector<double>& values,
             const std::string& interpolation,
-            std::vector<double>& output) -> bool
+            std::vector<double>& output,
+            size_t frameCount) -> bool
         {
-            output.clear();
-            output.reserve(q->durations.size());
+            frameCount = std::min(frameCount, q->durations.size());
+            output.assign(
+                q->durations.size(),
+                std::numeric_limits<double>::quiet_NaN());
 
-            double frameStart = 0.0;
-
-            for (double duration : q->durations)
+            for (size_t i = 0; i < frameCount; ++i)
             {
-                const double frameEnd =
-                    frameStart + duration;
+                const double frameEnd = q->timePoints[i];
+                const double frameStart = frameEnd - q->durations[i];
 
                 const double value =
                     this->averageInputFunctionOverInterval(
@@ -6529,8 +8447,7 @@ buildCurrentInputFunction(
                     return false;
                 }
 
-                output.push_back(value);
-                frameStart = frameEnd;
+                output[i] = value;
             }
 
             return true;
@@ -6618,6 +8535,7 @@ buildCurrentInputFunction(
                     lastKeepIt));
 
         result.supportFrameCount = lastKeptIndex + 1;
+        modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
 
         const size_t retainedCount =
             static_cast<size_t>(
@@ -6900,29 +8818,75 @@ buildCurrentInputFunction(
             return false;
         }
 
-        if (this->externalIFTimesSec.back() + 1e-6 <
-            petEndTimeSec)
+        const std::vector<bool>& externalKeep = this->activeExternalIFKeep();
+        std::vector<double> retainedExternalTimes;
+        std::vector<double> retainedExternalValues;
+        retainedExternalTimes.reserve(this->externalIFTimesSec.size());
+        retainedExternalValues.reserve(this->externalIFConcentrations.size());
+
+        for (size_t i = 0; i < this->externalIFTimesSec.size(); ++i)
+        {
+            const bool retained =
+                externalKeep.size() == this->externalIFTimesSec.size()
+                ? externalKeep[i]
+                : true;
+            if (!retained)
+            {
+                continue;
+            }
+            retainedExternalTimes.push_back(this->externalIFTimesSec[i]);
+            retainedExternalValues.push_back(this->externalIFConcentrations[i]);
+        }
+
+        if (retainedExternalTimes.size() < 2)
         {
             if (errorMessage)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "Input-function coverage is insufficient.\n\n"
-                        "PET end time: %1 s\n"
-                        "Input-function end time: %2 s\n\n"
-                        "Extrapolation is not performed.")
-                        .arg(petEndTimeSec)
-                        .arg(this->externalIFTimesSec.back());
+                *errorMessage = QObject::tr(
+                    "At least two external input-function observations must remain.");
             }
             return false;
         }
 
-        // External activity curves are converted to the PET sequence native
-        // quantitative scale before any biological-domain processing. This is
-        // the key guard that prevents mixing image SUVbw with Bq/mL blood data.
+        const double retainedIFEndSec = retainedExternalTimes.back();
+        result.supportFrameCount = 0;
+        for (size_t i = 0; i < q->timePoints.size(); ++i)
+        {
+            if (q->timePoints[i] <= retainedIFEndSec + 1e-6)
+            {
+                result.supportFrameCount = i + 1;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        if (result.supportFrameCount < 2)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "The retained input function does not cover at least two TAC frames.");
+            }
+            return false;
+        }
+
+        modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
+        if (modelEndTimeSec + 1e-6 < petEndTimeSec)
+        {
+            this->logToPythonConsole(
+                QObject::tr("[SlicerDynamicPET IF] Retained IF ends at %1 s; fitting is shortened to TAC frame %2 ending at %3 s.")
+                    .arg(retainedIFEndSec, 0, 'g', 8)
+                    .arg(result.supportFrameCount)
+                    .arg(modelEndTimeSec, 0, 'g', 8));
+        }
+
+        // External activity curves are converted to the active model's native
+        // quantitative scale before any biological-domain processing.
         std::vector<double> externalPatientValues;
         if (!this->convertActivityVector(
-                this->externalIFConcentrations,
+                retainedExternalValues,
                 this->selectedExternalIFActivityUnit(),
                 this->petStoredActivityUnit(),
                 externalPatientValues,
@@ -6932,7 +8896,7 @@ buildCurrentInputFunction(
         }
 
         std::vector<double> processedPatientTimes =
-            this->externalIFTimesSec;
+            retainedExternalTimes;
         std::vector<double> processedPatientValues =
             externalPatientValues;
 
@@ -7011,16 +8975,16 @@ buildCurrentInputFunction(
             // of the user-selected TCM integration step. The TCM backend may
             // subsequently sample this continuous representation more finely.
             const double denseStepSec = 0.25;
-            for (double t = 0.0; t < petEndTimeSec; t += denseStepSec)
+            for (double t = 0.0; t < modelEndTimeSec; t += denseStepSec)
             {
                 processedPatientTimes.push_back(t);
                 processedPatientValues.push_back(
                     logic->EvaluateFengInputFunction(t, result.fengParameters));
             }
-            processedPatientTimes.push_back(petEndTimeSec);
+            processedPatientTimes.push_back(modelEndTimeSec);
             processedPatientValues.push_back(
                 logic->EvaluateFengInputFunction(
-                    petEndTimeSec,
+                    modelEndTimeSec,
                     result.fengParameters));
             result.sourceProcessingApplied = true;
             result.sourceProcessingLabel = QObject::tr("Feng model");
@@ -7110,7 +9074,7 @@ buildCurrentInputFunction(
                 this->externalWholeBloodTimesSec.size() ==
                     this->externalWholeBloodConcentrations.size() &&
                 this->externalWholeBloodTimesSec.back() + 1e-6 >=
-                    petEndTimeSec;
+                    modelEndTimeSec;
 
             if (validWholeBlood)
             {
@@ -7140,7 +9104,7 @@ buildCurrentInputFunction(
                             "The external input already represents "
                             "parent plasma. TCM therefore requires a "
                             "separate total whole-blood CSV covering "
-                            "the full PET acquisition.");
+                            "the retained fit range.");
                 }
                 return false;
             }
@@ -7150,7 +9114,8 @@ buildCurrentInputFunction(
                 result.nativePlasmaTimesSec,
                 result.nativePlasmaValues,
                 inputInterpolation,
-                result.framePlasma))
+                result.framePlasma,
+                result.supportFrameCount))
         {
             if (errorMessage)
             {
@@ -7166,7 +9131,8 @@ buildCurrentInputFunction(
                 result.nativeWholeBloodTimesSec,
                 result.nativeWholeBloodValues,
                 inputInterpolation,
-                result.frameWholeBlood))
+                result.frameWholeBlood,
+                result.supportFrameCount))
         {
             if (errorMessage)
             {
@@ -7177,10 +9143,11 @@ buildCurrentInputFunction(
             return false;
         }
 
-        result.frameKeep.assign(
-            q->durations.size(),
+        result.frameKeep.assign(q->durations.size(), false);
+        std::fill(
+            result.frameKeep.begin(),
+            result.frameKeep.begin() + static_cast<std::ptrdiff_t>(result.supportFrameCount),
             true);
-        result.supportFrameCount = q->durations.size();
     }
 
     // ------------------------------------------------------------
@@ -7218,13 +9185,13 @@ buildCurrentInputFunction(
         }
 
         if (this->pbifTimesSec.back() + 1e-6 <
-            petEndTimeSec)
+            modelEndTimeSec)
         {
             if (errorMessage)
             {
                 *errorMessage =
                     QObject::tr(
-                        "PBIF coverage is insufficient for the PET "
+                        "PBIF coverage is insufficient for the retained "
                         "acquisition. Extrapolation is not performed.");
             }
             return false;
@@ -7237,7 +9204,7 @@ buildCurrentInputFunction(
 
         if (calibrationStart < 0.0 ||
             calibrationEnd <= calibrationStart ||
-            calibrationEnd > petEndTimeSec ||
+            calibrationEnd > modelEndTimeSec ||
             calibrationStart < this->pbifTimesSec.front() ||
             calibrationEnd > this->pbifTimesSec.back())
         {
@@ -7432,18 +9399,18 @@ buildCurrentInputFunction(
 
         result.hasWholeBlood = true;
         result.plasmaIsParent = false;
-        result.supportFrameCount = q->durations.size();
-
         if (!fillFrameAverages(
                 result.nativePlasmaTimesSec,
                 result.nativePlasmaValues,
                 "linear",
-                result.framePlasma) ||
+                result.framePlasma,
+                result.supportFrameCount) ||
             !fillFrameAverages(
                 result.nativeWholeBloodTimesSec,
                 result.nativeWholeBloodValues,
                 "linear",
-                result.frameWholeBlood))
+                result.frameWholeBlood,
+                result.supportFrameCount))
         {
             if (errorMessage)
             {
@@ -7458,8 +9425,9 @@ buildCurrentInputFunction(
 
     // ------------------------------------------------------------
     // 3. Optional parent-fraction correction.
-    //    Keep the fraction separate for TCM, and integrate Cp,total * fparent
-    //    directly for MTGA frame averages.
+    //    Linear interpolation uses the supplied measurements directly; if that
+    //    curve ends before the current IF support, the supported acquisition is
+    //    shortened. Parametric models may extrapolate smoothly to the IF support.
     // ------------------------------------------------------------
 
     if (this->MetaboliteCorrectionCheckBox->isChecked())
@@ -7468,96 +9436,95 @@ buildCurrentInputFunction(
         {
             if (errorMessage)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "The selected external curve already represents "
-                        "parent plasma; metabolite correction must be off.");
+                *errorMessage = QObject::tr(
+                    "The selected external curve already represents parent plasma; metabolite correction must be off.");
             }
             return false;
         }
 
-        if (this->parentFractionTimesSec.size() < 2 ||
-            this->parentFractionTimesSec.size() !=
-                this->parentFractionValues.size())
+        std::vector<double> processedParentTimes;
+        std::vector<double> processedParentValues;
+        ParentFractionFitParameters parentFit;
+        QString parentLabel;
+        QString parentSummary;
+        if (!this->buildProcessedParentFraction(
+                modelEndTimeSec,
+                processedParentTimes,
+                processedParentValues,
+                &parentFit,
+                &parentLabel,
+                &parentSummary,
+                errorMessage))
         {
-            if (errorMessage)
+            return false;
+        }
+
+        if (this->selectedParentFractionModel() == ParentFractionModel::Linear &&
+            processedParentTimes.back() + 1e-6 < modelEndTimeSec)
+        {
+            size_t parentSupportFrameCount = 0;
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "Load a valid time_s,parent_fraction CSV "
-                        "before enabling parent-fraction correction.");
+                if (q->timePoints[i] <= processedParentTimes.back() + 1e-6)
+                    parentSupportFrameCount = i + 1;
+                else
+                    break;
             }
-            return false;
-        }
 
-        if (this->parentFractionTimesSec.back() + 1e-6 <
-            petEndTimeSec)
-        {
-            if (errorMessage)
-            {
-                *errorMessage =
-                    QObject::tr(
-                        "Parent-fraction coverage is insufficient for "
-                        "the PET acquisition. Extrapolation is not performed.");
-            }
-            return false;
-        }
-
-        result.applyParentFraction = true;
-        result.parentFractionTimesSec =
-            this->parentFractionTimesSec;
-        result.parentFractionValues =
-            this->parentFractionValues;
-
-        result.frameModelPlasma.clear();
-        result.frameModelPlasma.reserve(
-            q->durations.size());
-
-        const bool plasmaIsFrameCurve =
-            result.nativePlasmaTimesSec.empty();
-
-        const std::string plasmaInterpolation =
-            result.pbifApplied
-            ? "linear"
-            : inputInterpolation;
-
-        double frameStart = 0.0;
-
-        for (double duration : q->durations)
-        {
-            const double frameEnd =
-                frameStart + duration;
-
-            const std::vector<double>& plasmaValues =
-                plasmaIsFrameCurve
-                ? result.framePlasma
-                : result.nativePlasmaValues;
-
-            const double value =
-                this->averagePlasmaTimesParentFractionOverInterval(
-                    result.nativePlasmaTimesSec,
-                    plasmaValues,
-                    plasmaIsFrameCurve,
-                    plasmaInterpolation,
-                    result.parentFractionTimesSec,
-                    result.parentFractionValues,
-                    frameStart,
-                    frameEnd);
-
-            if (!std::isfinite(value))
+            if (parentSupportFrameCount < 2)
             {
                 if (errorMessage)
                 {
-                    *errorMessage =
-                        QObject::tr(
-                            "Could not calculate parent-plasma "
-                            "frame averages.");
+                    *errorMessage = QObject::tr(
+                        "The parent-fraction curve does not cover at least two TAC frames.");
                 }
                 return false;
             }
 
-            result.frameModelPlasma.push_back(value);
-            frameStart = frameEnd;
+            result.supportFrameCount = parentSupportFrameCount;
+            modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
+            this->logToPythonConsole(
+                QObject::tr("[SlicerDynamicPET parent fraction] Linear parent fraction ends at %1 s; fitting is shortened to TAC frame %2 ending at %3 s.")
+                    .arg(processedParentTimes.back(), 0, 'g', 8)
+                    .arg(result.supportFrameCount)
+                    .arg(modelEndTimeSec, 0, 'g', 8));
+        }
+
+        result.applyParentFraction = true;
+        result.parentFractionTimesSec = std::move(processedParentTimes);
+        result.parentFractionValues = std::move(processedParentValues);
+
+        result.frameModelPlasma.assign(
+            q->durations.size(),
+            std::numeric_limits<double>::quiet_NaN());
+
+        const bool plasmaIsFrameCurve = result.nativePlasmaTimesSec.empty();
+        const std::string plasmaInterpolation = result.pbifApplied ? "linear" : inputInterpolation;
+
+        for (size_t i = 0; i < result.supportFrameCount; ++i)
+        {
+            const double frameEnd = q->timePoints[i];
+            const double frameStart = frameEnd - q->durations[i];
+            const std::vector<double>& plasmaValues =
+                plasmaIsFrameCurve ? result.framePlasma : result.nativePlasmaValues;
+
+            const double value = this->averagePlasmaTimesParentFractionOverInterval(
+                result.nativePlasmaTimesSec,
+                plasmaValues,
+                plasmaIsFrameCurve,
+                plasmaInterpolation,
+                result.parentFractionTimesSec,
+                result.parentFractionValues,
+                frameStart,
+                frameEnd);
+
+            if (!std::isfinite(value))
+            {
+                if (errorMessage)
+                    *errorMessage = QObject::tr("Could not calculate parent-plasma frame averages.");
+                return false;
+            }
+            result.frameModelPlasma[i] = value;
         }
     }
     else
@@ -13027,6 +14994,11 @@ void qSlicerDynamicPETModuleWidget::onSubjectHierarchyChanged() {
     return;  // Don't do anything if the module is not active
   }
   Q_D(qSlicerDynamicPETModuleWidget);
+  if (d->isTableBasedMode())
+  {
+    // Table mode is deliberately independent of the MRML patient/study tree.
+    return;
+  }
   d->populatePatientComboBox();
 }
 
@@ -13061,6 +15033,10 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
     // inside vtkSegmentation::SegmentAdded/SegmentRemoved processing.
     QTimer::singleShot(0, this, [this, d]()
     {
+      if (d->isTableBasedMode())
+      {
+        return;
+      }
       // Segment add/remove changes the structure of every dynamic segmentation
       // frame. Cached TACs and any segment-derived IF are no longer trustworthy.
       this->clearTACdata();
@@ -13071,6 +15047,10 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   };
   this->SegWatcher->OnSegmentTACChanged = [this, d](const std::string& segmentID)
   {
+    if (d->isTableBasedMode())
+    {
+      return;
+    }
     // Any edited tissue TAC invalidates ROI fits. If the edited segment is
     // the active IDIF, voxelwise fits and IF previews are stale as well.
     this->clearFITdata();
@@ -13636,6 +15616,13 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  // Image hierarchy/segmentation changes must never erase a table dataset.
+  // Table data are cleared explicitly from the Table Setup controls.
+  if (d->isTableBasedMode())
+  {
+    return;
+  }
+
   const bool segmentInputSource =
       d->IFSourceSelector->currentIndex() == 0;
 
@@ -13704,6 +15691,11 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
 
 void qSlicerDynamicPETModuleWidget::enableTACbutton() {
   Q_D(qSlicerDynamicPETModuleWidget);
+  if (d->isTableBasedMode())
+  {
+    d->TACbutton->setEnabled(false);
+    return;
+  }
   if (this->petID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
     this->clearTACdata();
@@ -14205,8 +16197,24 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
   QString fullPath = QDir(path).filePath(filename);
 
   QVariantMap segmentDict = this->TACtoPythonDict();
+
+  QVariantMap metadata;
+  metadata["FormatVersion"] = 1;
+  metadata["ActivityUnit"] = d->activityUnitLabel(d->petStoredActivityUnit());
+  metadata["TimeConvention"] = "FrameEnd";
+  metadata["SourceMode"] = d->isTableBasedMode() ? "TableBased" : "ImageBased";
+
+  double suvbwFactor = 0.0;
+  if (d->getCommonSUVbwFactor(suvbwFactor, nullptr))
+  {
+    metadata["SUVbwFactor"] = suvbwFactor;
+  }
+
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  PythonQtObjectPtr result = mainContext.call("DPE_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
+  const QVariant result = mainContext.call(
+      "DPE_save_multisheet_excel",
+      QVariantList{ fullPath, segmentDict, metadata });
+  Q_UNUSED(result);
 }
 
 void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
@@ -14259,29 +16267,155 @@ void qSlicerDynamicPETModuleWidget::onSaveMTGAfittedExcelbutton()
 
 void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol)
 {
-  if (!this->checkdisplayedDynamicPET())
-    return;
-
+  Q_D(qSlicerDynamicPETModuleWidget);
   vtkMRMLScene* scene = this->mrmlScene();
-  if (scene==nullptr)
+  if (!scene || !mrmlPlotSeriesIDs || !selectionCol)
     return;
 
-  if (!mrmlPlotSeriesIDs || !selectionCol || this->MapPlotSeriesNodeIDToPlot.empty())
+  // IF Preview selection is deliberately tolerant of overlapping curves.
+  // If VTK hit-tests a derived line instead of the visible Original-source
+  // marker, map the selected x coordinate to the nearest displayed raw CSV
+  // observation. This makes Delete reliable without hiding processed curves.
+  for (vtkIdType i = 0; i < mrmlPlotSeriesIDs->GetNumberOfValues(); ++i)
+  {
+    const std::string seriesID = mrmlPlotSeriesIDs->GetValue(i);
+    vtkMRMLPlotSeriesNode* seriesNode = vtkMRMLPlotSeriesNode::SafeDownCast(
+        scene->GetNodeByID(seriesID));
+    if (!seriesNode)
+      continue;
+
+    const char* group = seriesNode->GetAttribute("SlicerDynamicPET.IFPreviewGroup");
+    if (!group || std::string(group) != "InputFunctionPreview")
+      continue;
+
+    if (i >= selectionCol->GetNumberOfItems())
+      return;
+
+    vtkIdTypeArray* selectedPoints = vtkIdTypeArray::SafeDownCast(
+        selectionCol->GetItemAsObject(i));
+    if (!selectedPoints || selectedPoints->GetNumberOfTuples() < 1)
+      return;
+
+    const vtkIdType pointIndex =
+        selectedPoints->GetValue(selectedPoints->GetNumberOfTuples() - 1);
+
+    // Only external CSV observations are removable. Segment/Table ROI IDIF
+    // points continue to use the normal TAC plot keep-mask workflow.
+    if (d->IFSourceSelector->currentIndex() != 1 ||
+        d->externalIFPreviewIndexMap.empty())
+    {
+      d->externalIFPreviewSelectedIndex = -1;
+      return;
+    }
+
+    const char* sourceObservations =
+        seriesNode->GetAttribute("SlicerDynamicPET.SourceObservations");
+    const char* observationRole =
+        seriesNode->GetAttribute("SlicerDynamicPET.SourceObservationRole");
+    const bool directSourceSelection =
+        sourceObservations && std::string(sourceObservations) == "1" &&
+        observationRole && std::string(observationRole) == "ExternalIF";
+
+    if (directSourceSelection && pointIndex >= 0 &&
+        static_cast<size_t>(pointIndex) < d->externalIFPreviewIndexMap.size())
+    {
+      const size_t previewIndex = static_cast<size_t>(pointIndex);
+      d->externalIFPreviewSelectedIndex =
+          static_cast<int>(d->externalIFPreviewIndexMap[previewIndex]);
+      if (previewIndex < d->externalIFPreviewTimesSec.size())
+      {
+        d->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET IF] Selected external IF observation at %1 s; press Delete to exclude it.")
+                .arg(d->externalIFPreviewTimesSec[previewIndex], 0, 'g', 10));
+      }
+      return;
+    }
+
+    vtkMRMLTableNode* tableNode = seriesNode->GetTableNode();
+    vtkTable* table = tableNode ? tableNode->GetTable() : nullptr;
+    const std::string xColumnName = seriesNode->GetXColumnName();
+    if (!table || xColumnName.empty() || pointIndex < 0)
+    {
+      d->externalIFPreviewSelectedIndex = -1;
+      return;
+    }
+
+    vtkAbstractArray* xArray = table->GetColumnByName(xColumnName.c_str());
+    if (!xArray || pointIndex >= xArray->GetNumberOfTuples())
+    {
+      d->externalIFPreviewSelectedIndex = -1;
+      return;
+    }
+
+    const double selectedX = xArray->GetVariantValue(pointIndex).ToDouble();
+    const bool xInMinutes = xColumnName.find("min") != std::string::npos;
+    const double xScale = xInMinutes ? (1.0 / 60.0) : 1.0;
+
+    size_t nearestPreviewIndex = 0;
+    double nearestDx = std::numeric_limits<double>::infinity();
+    for (size_t j = 0; j < d->externalIFPreviewTimesSec.size(); ++j)
+    {
+      const double rawX = d->externalIFPreviewTimesSec[j] * xScale;
+      const double dx = std::fabs(selectedX - rawX);
+      if (dx < nearestDx)
+      {
+        nearestDx = dx;
+        nearestPreviewIndex = j;
+      }
+    }
+
+    // Use a local-spacing tolerance so dense early IF samples are not confused
+    // with their neighbours while late sparse samples remain easy to select.
+    const double nearestX =
+        d->externalIFPreviewTimesSec[nearestPreviewIndex] * xScale;
+    double localSpacing = std::numeric_limits<double>::infinity();
+    if (nearestPreviewIndex > 0)
+    {
+      localSpacing = std::min(
+          localSpacing,
+          nearestX - d->externalIFPreviewTimesSec[nearestPreviewIndex - 1] * xScale);
+    }
+    if (nearestPreviewIndex + 1 < d->externalIFPreviewTimesSec.size())
+    {
+      localSpacing = std::min(
+          localSpacing,
+          d->externalIFPreviewTimesSec[nearestPreviewIndex + 1] * xScale - nearestX);
+    }
+    if (!std::isfinite(localSpacing) || localSpacing <= 0.0)
+      localSpacing = 1.0 * xScale;
+
+    const double tolerance = std::max(1e-9, 0.40 * localSpacing);
+    if (nearestDx <= tolerance &&
+        nearestPreviewIndex < d->externalIFPreviewIndexMap.size())
+    {
+      d->externalIFPreviewSelectedIndex =
+          static_cast<int>(d->externalIFPreviewIndexMap[nearestPreviewIndex]);
+      d->logToPythonConsole(
+          QObject::tr("[SlicerDynamicPET IF] Selected external IF observation at %1 s; press Delete to exclude it.")
+              .arg(d->externalIFPreviewTimesSec[nearestPreviewIndex], 0, 'g', 10));
+    }
+    else
+    {
+      d->externalIFPreviewSelectedIndex = -1;
+    }
+    return;
+  }
+
+  if (!this->checkdisplayedDynamicPET() || this->MapPlotSeriesNodeIDToPlot.empty())
     return;
 
   QSet<QPair<QString, vtkIdType>> newSelection;
 
-  // Loop over each series that has selected points
   int psf_value = -1;
-  std :: string psv_value = "";
-  std :: string lastseriesID = "";
+  std::string psv_value;
+  std::string lastseriesID;
   for (vtkIdType i = 0; i < mrmlPlotSeriesIDs->GetNumberOfValues(); ++i)
   {
     QString seriesID = QString::fromStdString(mrmlPlotSeriesIDs->GetValue(i));
     vtkIdTypeArray* selectedPoints = vtkIdTypeArray::SafeDownCast(
         selectionCol->GetItemAsObject(i));
 
-    if (!selectedPoints)
+    if (!selectedPoints || selectedPoints->GetNumberOfTuples() < 1)
       continue;
 
     vtkIdType pointIndex = selectedPoints->GetValue(selectedPoints->GetNumberOfTuples()-1);
@@ -14289,21 +16423,20 @@ void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeri
     vtkMRMLPlotSeriesNode* seriesNode = vtkMRMLPlotSeriesNode::SafeDownCast(
         scene->GetNodeByID(seriesID.toStdString()));
     if (!seriesNode)
-        return;
+        continue;
     vtkMRMLTableNode* tableNode = seriesNode->GetTableNode();
     if (!tableNode)
-        return;
+        continue;
     vtkTable* table = tableNode->GetTable();
     if (!table)
-        return;
-    std::string labelColName = seriesNode->GetLabelColumnName();
-    vtkAbstractArray* labelArray = table->GetColumnByName(labelColName.c_str());
-    if (!labelArray)
-        return;
-
+        continue;
+    const std::string labelName = seriesNode->GetLabelColumnName();
+    if (labelName.empty())
+        continue;
+    vtkAbstractArray* labelArray = table->GetColumnByName(labelName.c_str());
     vtkStringArray* strArray = vtkStringArray::SafeDownCast(labelArray);
-    if (!strArray)
-        return;
+    if (!strArray || pointIndex >= strArray->GetNumberOfValues())
+        continue;
 
     QString labelValue = QString::fromStdString(strArray->GetValue(pointIndex));
     QStringList parts = labelValue.split(',');
@@ -14312,7 +16445,11 @@ void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeri
       QString framePart = parts[0].trimmed();
       framePart.remove("Frame:");
       psf_value = framePart.trimmed().toInt();
-      psv_value = this->ColNameToSegmentID[seriesNode->GetName()];
+      const auto idIt = this->ColNameToSegmentID.find(seriesNode->GetName());
+      if (idIt != this->ColNameToSegmentID.end())
+      {
+        psv_value = idIt->second;
+      }
     }
     if (!newSelection.contains(candidate))
       newSelection.insert(candidate);
@@ -14320,31 +16457,39 @@ void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeri
     {
       this->PlotSelectedFrame = psf_value;
       this->PlotSelectedVOI = psv_value;
-    } else {
-      if (this->PlotSelectedFrame == psf_value && this->PlotSelectedVOI == psv_value) {
+    }
+    else
+    {
+      if (this->PlotSelectedFrame == psf_value && this->PlotSelectedVOI == psv_value)
+      {
         lastseriesID = seriesID.toStdString();
         continue;
       }
-      if (!this->MapPlotSeriesNodeIDToPlot.contains(seriesID)) {
-        vtkGenericWarningMacro("MapPlotSeriesNodeIDToPlot does not contain seriesID=" << seriesID.toStdString());
+      if (this->MapPlotSeriesNodeIDToPlot.contains(seriesID))
+      {
+        vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(seriesID);
+        vtkSmartPointer<vtkIdTypeArray> emptySelection = vtkSmartPointer<vtkIdTypeArray>::New();
+        vtkplot->SetSelection(emptySelection);
       }
-      vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(seriesID);
+    }
+  }
+
+  if (newSelection.isEmpty())
+  {
+    this->PlotSelectedFrame = -1;
+    this->PlotSelectedVOI.clear();
+  }
+  else if (!(newSelection.size() == 1 && !lastseriesID.empty()) && !lastseriesID.empty())
+  {
+    const QString lastID = QString::fromStdString(lastseriesID);
+    if (this->MapPlotSeriesNodeIDToPlot.contains(lastID))
+    {
+      vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(lastID);
       vtkSmartPointer<vtkIdTypeArray> emptySelection = vtkSmartPointer<vtkIdTypeArray>::New();
       vtkplot->SetSelection(emptySelection);
     }
   }
-  if (newSelection.size()==0) {
-    this->PlotSelectedFrame = -1;
-    this->PlotSelectedVOI = "";
-  } else if (newSelection.size()==1 && lastseriesID!="") {
-  } else {
-    if (!this->MapPlotSeriesNodeIDToPlot.contains(QString::fromStdString(lastseriesID))) {
-        vtkGenericWarningMacro("MapPlotSeriesNodeIDToPlot does not contain seriesID=" << lastseriesID);
-    }
-    vtkPlot* vtkplot = this->MapPlotSeriesNodeIDToPlot.value(QString::fromStdString(lastseriesID));
-    vtkSmartPointer<vtkIdTypeArray> emptySelection = vtkSmartPointer<vtkIdTypeArray>::New();
-    vtkplot->SetSelection(emptySelection);
-  }
+
   this->lastSelection = newSelection;
 }
 
@@ -14367,15 +16512,25 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
     }
   }
 
-  // Get selected stats
+  // Get selected statistics. The visible label may come from an external
+  // workbook (for example "Activity"), while StatID remains the canonical
+  // internal statistic used by the existing fitting/plotting code.
   std::vector<std::string> PlotSelectedStats;
+  std::map<std::string, std::string> PlotStatLabels;
   for (int i = 0; i < d->PlotStatsCheckLayout->count(); ++i)
   {
     QLayoutItem* item = d->PlotStatsCheckLayout->itemAt(i);
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
     if (checkbox && checkbox->isChecked())
     {
-      PlotSelectedStats.push_back(checkbox->text().toStdString());
+      QString statID = checkbox->property("StatID").toString();
+      if (statID.isEmpty())
+      {
+        statID = checkbox->text();
+      }
+      const std::string id = statID.toStdString();
+      PlotSelectedStats.push_back(id);
+      PlotStatLabels[id] = checkbox->text().toStdString();
     }
   }
 
@@ -14393,6 +16548,18 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
   timeArray->SetName("Time (min)");
   vtkNew<vtkStringArray> labelArray;
   labelArray->SetName("ToolTipLabelTAC");
+
+  auto plotTimeSec = [this, d](size_t index)
+  {
+    if (d->isTableBasedMode() &&
+        d->tablePlotTimesSec.size() == this->timePoints.size() &&
+        index < d->tablePlotTimesSec.size())
+    {
+      return d->tablePlotTimesSec[index];
+    }
+    return this->timePoints[index];
+  };
+
   for (int i = 0; i < this->timePoints.size(); ++i)
   {
     const double frameEndSec = this->timePoints[i];
@@ -14401,7 +16568,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
     const double frameMidSec =
         frameStartSec + 0.5 * this->durations[i];
 
-    timeArray->InsertNextValue(frameEndSec / 60.0);
+    timeArray->InsertNextValue(plotTimeSec(static_cast<size_t>(i)) / 60.0);
 
     std::ostringstream oss;
     oss << "Frame: " << i
@@ -14454,7 +16621,9 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
     std :: string segmentName = this->segmentTACsnames[segmentID];
     for (const std::string& statName : PlotSelectedStats)
     {
-      std::string colName = segmentName + " - " + statName;
+      const std::string statDisplayName =
+          PlotStatLabels.count(statName) ? PlotStatLabels[statName] : statName;
+      std::string colName = segmentName + " - " + statDisplayName;
       this->ColNameToSegmentID[colName] = segmentID;
       vtkNew<vtkDoubleArray> statArray;
       statArray->SetName(colName.c_str());
@@ -14510,7 +16679,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
             const VoxelStatistics& vsNext = this->segmentTACs[segmentID][next_ivs];
             if (vsNext.keep)
             {
-                x1 = this->timePoints[next_ivs];
+                x1 = plotTimeSec(static_cast<size_t>(next_ivs));
                 if (statName == "Mean") nextValue = vsNext.mean;
                 else if (statName == "Median") nextValue = vsNext.median;
                 else if (statName == "Peak") nextValue = vsNext.peak;
@@ -14532,7 +16701,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
             const VoxelStatistics& vsPrev = this->segmentTACs[segmentID][prev_ivs];
             if (vsPrev.keep)
             {
-                x0 = this->timePoints[prev_ivs];
+                x0 = plotTimeSec(static_cast<size_t>(prev_ivs));
                 if (statName == "Mean") prevValue = vsPrev.mean;
                 else if (statName == "Median") prevValue = vsPrev.median;
                 else if (statName == "Peak") prevValue = vsPrev.peak;
@@ -14549,7 +16718,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
             continue;
           }
 
-          double x  = this->timePoints[ivs];
+          double x  = plotTimeSec(static_cast<size_t>(ivs));
           // Proper linear interpolation
           value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
           statArrayLine->InsertNextValue(value);
@@ -14643,6 +16812,11 @@ onIFSelectionChanged(int index)
             .toString()
             .toStdString();
   }
+
+  if (d->isTableBasedMode())
+    d->tableIFID = this->IFID;
+  else
+    d->imageIFID = this->IFID;
 
   // Selecting None must immediately invalidate all IF-dependent QC/results.
   // The source selector itself remains available so a new IDIF can be chosen.
@@ -15524,7 +17698,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.mean;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.stddev));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -15533,7 +17708,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.median;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.iqr / 1.3489795003921634));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -15542,7 +17718,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.peak;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.peakStddev));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -16747,7 +18924,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.mean;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.stddev));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -16756,7 +18934,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.median;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.iqr / 1.3489795003921634));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -16765,7 +18944,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.peak;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(vs.peakStddev));
+              inverseVarianceWeightFromSigma(
+                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18302,84 +20482,182 @@ bool qSlicerDynamicPETModuleWidget::checkdisplayedDynamicPET() {
   return true;
 }
 
-void qSlicerDynamicPETModuleWidget::onDeleteKeyPressed() {
+void qSlicerDynamicPETModuleWidget::onDeleteKeyPressed()
+{
   Q_D(qSlicerDynamicPETModuleWidget);
+
+  // External IF preview deletion is mode-specific. The raw CSV is shared,
+  // but Image and Table mode have independent keep masks.
+  vtkMRMLPlotViewNode* activeView = this->mrmlScene()
+      ? vtkMRMLPlotViewNode::SafeDownCast(
+            this->mrmlScene()->GetFirstNodeByClass("vtkMRMLPlotViewNode"))
+      : nullptr;
+  vtkMRMLPlotChartNode* activeChart =
+      (activeView && activeView->GetPlotChartNodeID())
+      ? vtkMRMLPlotChartNode::SafeDownCast(
+            this->mrmlScene()->GetNodeByID(activeView->GetPlotChartNodeID()))
+      : nullptr;
+  const bool inputPreviewDisplayed =
+      activeChart && activeChart->GetName() &&
+      std::string(activeChart->GetName()) ==
+          "DynamicPET.InputFunctionPreview.Chart";
+  if (inputPreviewDisplayed &&
+      d->externalIFPreviewSelectedIndex >= 0 &&
+      d->IFSourceSelector->currentIndex() == 1)
+  {
+    const size_t rawIndex = static_cast<size_t>(d->externalIFPreviewSelectedIndex);
+    std::vector<bool>& keep = d->activeExternalIFKeep();
+    if (keep.size() != d->externalIFTimesSec.size())
+    {
+      keep.assign(d->externalIFTimesSec.size(), true);
+    }
+
+    if (rawIndex < keep.size())
+    {
+      if (d->externalIFZeroAnchorAdded && rawIndex == 0)
+      {
+        d->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET IF] The assumed (0 s, 0) anchor is protected."));
+      }
+      else
+      {
+        const size_t retainedCount = static_cast<size_t>(
+            std::count(keep.begin(), keep.end(), true));
+        if (keep[rawIndex] && retainedCount > 2)
+        {
+          keep[rawIndex] = false;
+          d->logToPythonConsole(
+              QObject::tr("[SlicerDynamicPET IF] Excluded external IF observation at %1 s.")
+                  .arg(d->externalIFTimesSec[rawIndex], 0, 'g', 10));
+          d->invalidateInputFunctionResults();
+          d->updateInputFunctionStatus();
+          this->clearFITdata();
+          this->clearFITMTGAdata();
+          d->previewInputFunction();
+        }
+      }
+    }
+
+    d->externalIFPreviewSelectedIndex = -1;
+    return;
+  }
+
+  if (!inputPreviewDisplayed)
+  {
+    d->externalIFPreviewSelectedIndex = -1;
+  }
   if (!this->checkdisplayedDynamicPET())
     return;
-
-  if (this->PlotSelectedFrame == -1)
+  if (this->PlotSelectedFrame < 0 || this->PlotSelectedVOI.empty())
     return;
 
-  if (this->PlotSelectedVOI == "")
+  const auto tacIt = this->segmentTACs.find(this->PlotSelectedVOI);
+  if (tacIt == this->segmentTACs.end() ||
+      static_cast<size_t>(this->PlotSelectedFrame) >= tacIt->second.size())
     return;
 
-  if (this->segmentTACs.empty())
-    return;
-
-  vtkGenericWarningMacro("Segment " << this->segmentTACsnames[this->PlotSelectedVOI] << " removed at frame " << this->PlotSelectedFrame);
+  vtkGenericWarningMacro(
+      "Segment " << this->segmentTACsnames[this->PlotSelectedVOI]
+      << " removed at frame " << this->PlotSelectedFrame);
   this->segmentTACs[this->PlotSelectedVOI][this->PlotSelectedFrame].keep = false;
   this->segmentTACs[this->PlotSelectedVOI][this->PlotSelectedFrame].empty = false;
+
+  // Persist immediately in the active source state so deletion never leaks
+  // across Image/Table mode or disappears on a mode toggle.
+  if (d->isTableBasedMode())
+    d->captureActiveTACState(d->tableTACState);
+  else
+    d->captureActiveTACState(d->imageTACState);
 
   if (this->PlotSelectedVOI == this->IFID)
   {
     d->invalidateInputFunctionResults();
     d->updateInputFunctionStatus();
-    d->updateROIModelingAvailability();
-    d->updateParametricImagingAvailability();
   }
 
+  this->clearFITdata();
+  this->clearFITMTGAdata();
   this->onPlotbutton();
   this->PlotSelectedFrame = -1;
-  this->PlotSelectedVOI = "";
-  return;
+  this->PlotSelectedVOI.clear();
 }
 
 void qSlicerDynamicPETModuleWidget::onResetbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  vtkGenericWarningMacro("Restoring removed points ");
+  vtkGenericWarningMacro("Restoring removed points");
 
-  if (this->segmentTACs.empty())
-    return;
-
+  bool changed = false;
   bool currentInputWasModified = false;
-  const auto ifIt = this->segmentTACs.find(this->IFID);
-  if (ifIt != this->segmentTACs.end())
-  {
-    currentInputWasModified =
-        std::any_of(
-            ifIt->second.begin(),
-            ifIt->second.end(),
-            [](const VoxelStatistics& vs)
-            {
-              return !vs.keep && !vs.empty;
-            });
-  }
 
   for (auto& segmentPair : this->segmentTACs)
   {
-    const std::string& segmentID = segmentPair.first;
-    std::vector<VoxelStatistics>& tacVector = segmentPair.second;
+    const bool isCurrentInput =
+        d->IFSourceSelector->currentIndex() == 0 &&
+        segmentPair.first == this->IFID;
 
-    for (size_t frameID = 0; frameID < tacVector.size(); ++frameID)
+    for (VoxelStatistics& vs : segmentPair.second)
     {
-      VoxelStatistics& vs = tacVector[frameID];
-      if (!vs.empty)
+      if (!vs.empty && !vs.keep)
       {
-          vs.keep = true;
+        if (isCurrentInput)
+          currentInputWasModified = true;
+        vs.keep = true;
+        changed = true;
       }
     }
   }
+
+  std::vector<bool>& externalKeep = d->activeExternalIFKeep();
+  if (!externalKeep.empty())
+  {
+    const bool hadRemoved = std::any_of(
+        externalKeep.begin(), externalKeep.end(), [](bool keep){ return !keep; });
+    if (hadRemoved)
+    {
+      std::fill(externalKeep.begin(), externalKeep.end(), true);
+      d->logToPythonConsole(
+          QObject::tr("[SlicerDynamicPET IF] Restored excluded external IF observations for the active mode."));
+      changed = true;
+      if (d->IFSourceSelector->currentIndex() == 1)
+        currentInputWasModified = true;
+    }
+  }
+
+  if (d->isTableBasedMode())
+    d->captureActiveTACState(d->tableTACState);
+  else
+    d->captureActiveTACState(d->imageTACState);
+
   if (currentInputWasModified)
   {
     d->invalidateInputFunctionResults();
     d->updateInputFunctionStatus();
-    d->updateROIModelingAvailability();
-    d->updateParametricImagingAvailability();
   }
 
-  if (this->checkdisplayedDynamicPET()) {
+  if (changed)
+  {
+    this->clearFITdata();
+    this->clearFITMTGAdata();
+  }
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  vtkMRMLPlotViewNode* plotViewNode = scene
+      ? vtkMRMLPlotViewNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"))
+      : nullptr;
+  vtkMRMLPlotChartNode* currentPlot =
+      (scene && plotViewNode && plotViewNode->GetPlotChartNodeID())
+      ? vtkMRMLPlotChartNode::SafeDownCast(scene->GetNodeByID(plotViewNode->GetPlotChartNodeID()))
+      : nullptr;
+
+  if (currentPlot && currentPlot->GetName() &&
+      std::string(currentPlot->GetName()) == "DynamicPET.InputFunctionPreview.Chart" &&
+      d->IFSourceSelector->currentIndex() == 1)
+  {
+    d->previewInputFunction();
+  }
+  else if (this->checkdisplayedDynamicPET())
+  {
     this->onPlotbutton();
   }
-  return;
 }

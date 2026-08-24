@@ -897,6 +897,186 @@ static void fengJacobianInternal(
     }
 }
 
+
+struct ParentFractionFitContext
+{
+    std::vector<double> timesMin;
+    ParentFractionModel model{ParentFractionModel::Hill};
+    double maximumTimeMin{1.0};
+};
+
+static double parentFractionSafeExp(double x)
+{
+    return std::exp(std::max(-30.0, std::min(30.0, x)));
+}
+
+static double parentFractionSigmoid(double x)
+{
+    if (x >= 0.0)
+    {
+        const double z = std::exp(-std::min(40.0, x));
+        return 1.0 / (1.0 + z);
+    }
+    const double z = std::exp(std::max(-40.0, x));
+    return z / (1.0 + z);
+}
+
+static double parentFractionLogit(double p)
+{
+    const double clipped = std::max(1e-6, std::min(1.0 - 1e-6, p));
+    return std::log(clipped / (1.0 - clipped));
+}
+
+static int parentFractionParameterCount(ParentFractionModel model)
+{
+    switch (model)
+    {
+      case ParentFractionModel::Hill:
+        return 3;
+      case ParentFractionModel::ExtendedHill:
+        return 5;
+      case ParentFractionModel::ExponentialPlateau:
+        return 2;
+      default:
+        return 0;
+    }
+}
+
+static void parentFractionInternalToPhysical(
+    const double* u,
+    const ParentFractionFitContext& ctx,
+    ParentFractionFitParameters& p)
+{
+    p = ParentFractionFitParameters{};
+
+    if (ctx.model == ParentFractionModel::Hill)
+    {
+        p.A = parentFractionSigmoid(u[0]);
+        p.B = 1.0 + parentFractionSafeExp(u[1]);
+        p.C = parentFractionSafeExp(u[2]);
+    }
+    else if (ctx.model == ParentFractionModel::ExtendedHill)
+    {
+        p.D = parentFractionSigmoid(u[0]);
+        const double lowerRatio = parentFractionSigmoid(u[1]);
+        p.A = p.D * lowerRatio;
+        p.B = 1.0 + parentFractionSafeExp(u[2]);
+        p.C = parentFractionSafeExp(u[3]);
+        p.E = std::max(0.0, std::min(ctx.maximumTimeMin, u[4]));
+    }
+    else if (ctx.model == ParentFractionModel::ExponentialPlateau)
+    {
+        p.plateau = parentFractionSigmoid(u[0]);
+        p.rate = parentFractionSafeExp(u[1]);
+    }
+}
+
+static double parentFractionValueMin(
+    double timeMin,
+    ParentFractionModel model,
+    const ParentFractionFitParameters& p)
+{
+    const double t = std::max(0.0, timeMin);
+    double value = std::numeric_limits<double>::quiet_NaN();
+
+    if (model == ParentFractionModel::Hill)
+    {
+        if (!(p.C > 0.0) || !(p.B >= 1.0))
+            return value;
+        if (t <= 0.0)
+            return 1.0;
+        const double tb = std::pow(t, p.B);
+        value = 1.0 - (1.0 - p.A) * tb / (p.C + tb);
+    }
+    else if (model == ParentFractionModel::ExtendedHill)
+    {
+        if (!(p.C > 0.0) || !(p.B >= 1.0) ||
+            !(p.D >= 0.0) || !(p.D <= 1.0) ||
+            !(p.A >= 0.0) || !(p.A <= p.D))
+            return value;
+        if (t <= p.E)
+        {
+            value = p.D;
+        }
+        else
+        {
+            const double x = t - p.E;
+            const double xb = std::pow(x, p.B);
+            value = p.D - (p.D - p.A) * xb / (p.C + xb);
+        }
+    }
+    else if (model == ParentFractionModel::ExponentialPlateau)
+    {
+        if (!(p.plateau >= 0.0) || !(p.plateau <= 1.0) || !(p.rate > 0.0))
+            return value;
+        value = p.plateau + (1.0 - p.plateau) * std::exp(-p.rate * t);
+    }
+
+    if (!std::isfinite(value))
+        return value;
+    return std::max(0.0, std::min(1.0, value));
+}
+
+static void parentFractionEvaluateInternal(
+    double* u,
+    void* param,
+    double* out)
+{
+    auto* ctx = static_cast<ParentFractionFitContext*>(param);
+    ParentFractionFitParameters p;
+    parentFractionInternalToPhysical(u, *ctx, p);
+    for (size_t i = 0; i < ctx->timesMin.size(); ++i)
+    {
+        out[i] = parentFractionValueMin(ctx->timesMin[i], ctx->model, p);
+    }
+}
+
+static void parentFractionJacobianInternal(
+    double* u,
+    void* param,
+    double* out,
+    int* psens,
+    double* jac)
+{
+    auto* ctx = static_cast<ParentFractionFitContext*>(param);
+    const size_t n = ctx->timesMin.size();
+    const int pCount = parentFractionParameterCount(ctx->model);
+
+    parentFractionEvaluateInternal(u, param, out);
+
+    std::vector<double> plus(static_cast<size_t>(pCount), 0.0);
+    std::vector<double> minus(static_cast<size_t>(pCount), 0.0);
+    std::vector<double> yPlus(n, 0.0);
+    std::vector<double> yMinus(n, 0.0);
+
+    int column = 0;
+    for (int j = 0; j < pCount; ++j)
+    {
+        if (!psens[j])
+            continue;
+
+        for (int k = 0; k < pCount; ++k)
+        {
+            plus[static_cast<size_t>(k)] = u[k];
+            minus[static_cast<size_t>(k)] = u[k];
+        }
+
+        const double step = 1e-5 * (1.0 + std::abs(u[j]));
+        plus[static_cast<size_t>(j)] += step;
+        minus[static_cast<size_t>(j)] -= step;
+
+        parentFractionEvaluateInternal(plus.data(), param, yPlus.data());
+        parentFractionEvaluateInternal(minus.data(), param, yMinus.data());
+
+        for (size_t i = 0; i < n; ++i)
+        {
+            jac[i + static_cast<size_t>(column) * n] =
+                (yPlus[i] - yMinus[i]) / (2.0 * step);
+        }
+        ++column;
+    }
+}
+
 } // end anonymous namespace
 
 static const std::map<std::string, std::set<std::string>> MODEL_PARAMS = {
@@ -1503,6 +1683,201 @@ double vtkSlicerDynamicPETLogic::AverageFengInputFunction(
         (fengCumulativeMin(endMin, params) -
          fengCumulativeMin(startMin, params)) /
         (endMin - startMin);
+}
+
+//----------------------------------------------------------------------------
+bool vtkSlicerDynamicPETLogic::FitParentFraction(
+    const std::vector<double>& timesSec,
+    const std::vector<double>& values,
+    ParentFractionModel model,
+    ParentFractionFitParameters& params,
+    std::vector<double>& fittedObservationValues,
+    std::string* errorMessage)
+{
+    params = ParentFractionFitParameters{};
+    fittedObservationValues.clear();
+
+    if (model == ParentFractionModel::Linear)
+    {
+        if (errorMessage)
+            *errorMessage = "Linear parent-fraction interpolation does not require parametric fitting.";
+        return false;
+    }
+
+    if (timesSec.size() != values.size())
+    {
+        if (errorMessage)
+            *errorMessage = "Parent-fraction fitting requires one time for every fraction value.";
+        return false;
+    }
+
+    const int pCount = parentFractionParameterCount(model);
+    const size_t minimumObservations =
+        model == ParentFractionModel::ExtendedHill ? 6u :
+        model == ParentFractionModel::Hill ? 4u : 3u;
+
+    if (values.size() < minimumObservations)
+    {
+        if (errorMessage)
+        {
+            *errorMessage =
+                "Not enough retained parent-fraction observations for the selected model.";
+        }
+        return false;
+    }
+
+    ParentFractionFitContext context;
+    context.model = model;
+    context.timesMin.resize(timesSec.size());
+
+    for (size_t i = 0; i < timesSec.size(); ++i)
+    {
+        if (!std::isfinite(timesSec[i]) || !std::isfinite(values[i]) ||
+            values[i] < 0.0 || values[i] > 1.0)
+        {
+            if (errorMessage)
+                *errorMessage = "Parent-fraction samples must be finite and between 0 and 1.";
+            return false;
+        }
+        if (i > 0 && timesSec[i] <= timesSec[i - 1])
+        {
+            if (errorMessage)
+                *errorMessage = "Parent-fraction sample times must be strictly increasing.";
+            return false;
+        }
+        context.timesMin[i] = timesSec[i] / 60.0;
+    }
+
+    context.maximumTimeMin = std::max(1e-3, context.timesMin.back());
+
+    std::vector<std::vector<double>> starts;
+    std::vector<double> lower(static_cast<size_t>(pCount), -30.0);
+    std::vector<double> upper(static_cast<size_t>(pCount), 30.0);
+
+    const double first = std::max(1e-4, std::min(0.9999, values.front()));
+    const double last = std::max(1e-4, std::min(0.9999, values.back()));
+    const double tScale = std::max(
+        1e-3,
+        context.timesMin[context.timesMin.size() / 2]);
+
+    if (model == ParentFractionModel::Hill)
+    {
+        lower = {-12.0, -6.0, -20.0};
+        upper = { 12.0,  3.0,  20.0};
+        for (double b0 : {1.5, 2.0, 3.0})
+        {
+            const double c0 = std::max(1e-6, std::pow(tScale, b0));
+            starts.push_back({
+                parentFractionLogit(last),
+                std::log(std::max(1e-6, b0 - 1.0)),
+                std::log(c0)});
+        }
+    }
+    else if (model == ParentFractionModel::ExtendedHill)
+    {
+        lower = {-12.0, -12.0, -6.0, -20.0, 0.0};
+        upper = { 12.0,  12.0,  3.0,  20.0, context.maximumTimeMin};
+        const double d0 = std::max(first, last + 1e-4);
+        const double ratio0 = std::max(1e-4, std::min(0.9999, last / d0));
+        for (double b0 : {1.5, 2.0, 3.0})
+        {
+            const double c0 = std::max(1e-6, std::pow(tScale, b0));
+            for (double e0 : {0.0, 0.05 * context.maximumTimeMin})
+            {
+                starts.push_back({
+                    parentFractionLogit(d0),
+                    parentFractionLogit(ratio0),
+                    std::log(std::max(1e-6, b0 - 1.0)),
+                    std::log(c0),
+                    std::min(context.maximumTimeMin, e0)});
+            }
+        }
+    }
+    else if (model == ParentFractionModel::ExponentialPlateau)
+    {
+        lower = {-12.0, -20.0};
+        upper = { 12.0,  10.0};
+        const double baseRate = 1.0 / context.maximumTimeMin;
+        for (double multiplier : {0.25, 1.0, 4.0, 10.0})
+        {
+            starts.push_back({
+                parentFractionLogit(last),
+                std::log(std::max(1e-8, multiplier * baseRate))});
+        }
+    }
+
+    double bestSSE = std::numeric_limits<double>::infinity();
+    std::vector<double> bestInternal;
+    std::vector<double> bestFitted(values.size(), 0.0);
+
+    for (std::vector<double> u : starts)
+    {
+        std::vector<int> sensitive(static_cast<size_t>(pCount), 1);
+        std::vector<double> weights(values.size(), 1.0);
+        std::vector<double> predicted(values.size(), 0.0);
+        std::vector<double> observations = values;
+
+        kmap_levmar(
+            observations.data(),
+            weights.data(),
+            static_cast<int>(observations.size()),
+            u.data(),
+            pCount,
+            &context,
+            parentFractionEvaluateInternal,
+            parentFractionJacobianInternal,
+            lower.data(),
+            upper.data(),
+            sensitive.data(),
+            300,
+            predicted.data());
+
+        parentFractionEvaluateInternal(u.data(), &context, predicted.data());
+
+        double sse = 0.0;
+        bool finite = true;
+        for (size_t i = 0; i < values.size(); ++i)
+        {
+            if (!std::isfinite(predicted[i]))
+            {
+                finite = false;
+                break;
+            }
+            const double residual = values[i] - predicted[i];
+            sse += residual * residual;
+        }
+
+        if (finite && sse < bestSSE)
+        {
+            bestSSE = sse;
+            bestInternal = u;
+            bestFitted = predicted;
+        }
+    }
+
+    if (!std::isfinite(bestSSE) || bestInternal.empty())
+    {
+        if (errorMessage)
+            *errorMessage = "Parent-fraction optimization did not produce a finite solution.";
+        return false;
+    }
+
+    parentFractionInternalToPhysical(bestInternal.data(), context, params);
+    params.SSE = bestSSE;
+    params.numberOfObservations = static_cast<int>(values.size());
+    fittedObservationValues = std::move(bestFitted);
+    return true;
+}
+
+//----------------------------------------------------------------------------
+double vtkSlicerDynamicPETLogic::EvaluateParentFraction(
+    double timeSec,
+    ParentFractionModel model,
+    const ParentFractionFitParameters& params) const
+{
+    if (!std::isfinite(timeSec) || timeSec < 0.0)
+        return std::numeric_limits<double>::quiet_NaN();
+    return parentFractionValueMin(timeSec / 60.0, model, params);
 }
 
 //----------------------------------------------------------------------------

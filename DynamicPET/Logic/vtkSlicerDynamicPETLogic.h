@@ -76,8 +76,10 @@ struct VoxelStatistics
   double q1 = 0.0;
   double q3 = 0.0;
   double iqr = 0.0;
+  // PET-grid volume retained for backwards compatibility.
   double volume_mm3 = 0.0;
   double volume_cm3 = 0.0;
+  // Same segmentation rasterized on the CT reference grid, when available.
   double peak = 0.0;
   double peakStddev = 0.0;
   int peakCount = 0;

@@ -40,8 +40,11 @@
 #include <QHBoxLayout>
 #include <QFileInfo>
 #include <QSignalBlocker>
+#include <QSizePolicy>
 
 #include <vtkWeakPointer.h>
+#include <vtkDataArray.h>
+#include <vtkSlicerSegmentationsModuleLogic.h>
 
 #include <cmath>
 #include <limits>
@@ -324,6 +327,156 @@ static std::vector<double> lowessPredict(
     return out;
 }
 
+static std::vector<double> gaussianKernelPredict(
+    const std::vector<double>& x,
+    const std::vector<double>& y,
+    const std::vector<double>& evalX,
+    double sigmaSec)
+{
+    if (x.empty() || x.size() != y.size() || !(sigmaSec > 0.0))
+    {
+        return {};
+    }
+
+    std::vector<double> out;
+    out.reserve(evalX.size());
+    const double invTwoSigma2 = 1.0 / (2.0 * sigmaSec * sigmaSec);
+    const double cutoff = 4.0 * sigmaSec;
+
+    for (double t : evalX)
+    {
+        double sw = 0.0;
+        double swy = 0.0;
+        size_t nearest = 0;
+        double nearestDistance = std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const double distance = std::abs(x[i] - t);
+            if (distance < nearestDistance)
+            {
+                nearestDistance = distance;
+                nearest = i;
+            }
+            if (distance > cutoff)
+            {
+                continue;
+            }
+            const double weight = std::exp(-distance * distance * invTwoSigma2);
+            sw += weight;
+            swy += weight * y[i];
+        }
+        out.push_back(sw > 1e-14 ? swy / sw : y[nearest]);
+    }
+    return out;
+}
+
+static bool pchipSlopes(
+    const std::vector<double>& x,
+    const std::vector<double>& y,
+    std::vector<double>& slopes)
+{
+    const size_t n = x.size();
+    if (n < 2 || n != y.size())
+    {
+        return false;
+    }
+    for (size_t i = 1; i < n; ++i)
+    {
+        if (!(x[i] > x[i - 1]))
+        {
+            return false;
+        }
+    }
+
+    slopes.assign(n, 0.0);
+    if (n == 2)
+    {
+        const double d = (y[1] - y[0]) / (x[1] - x[0]);
+        slopes[0] = slopes[1] = d;
+        return true;
+    }
+
+    std::vector<double> h(n - 1);
+    std::vector<double> delta(n - 1);
+    for (size_t i = 0; i + 1 < n; ++i)
+    {
+        h[i] = x[i + 1] - x[i];
+        delta[i] = (y[i + 1] - y[i]) / h[i];
+    }
+
+    for (size_t i = 1; i + 1 < n; ++i)
+    {
+        if (delta[i - 1] == 0.0 || delta[i] == 0.0 ||
+            delta[i - 1] * delta[i] <= 0.0)
+        {
+            slopes[i] = 0.0;
+        }
+        else
+        {
+            const double w1 = 2.0 * h[i] + h[i - 1];
+            const double w2 = h[i] + 2.0 * h[i - 1];
+            slopes[i] = (w1 + w2) /
+                (w1 / delta[i - 1] + w2 / delta[i]);
+        }
+    }
+
+    auto endpointSlope = [](double h0, double h1, double d0, double d1)
+    {
+        double m = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+        if (m * d0 <= 0.0)
+        {
+            return 0.0;
+        }
+        if (d0 * d1 < 0.0 && std::abs(m) > 3.0 * std::abs(d0))
+        {
+            return 3.0 * d0;
+        }
+        return m;
+    };
+
+    slopes.front() = endpointSlope(h[0], h[1], delta[0], delta[1]);
+    slopes.back() = endpointSlope(
+        h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
+    return true;
+}
+
+static double pchipInterpolate(
+    const std::vector<double>& x,
+    const std::vector<double>& y,
+    double target)
+{
+    if (x.size() < 2 || x.size() != y.size() ||
+        target < x.front() || target > x.back())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    if (target == x.back())
+    {
+        return y.back();
+    }
+
+    std::vector<double> m;
+    if (!pchipSlopes(x, y, m))
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const auto upper = std::upper_bound(x.begin(), x.end(), target);
+    const size_t right = static_cast<size_t>(std::distance(x.begin(), upper));
+    const size_t left = right - 1;
+    const double h = x[right] - x[left];
+    const double u = (target - x[left]) / h;
+    const double u2 = u * u;
+    const double u3 = u2 * u;
+    const double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+    const double h10 = u3 - 2.0 * u2 + u;
+    const double h01 = -2.0 * u3 + 3.0 * u2;
+    const double h11 = u3 - u2;
+    return std::max(0.0,
+        h00 * y[left] + h10 * h * m[left] +
+        h01 * y[right] + h11 * h * m[right]);
+}
+
 bool segmentNameLessCaseInsensitive(
     const std::string& a,
     const std::string& b)
@@ -365,12 +518,50 @@ double statisticDispersionSigma(
   return std::numeric_limits<double>::quiet_NaN();
 }
 
-double inverseVarianceWeightFromSigma(double sigma)
+double medianValidSigma(const std::vector<double>& sigmas)
+{
+  std::vector<double> valid;
+  valid.reserve(sigmas.size());
+
+  for (double sigma : sigmas)
+  {
+    if (std::isfinite(sigma) && sigma > 1e-12)
+    {
+      valid.push_back(sigma);
+    }
+  }
+
+  if (valid.empty())
+  {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  std::sort(valid.begin(), valid.end());
+
+  const size_t n = valid.size();
+  if (n % 2 == 1)
+  {
+    return valid[n / 2];
+  }
+
+  return 0.5 * (valid[n / 2 - 1] + valid[n / 2]);
+}
+
+
+double inverseVarianceWeightFromSigma(
+    double sigma,
+    double fallbackSigma =
+        std::numeric_limits<double>::quiet_NaN())
 {
   if (!std::isfinite(sigma) || sigma <= 1e-12)
   {
-    // Spatial dispersion is a weighting proxy, not a known measurement
-    // variance.  Do not turn a zero/undefined proxy into an infinite weight.
+    sigma = fallbackSigma;
+  }
+
+  // This should normally only happen if the entire uncertainty
+  // series is invalid. WLS availability checks should prevent that.
+  if (!std::isfinite(sigma) || sigma <= 1e-12)
+  {
     return 1.0;
   }
 
@@ -530,6 +721,8 @@ protected:
   void updateQuantitativeUnitUI();
   void removeInputFunctionPreview();
   void removePreviewGroup(const std::string& groupName);
+  bool previewGroupExists(const std::string& groupName);
+  void refreshInputFunctionPreviewIfVisible();
   void showCurvePreview(
       const std::string& groupName,
       const QString& title,
@@ -595,6 +788,11 @@ public:
       size_t frameIndex,
       const std::string& statistic,
       const VoxelStatistics& stats) const;
+  bool plotDistributionSelected() const;
+  void enforceDistributionSelection();
+  bool plotROIDistribution(
+      const std::string& segmentID,
+      QString* errorMessage = nullptr);
 
   void invalidateInputFunctionResults();
 
@@ -711,6 +909,7 @@ public:
   std::vector<TACStatisticOption> tableFitStatistics;
   std::vector<TACStatisticOption> tablePlotStatistics;
   std::map<std::string, std::map<std::string, std::vector<double>>> tableSigma;
+  std::string lastPlotSegmentID;
 
   QString externalIFPath;
   std::vector<double> externalIFTimesSec;
@@ -771,11 +970,10 @@ public:
   };
   enum class BodySupportSource
   {
-      Auto = 0,
+      PET = 0,
       CT = 1,
-      PET = 2,
-      Union = 3,
-      Intersection = 4
+      Union = 2,
+      Intersection = 3
   };
   void generateMTGAOptimizedResult();
 
@@ -979,23 +1177,13 @@ updateBodySupportUI()
             currentIndex();
 
     // If CT disappeared while a CT-dependent mode was selected,
-    // safely return to Auto.
-    if (!hasCT &&
-        (sourceMode == 1 ||
-         sourceMode == 3 ||
-         sourceMode == 4))
+    // safely return to the PET default.
+    if (!hasCT && sourceMode != 0)
     {
-        this->BodySupportSourceImg->
-            blockSignals(true);
-
-        this->BodySupportSourceImg->
-            setCurrentIndex(0);
-
-        this->BodySupportSourceImg->
-            blockSignals(false);
-
+        this->BodySupportSourceImg->blockSignals(true);
+        this->BodySupportSourceImg->setCurrentIndex(0);
+        this->BodySupportSourceImg->blockSignals(false);
         sourceMode = 0;
-
         this->invalidateParametricVoxelSelection();
     }
 
@@ -1008,39 +1196,31 @@ updateBodySupportUI()
     if (model)
     {
         if (model->item(0))
-            model->item(0)->setEnabled(hasPET); // Auto
-
+            model->item(0)->setEnabled(hasPET); // PET
         if (model->item(1))
             model->item(1)->setEnabled(hasPET && hasCT); // CT
-
         if (model->item(2))
-            model->item(2)->setEnabled(hasPET); // PET
-
+            model->item(2)->setEnabled(hasPET && hasCT); // Union
         if (model->item(3))
-            model->item(3)->setEnabled(hasPET && hasCT); // Union
-
-        if (model->item(4))
-            model->item(4)->setEnabled(hasPET && hasCT); // Intersection
+            model->item(3)->setEnabled(hasPET && hasCT); // Intersection
     }
 
     const bool sourceUsesCT =
         supportEnabled &&
         hasCT &&
         (
-            sourceMode == 0 || // Auto -> CT if available
             sourceMode == 1 || // CT
-            sourceMode == 3 || // Union
-            sourceMode == 4    // Intersection
+            sourceMode == 2 || // Union
+            sourceMode == 3    // Intersection
         );
 
     const bool sourceUsesPET =
         supportEnabled &&
         hasPET &&
         (
-            sourceMode == 2 || // PET
-            sourceMode == 3 || // Union
-            sourceMode == 4 || // Intersection
-            (sourceMode == 0 && !hasCT) // Auto without CT
+            sourceMode == 0 || // PET
+            sourceMode == 2 || // Union
+            sourceMode == 3    // Intersection
         );
 
     this->BodySupportSourceImg->
@@ -1164,6 +1344,48 @@ removePreviewGroup(
             scene->RemoveNode(node);
         }
     }
+}
+
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+previewGroupExists(const std::string& groupName)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    vtkMRMLScene* scene = q->mrmlScene();
+    if (!scene)
+    {
+        return false;
+    }
+    for (int i = 0; i < scene->GetNumberOfNodes(); ++i)
+    {
+        vtkMRMLNode* node = scene->GetNthNode(i);
+        if (!node)
+        {
+            continue;
+        }
+        const char* group = node->GetAttribute("SlicerDynamicPET.IFPreviewGroup");
+        if (group && groupName == group &&
+            vtkMRMLPlotChartNode::SafeDownCast(node))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+refreshInputFunctionPreviewIfVisible()
+{
+    if (!this->previewGroupExists("InputFunctionPreview"))
+    {
+        return;
+    }
+
+    // Replace the already-open preview in place. This is intentionally called
+    // only after the user has opened Preview once, so routine parameter edits
+    // do not force a plot layout change.
+    this->previewInputFunction();
 }
 
 void
@@ -1554,6 +1776,83 @@ previewInputFunction()
                     static_cast<std::ptrdiff_t>(n));
         };
 
+    const std::string previewInterpolation = this->selectedIFInterpolation();
+    const double previewEndSec =
+        previewFrameCount > 0 ? q->timePoints[previewFrameCount - 1] : 0.0;
+    const double requestedStep = this->timeStepEdit->text().toDouble();
+    const double densePreviewStepSec =
+        std::max(0.25, std::min(1.0, requestedStep > 0.0 ? requestedStep : 1.0));
+
+    auto densifyNativeForPreview =
+        [&](const std::vector<double>& times,
+            const std::vector<double>& values,
+            std::vector<double>& denseTimes,
+            std::vector<double>& denseValues)
+        {
+            denseTimes.clear();
+            denseValues.clear();
+            if (previewInterpolation != "pchip" ||
+                times.size() < 2 || times.size() != values.size())
+            {
+                return false;
+            }
+            const double endSec = std::min(previewEndSec, times.back());
+            if (endSec < times.front())
+            {
+                return false;
+            }
+            for (double t = times.front(); t < endSec; t += densePreviewStepSec)
+            {
+                const double value = this->interpolateInputFunction(
+                    times, values, t, previewInterpolation);
+                if (std::isfinite(value))
+                {
+                    denseTimes.push_back(t);
+                    denseValues.push_back(value);
+                }
+            }
+            const double lastValue = this->interpolateInputFunction(
+                times, values, endSec, previewInterpolation);
+            if (std::isfinite(lastValue))
+            {
+                denseTimes.push_back(endSec);
+                denseValues.push_back(lastValue);
+            }
+            return denseTimes.size() >= 2;
+        };
+
+    auto densifyFramesForPreview =
+        [&](const std::vector<double>& frameValues,
+            std::vector<double>& denseTimes,
+            std::vector<double>& denseValues)
+        {
+            denseTimes.clear();
+            denseValues.clear();
+            if (previewInterpolation != "pchip" ||
+                frameValues.size() < previewFrameCount || previewFrameCount < 2)
+            {
+                return false;
+            }
+            for (double t = 0.0; t < previewEndSec; t += densePreviewStepSec)
+            {
+                const double value = this->evaluateFrameCurve(
+                    frameValues, t, previewInterpolation);
+                if (std::isfinite(value))
+                {
+                    denseTimes.push_back(t);
+                    denseValues.push_back(value);
+                }
+            }
+            const double lastValue = this->evaluateFrameCurve(
+                frameValues, previewEndSec, previewInterpolation);
+            if (std::isfinite(lastValue))
+            {
+                denseTimes.push_back(previewEndSec);
+                denseValues.push_back(lastValue);
+            }
+            return denseTimes.size() >= 2;
+        };
+
     std::vector<PreviewCurve> curves;
     curves.push_back(
         {QObject::tr("Original source"),
@@ -1601,12 +1900,29 @@ previewInputFunction()
             return;
         }
 
+        std::vector<double> curveTimes =
+            useNative ? result.nativeWholeBloodTimesSec : frameTimes;
+        std::vector<double> curveValues = displayValues;
+        std::vector<double> denseTimes;
+        std::vector<double> denseNativeValues;
+        if (useNative
+                ? densifyNativeForPreview(result.nativeWholeBloodTimesSec, nativeValues, denseTimes, denseNativeValues)
+                : densifyFramesForPreview(frameValues, denseTimes, denseNativeValues))
+        {
+            std::vector<double> denseDisplayValues;
+            if (!toDisplay(denseNativeValues, denseDisplayValues))
+            {
+                QMessageBox::warning(q, QObject::tr("Input Function"), error);
+                return;
+            }
+            curveTimes = std::move(denseTimes);
+            curveValues = std::move(denseDisplayValues);
+        }
+
         curves.push_back(
             {QObject::tr("Total whole blood"),
-             useNative
-                 ? result.nativeWholeBloodTimesSec
-                 : frameTimes,
-             displayValues,
+             curveTimes,
+             curveValues,
              false});
     }
 
@@ -1628,12 +1944,29 @@ previewInputFunction()
             return;
         }
 
+        std::vector<double> curveTimes =
+            useNative ? result.nativePlasmaTimesSec : frameTimes;
+        std::vector<double> curveValues = displayValues;
+        std::vector<double> denseTimes;
+        std::vector<double> denseNativeValues;
+        if (useNative
+                ? densifyNativeForPreview(result.nativePlasmaTimesSec, nativeValues, denseTimes, denseNativeValues)
+                : densifyFramesForPreview(frameValues, denseTimes, denseNativeValues))
+        {
+            std::vector<double> denseDisplayValues;
+            if (!toDisplay(denseNativeValues, denseDisplayValues))
+            {
+                QMessageBox::warning(q, QObject::tr("Input Function"), error);
+                return;
+            }
+            curveTimes = std::move(denseTimes);
+            curveValues = std::move(denseDisplayValues);
+        }
+
         curves.push_back(
             {QObject::tr("Total plasma"),
-             useNative
-                 ? result.nativePlasmaTimesSec
-                 : frameTimes,
-             displayValues,
+             curveTimes,
+             curveValues,
              false});
     }
 
@@ -2058,11 +2391,16 @@ std::string
 qSlicerDynamicPETModuleWidgetPrivate::
 selectedIFInterpolation() const
 {
-    return
-        this->IFInterpolationSelector->
-            currentIndex() == 1
-        ? "const"
-        : "linear";
+    const int index = this->IFInterpolationSelector->currentIndex();
+    if (index == 1)
+    {
+        return "const";
+    }
+    if (index == 2)
+    {
+        return "pchip";
+    }
+    return "linear";
 }
 
 IFCurveDomain
@@ -2596,16 +2934,46 @@ updateTableWeightingAvailability()
 
     if (!this->tableBasedMode)
     {
-        this->weightedFitCheckBox->setEnabled(true);
-        this->weightFitCheckBox->setEnabled(true);
+        auto imageStatisticSupportsWeighting = [](QComboBox* combo)
+        {
+            if (!combo || combo->currentIndex() < 0)
+            {
+                return false;
+            }
+            const std::string stat =
+                combo->currentData().toString().toStdString();
+            return stat == "Mean" || stat == "Median" || stat == "Peak";
+        };
+
+        const bool tcmWeightedAvailable =
+            imageStatisticSupportsWeighting(this->StatSelector);
+        const bool mtgaWeightedAvailable =
+            imageStatisticSupportsWeighting(this->StatSelectorMTGA);
+
+        if (!tcmWeightedAvailable && this->weightFitCheckBox->isChecked())
+        {
+            this->weightFitCheckBox->setChecked(false);
+            this->standardFitCheckBox->setChecked(true);
+        }
+        if (!mtgaWeightedAvailable && this->weightedFitCheckBox->isChecked())
+        {
+            this->weightedFitCheckBox->setChecked(false);
+        }
+
+        this->weightFitCheckBox->setEnabled(tcmWeightedAvailable);
+        this->weightedFitCheckBox->setEnabled(mtgaWeightedAvailable);
         this->weightFitCheckBox->setToolTip(
-            QObject::tr("ROI WLS uses normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak."));
+            tcmWeightedAvailable
+            ? QObject::tr("Weighted least squares using normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.")
+            : QObject::tr("WLS is not enabled for Max because no measurement-uncertainty estimate is derived from a single maximum voxel value."));
         this->weightedFitCheckBox->setToolTip(
-            QObject::tr("Weighted Least Squares using inverse-variance proxy weights: ROI SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak."));
+            mtgaWeightedAvailable
+            ? QObject::tr("Weighted least squares using inverse-variance proxy weights: ROI SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.")
+            : QObject::tr("WLS is not enabled for Max because no measurement-uncertainty estimate is derived from a single maximum voxel value."));
         return;
     }
 
-    auto hasCompleteSigma =
+    auto hasUsableSigma =
         [this](const std::string& statistic)
         {
             if (statistic.empty() || this->tableTACState.segmentTACs.empty())
@@ -2613,6 +2981,12 @@ updateTableWeightingAvailability()
                 return false;
             }
 
+            // Match the actual weighting implementation: individual zero or
+            // undefined sigma values are treated as neutral weights, not as a
+            // reason to disable WLS for the entire workbook.  Require at least
+            // one finite positive uncertainty for each ROI so WLS remains
+            // meaningful while DynamicPET round-trip workbooks containing an
+            // occasional zero-dispersion frame stay usable.
             for (const auto& pair : this->tableTACState.segmentTACs)
             {
                 const auto segIt = this->tableSigma.find(pair.first);
@@ -2626,12 +3000,19 @@ updateTableWeightingAvailability()
                 {
                     return false;
                 }
+
+                bool roiHasPositiveSigma = false;
                 for (double sigma : statIt->second)
                 {
-                    if (!std::isfinite(sigma) || sigma <= 0.0)
+                    if (std::isfinite(sigma) && sigma > 1e-12)
                     {
-                        return false;
+                        roiHasPositiveSigma = true;
+                        break;
                     }
+                }
+                if (!roiHasPositiveSigma)
+                {
+                    return false;
                 }
             }
             return true;
@@ -2649,12 +3030,13 @@ updateTableWeightingAvailability()
         ? this->StatSelectorMTGA->itemData(mtgaIndex).toString().toStdString()
         : std::string();
 
-    const bool tcmHasSigma = hasCompleteSigma(tcmStat);
-    const bool mtgaHasSigma = hasCompleteSigma(mtgaStat);
+    const bool tcmHasSigma = hasUsableSigma(tcmStat);
+    const bool mtgaHasSigma = hasUsableSigma(mtgaStat);
 
     if (!tcmHasSigma && this->weightFitCheckBox->isChecked())
     {
         this->weightFitCheckBox->setChecked(false);
+        this->standardFitCheckBox->setChecked(true);
     }
     if (!mtgaHasSigma && this->weightedFitCheckBox->isChecked())
     {
@@ -2666,13 +3048,13 @@ updateTableWeightingAvailability()
 
     this->weightFitCheckBox->setToolTip(
         tcmHasSigma
-        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty.")
-        : QObject::tr("Weighted least squares is unavailable because the selected table TAC does not provide a complete positive uncertainty series."));
+        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty. Zero or undefined uncertainty entries are assigned a neutral weight instead of disabling the whole fit.")
+        : QObject::tr("Weighted least squares is unavailable because at least one ROI does not provide any positive uncertainty values for the selected TAC statistic."));
 
     this->weightedFitCheckBox->setToolTip(
         mtgaHasSigma
-        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty.")
-        : QObject::tr("Weighted least squares is unavailable because the selected table TAC does not provide a complete positive uncertainty series."));
+        ? QObject::tr("Weighted least squares using imported one-sigma TAC uncertainty. Zero or undefined uncertainty entries are assigned a neutral weight instead of disabling the whole fit.")
+        : QObject::tr("Weighted least squares is unavailable because at least one ROI does not provide any positive uncertainty values for the selected TAC statistic."));
 }
 
 //-----------------------------------------------------------------------------
@@ -2695,15 +3077,19 @@ rebuildTACStatisticUI()
         fitOptions = {
             {QObject::tr("Mean"), "Mean"},
             {QObject::tr("Median"), "Median"},
-            {QObject::tr("Peak"), "Peak"}
+            {QObject::tr("Peak"), "Peak"},
+            {QObject::tr("Max"), "Max"}
         };
         plotOptions = {
             {QObject::tr("Mean"), "Mean"},
             {QObject::tr("Median"), "Median"},
             {QObject::tr("Peak"), "Peak"},
             {QObject::tr("Min"), "Min"},
-            {QObject::tr("Max"), "Max"}
+            {QObject::tr("Max"), "Max"},
+            {QObject::tr("Volume [PET] (cm3)"), "VolumePET"},
+            {QObject::tr("Distribution"), "Distribution"}
         };
+
     }
 
     auto rebuildCombo =
@@ -2734,12 +3120,350 @@ rebuildTACStatisticUI()
     {
         QCheckBox* cb = new QCheckBox(option.label, this->PlotStatsCheckContents);
         cb->setProperty("StatID", QString::fromStdString(option.id));
+        if (option.id == "VolumePET")
+        {
+            cb->setToolTip(QObject::tr(
+                "Physical ROI volume after rasterizing the dynamic segmentation on the PET reference grid."));
+        }
+        else if (option.id == "Max")
+        {
+            cb->setToolTip(QObject::tr(
+                "Maximum voxel value inside the ROI for each frame."));
+        }
+        else if (option.id == "Distribution")
+        {
+            cb->setToolTip(QObject::tr(
+                "Image mode only. Plot the voxel-value histogram for one ROI at the last selected TAC frame, or at the currently displayed PET frame if no TAC point has been selected. Selecting Distribution unchecks all other plot metrics and keeps only one ROI."));
+        }
+
+        QObject::connect(
+            cb, &QCheckBox::toggled, q,
+            [this, cb, option](bool checked)
+            {
+                if (!checked)
+                {
+                    return;
+                }
+                if (option.id == "Distribution")
+                {
+                    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+                    {
+                        QCheckBox* other = qobject_cast<QCheckBox*>(
+                            this->PlotStatsCheckLayout->itemAt(i)->widget());
+                        if (other && other != cb)
+                        {
+                            QSignalBlocker blocker(other);
+                            other->setChecked(false);
+                        }
+                    }
+                    this->enforceDistributionSelection();
+                }
+                else
+                {
+                    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+                    {
+                        QCheckBox* other = qobject_cast<QCheckBox*>(
+                            this->PlotStatsCheckLayout->itemAt(i)->widget());
+                        if (other && other != cb &&
+                            other->property("StatID").toString() == "Distribution")
+                        {
+                            QSignalBlocker blocker(other);
+                            other->setChecked(false);
+                        }
+                    }
+                }
+            });
+
         this->PlotStatsCheckLayout->addWidget(cb);
     }
 
     this->updateTableWeightingAvailability();
     q->clearFITdata();
     q->clearFITMTGAdata();
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+plotDistributionSelected() const
+{
+    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+    {
+        QCheckBox* cb = qobject_cast<QCheckBox*>(
+            this->PlotStatsCheckLayout->itemAt(i)->widget());
+        if (cb && cb->isChecked() &&
+            cb->property("StatID").toString() == "Distribution")
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+enforceDistributionSelection()
+{
+    if (!this->plotDistributionSelected())
+    {
+        return;
+    }
+
+    QCheckBox* keep = nullptr;
+    for (int i = 0; i < this->PlotsegmentCheckLayout->count(); ++i)
+    {
+        QCheckBox* cb = qobject_cast<QCheckBox*>(
+            this->PlotsegmentCheckLayout->itemAt(i)->widget());
+        if (!cb)
+        {
+            continue;
+        }
+        const std::string id = cb->property("SegmentID").toString().toStdString();
+        if (!this->lastPlotSegmentID.empty() && id == this->lastPlotSegmentID)
+        {
+            keep = cb;
+            break;
+        }
+        if (!keep && cb->isChecked())
+        {
+            keep = cb;
+        }
+        if (!keep)
+        {
+            keep = cb;
+        }
+    }
+
+    if (!keep)
+    {
+        return;
+    }
+
+    this->lastPlotSegmentID =
+        keep->property("SegmentID").toString().toStdString();
+
+    for (int i = 0; i < this->PlotsegmentCheckLayout->count(); ++i)
+    {
+        QCheckBox* cb = qobject_cast<QCheckBox*>(
+            this->PlotsegmentCheckLayout->itemAt(i)->widget());
+        if (!cb)
+        {
+            continue;
+        }
+        QSignalBlocker blocker(cb);
+        cb->setChecked(cb == keep);
+    }
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+plotROIDistribution(
+    const std::string& segmentID,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (this->tableBasedMode)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Voxel distributions require image data and are not available in Table mode.");
+        }
+        return false;
+    }
+    if (!q->sequencePETNode || !q->segSequenceNode)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("Dynamic PET or segmentation sequence is unavailable.");
+        }
+        return false;
+    }
+
+    int frameIndex = q->PlotSelectedFrame;
+    if (frameIndex < 0 && q->sequenceBrowserPETNode)
+    {
+        frameIndex = q->sequenceBrowserPETNode->GetSelectedItemNumber();
+    }
+    if (frameIndex < 0)
+    {
+        frameIndex = 0;
+    }
+    if (frameIndex >= q->sequencePETNode->GetNumberOfDataNodes())
+    {
+        frameIndex = q->sequencePETNode->GetNumberOfDataNodes() - 1;
+    }
+    if (frameIndex < 0)
+    {
+        if (errorMessage) *errorMessage = QObject::tr("No PET frame is available.");
+        return false;
+    }
+
+    const std::string indexValue =
+        q->sequencePETNode->GetNthIndexValue(frameIndex);
+    vtkMRMLScalarVolumeNode* petVolume =
+        vtkMRMLScalarVolumeNode::SafeDownCast(
+            q->sequencePETNode->GetDataNodeAtValue(indexValue));
+    vtkMRMLSegmentationNode* segmentationNode =
+        vtkMRMLSegmentationNode::SafeDownCast(
+            q->segSequenceNode->GetDataNodeAtValue(indexValue));
+    if (!petVolume || !segmentationNode || !segmentationNode->GetSegmentation() ||
+        !segmentationNode->GetSegmentation()->GetSegment(segmentID))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("The selected ROI is unavailable at the requested frame.");
+        }
+        return false;
+    }
+
+    vtkNew<vtkStringArray> segmentArray;
+    segmentArray->InsertNextValue(segmentID);
+    vtkSmartPointer<vtkOrientedImageData> labelmap =
+        vtkSmartPointer<vtkOrientedImageData>::New();
+    vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(
+        segmentationNode,
+        petVolume,
+        segmentArray,
+        vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
+        labelmap);
+
+    vtkImageData* petImage = petVolume->GetImageData();
+    vtkDataArray* petScalars = petImage && petImage->GetPointData()
+        ? petImage->GetPointData()->GetScalars() : nullptr;
+    vtkDataArray* labelScalars = labelmap && labelmap->GetPointData()
+        ? labelmap->GetPointData()->GetScalars() : nullptr;
+    if (!petScalars || !labelScalars ||
+        petScalars->GetNumberOfTuples() != labelScalars->GetNumberOfTuples())
+    {
+        if (errorMessage) *errorMessage = QObject::tr("Could not extract ROI voxel values.");
+        return false;
+    }
+
+    std::vector<double> values;
+    values.reserve(static_cast<size_t>(petScalars->GetNumberOfTuples() / 8));
+    const ActivityUnit displayUnit = this->selectedDisplayActivityUnit();
+    const ActivityUnit sourceUnit = this->petStoredActivityUnit();
+    for (vtkIdType i = 0; i < petScalars->GetNumberOfTuples(); ++i)
+    {
+        if (static_cast<int>(std::llround(labelScalars->GetComponent(i, 0))) != 1)
+        {
+            continue;
+        }
+        const double nativeValue = petScalars->GetComponent(i, 0);
+        if (!std::isfinite(nativeValue))
+        {
+            continue;
+        }
+        double converted = nativeValue;
+        if (!this->convertActivityValue(
+                nativeValue, sourceUnit, displayUnit, converted, nullptr) ||
+            !std::isfinite(converted))
+        {
+            continue;
+        }
+        values.push_back(converted);
+    }
+    if (values.empty())
+    {
+        if (errorMessage) *errorMessage = QObject::tr("The ROI contains no finite PET voxel values.");
+        return false;
+    }
+
+    std::sort(values.begin(), values.end());
+    const double minimum = values.front();
+    const double maximum = values.back();
+    int bins = 1;
+    if (maximum > minimum && values.size() > 1)
+    {
+        const size_t n = values.size();
+        const double q1 = values[n / 4];
+        const double q3 = values[(3 * n) / 4];
+        const double iqr = q3 - q1;
+        double binWidth = 2.0 * iqr / std::cbrt(static_cast<double>(n));
+        if (!(binWidth > 0.0) || !std::isfinite(binWidth))
+        {
+            binWidth = (maximum - minimum) / std::sqrt(static_cast<double>(n));
+        }
+        if (binWidth > 0.0 && std::isfinite(binWidth))
+        {
+            bins = static_cast<int>(std::ceil((maximum - minimum) / binWidth));
+        }
+        bins = std::max(10, std::min(100, bins));
+    }
+
+    const double width = bins > 1 ? (maximum - minimum) / bins : 1.0;
+    std::vector<double> counts(static_cast<size_t>(bins), 0.0);
+    for (double value : values)
+    {
+        int bin = 0;
+        if (bins > 1 && width > 0.0)
+        {
+            bin = static_cast<int>((value - minimum) / width);
+            bin = std::max(0, std::min(bins - 1, bin));
+        }
+        counts[static_cast<size_t>(bin)] += 1.0;
+    }
+
+    q->RemoveExistingPlotChartAndTable();
+    vtkMRMLTableNode* tableNode = q->GetOrCreatePlotTable();
+    vtkNew<vtkDoubleArray> centers;
+    vtkNew<vtkDoubleArray> countArray;
+    centers->SetName("Value");
+    countArray->SetName("Voxel count");
+    for (int i = 0; i < bins; ++i)
+    {
+        const double center = bins == 1
+            ? minimum
+            : minimum + (static_cast<double>(i) + 0.5) * width;
+        centers->InsertNextValue(center);
+        countArray->InsertNextValue(counts[static_cast<size_t>(i)]);
+    }
+    tableNode->AddColumn(centers);
+    tableNode->AddColumn(countArray);
+
+    vtkMRMLPlotChartNode* chartNode = q->GetOrCreatePlotChart();
+    const auto nameIt = q->segmentTACsnames.find(segmentID);
+    const std::string roiName = nameIt != q->segmentTACsnames.end()
+        ? nameIt->second : segmentID;
+    const double frameEnd = frameIndex < static_cast<int>(q->timePoints.size())
+        ? q->timePoints[static_cast<size_t>(frameIndex)] : 0.0;
+    chartNode->SetTitle(
+        QString("ROI distribution - %1 - frame %2 (end %3 s)")
+            .arg(QString::fromStdString(roiName))
+            .arg(frameIndex)
+            .arg(frameEnd, 0, 'g', 8)
+            .toStdString().c_str());
+    chartNode->SetXAxisTitle(this->activityUnitLabel(displayUnit).toStdString().c_str());
+    chartNode->SetYAxisTitle("Voxel count");
+
+    vtkSmartPointer<vtkMRMLPlotSeriesNode> series =
+        vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+    q->mrmlScene()->AddNode(series);
+    series->SetName(roiName.c_str());
+    series->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatterBar);
+    series->SetAndObserveTableNodeID(tableNode->GetID());
+    series->SetXColumnName("Value");
+    series->SetYColumnName("Voxel count");
+    series->SetUniqueColor();
+    chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
+
+    vtkMRMLLayoutNode* layoutNode = vtkMRMLLayoutNode::SafeDownCast(
+        q->mrmlScene()->GetFirstNodeByClass("vtkMRMLLayoutNode"));
+    if (layoutNode)
+    {
+        layoutNode->SetViewArrangement(vtkMRMLLayoutNode::SlicerLayoutConventionalPlotView);
+    }
+    vtkMRMLPlotViewNode* plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(
+        q->mrmlScene()->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
+    if (plotViewNode)
+    {
+        plotViewNode->SetPlotChartNodeID(chartNode->GetID());
+    }
+    return true;
 }
 
 //-----------------------------------------------------------------------------
@@ -2860,6 +3584,7 @@ loadTableWorkbook(
         sigmaByStat["Mean"].reserve(rows.size());
         sigmaByStat["Median"].reserve(rows.size());
         sigmaByStat["Peak"].reserve(rows.size());
+        sigmaByStat["Max"].reserve(rows.size());
 
         std::vector<double> localEnds;
         std::vector<double> localDurations;
@@ -2892,6 +3617,7 @@ loadTableWorkbook(
             sigmaByStat["Mean"].push_back(numericOrNaN(row, "MeanSigma"));
             sigmaByStat["Median"].push_back(numericOrNaN(row, "MedianSigma"));
             sigmaByStat["Peak"].push_back(numericOrNaN(row, "PeakSigma"));
+            sigmaByStat["Max"].push_back(numericOrNaN(row, "MaxSigma"));
 
             localEnds.push_back(row.value("FrameEnd_s").toDouble());
             localDurations.push_back(row.value("Duration_s").toDouble());
@@ -3297,8 +4023,13 @@ initializeTableBasedUI()
         [this](int)
         {
             this->updateTableUnitUI();
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->invalidateInputFunctionResults();
             this->updateInputFunctionStatus();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         });
 
     QObject::connect(
@@ -3307,9 +4038,14 @@ initializeTableBasedUI()
         q,
         [this]()
         {
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->updateTableUnitUI();
             this->invalidateInputFunctionResults();
             this->updateInputFunctionStatus();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         });
 
     QObject::connect(
@@ -3412,8 +4148,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
             this->populateVOIMTGA(
                 excludedVOI);
 
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->invalidateInputFunctionResults();
             this->updateInputFunctionStatus();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         });
 
     QObject::connect(
@@ -3469,8 +4210,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
             this->IFCSVPathEdit->
                 setText(path);
 
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->invalidateInputFunctionResults();
             this->updateInputFunctionStatus();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         });
 
 
@@ -3481,15 +4227,25 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
         q,
         [this](int)
         {
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->invalidateInputFunctionResults();
             this->updateInputFunctionUI();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         });
 
     auto onPBRChanged =
         [this]()
         {
+            const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
             this->invalidateInputFunctionResults();
             this->updateInputFunctionUI();
+            if (previewOpen)
+            {
+                this->previewInputFunction();
+            }
         };
 
     QObject::connect(
@@ -3562,8 +4318,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                       "The original CSV file was not modified."));
           }
 
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->invalidateInputFunctionResults();
           this->updateInputFunctionUI();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
       });
 
   QObject::connect(
@@ -3637,8 +4398,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           this->PBIFCalibrationEndSpinBox->setValue(
               endTime);
 
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->invalidateInputFunctionResults();
           this->updateInputFunctionUI();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
       });
 
   QObject::connect(
@@ -3695,8 +4461,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
                       "The original CSV file was not modified."));
           }
 
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->invalidateInputFunctionResults();
           this->updateInputFunctionUI();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
       });
 
   QObject::connect(
@@ -3711,14 +4482,16 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   auto invalidateIFPipeline =
       [this]()
       {
-          // Clear the cached/precomputed IF before rebuilding status. This is
-          // important for nonlinear Feng processing, which must be recomputed
-          // exactly once after a pipeline setting changes rather than showing
-          // a stale cached source during the immediate UI refresh.
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
+          // Clear the cached/precomputed IF before rebuilding status.
           this->invalidateInputFunctionResults();
           this->updateInputFunctionUI();
           this->updateROIModelingAvailability();
           this->updateParametricImagingAvailability();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
       };
 
   QObject::connect(
@@ -3745,9 +4518,15 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this, q](int)
       {
-          // Display conversion never changes fitting data/results.
-          this->removeInputFunctionPreview();
+          // Display conversion never changes fitting data/results. If the IF
+          // preview is already open, replace it in place so unit changes are
+          // immediately visible without forcing the user to press Preview.
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->updateInputFunctionStatus();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
           if (!q->segmentTACs.empty())
           {
               q->onPlotbutton();
@@ -3823,6 +4602,16 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       });
 
   QObject::connect(
+      this->IFGaussianSigmaSpinBox,
+      QOverload<double>::of(
+          &QDoubleSpinBox::valueChanged),
+      q,
+      [invalidateIFPipeline](double)
+      {
+          invalidateIFPipeline();
+      });
+
+  QObject::connect(
       this->ParentFractionProcessingSelector,
       QOverload<int>::of(
           &QComboBox::currentIndexChanged),
@@ -3839,8 +4628,22 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this](int)
       {
+          const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->invalidateInputFunctionResults();
           this->updateInputFunctionUI();
+          if (previewOpen)
+          {
+              this->previewInputFunction();
+          }
+      });
+
+  QObject::connect(
+      this->timeStepEdit,
+      &QLineEdit::editingFinished,
+      q,
+      [invalidateIFPipeline]()
+      {
+          invalidateIFPipeline();
       });
 
   QObject::connect(
@@ -3925,8 +4728,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onPlotTCMbutton()));
   QObject::connect( this->plotMTGAButton, SIGNAL(clicked(bool)),
     q, SLOT(onPlotMTGAbutton()));
-  // QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
-  //   q, SLOT(onPlotbutton()));
+  QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
+    q, SLOT(onPlotbutton()));
   QObject::connect(
       this->IFSelector,
       QOverload<int>::of(
@@ -4011,6 +4814,15 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onSaveTCMfittedExcelbutton()));
   QObject::connect( this->saveMTGAfittedExcelButton, SIGNAL(clicked(bool)),
     q, SLOT(onSaveMTGAfittedExcelbutton()));
+  QObject::connect(this->standardFitCheckBox, SIGNAL(toggled(bool)),
+    q, SLOT(onStdFitclicked()));
+  QObject::connect(this->standardFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onStdFitImgclicked()));
+  QObject::connect(this->weightFitCheckBox, SIGNAL(toggled(bool)),
+    q, SLOT(onWFitclicked()));
+  QObject::connect(this->weightFitCheckBoxImg, SIGNAL(toggled(bool)),
+    q, SLOT(onWFitImgclicked()));
+
   QObject::connect(this->olsFitCheckBox, SIGNAL(toggled(bool)),
     q, SLOT(onOLSclicked()));
   QObject::connect(this->olsFitCheckBoxImg, SIGNAL(toggled(bool)),
@@ -4023,14 +4835,6 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onRLSclicked()));
   QObject::connect(this->robustFitCheckBoxImg, SIGNAL(toggled(bool)),
     q, SLOT(onRLSImgclicked()));
-  QObject::connect(this->standardFitCheckBox, SIGNAL(toggled(bool)),
-    q, SLOT(onStdFitclicked()));
-  QObject::connect(this->standardFitCheckBoxImg, SIGNAL(toggled(bool)),
-    q, SLOT(onStdFitImgclicked()));
-  QObject::connect(this->weightFitCheckBox, SIGNAL(toggled(bool)),
-    q, SLOT(onWFitclicked()));
-  QObject::connect(this->weightFitCheckBoxImg, SIGNAL(toggled(bool)),
-    q, SLOT(onWFitImgclicked()));
   QObject::connect(this->MTGAModel1, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onMTGAModelBox(int)));
   QObject::connect(this->MTGAModel2, SIGNAL(currentIndexChanged(int)),
@@ -4141,6 +4945,17 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   this->TACCollapsibleButton->setCollapsed(true);
   this->TCMCollapsibleButton->setCollapsed(true);
   this->MTGACollapsibleButton->setCollapsed(true);
+
+  // Keep Parametric Imaging compact when optional collapsible sections are
+  // closed. The module's outer scroll area can still grow when sections open.
+  this->verticalLayoutImg->setAlignment(Qt::AlignTop);
+  this->mtgaLayoutImg->setAlignment(Qt::AlignTop);
+  this->tcmLayoutImg->setAlignment(Qt::AlignTop);
+  this->verticalLayoutImg->setSpacing(4);
+  this->mtgaLayoutImg->setSpacing(4);
+  this->tcmLayoutImg->setSpacing(4);
+  this->ModelsTabWidgetImg->setSizePolicy(
+      QSizePolicy::Preferred, QSizePolicy::Maximum);
   this->MTGAStatTestButton->setCollapsed(true);
   this->MTGAStatTestButton->setEnabled(false);
   this->TCMStatTestButton->setCollapsed(true);
@@ -4450,6 +5265,7 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         mean_col = find_col(lookup, ["Mean"])
         median_col = find_col(lookup, ["Median"])
         peak_col = find_col(lookup, ["Peak", "SUVpeak"])
+        max_col = find_col(lookup, ["Max", "Maximum", "SUVmax"])
         generic_value_col = find_col(lookup, ["Value", "TAC", "Activity", "Concentration", "Radioactivity", "SUVbw", "SUV"])
 
         stat_columns = {}
@@ -4463,6 +5279,9 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         if peak_col is not None:
             stat_columns["Peak"] = peak_col
             stat_labels["Peak"] = "Peak"
+        if max_col is not None:
+            stat_columns["Max"] = max_col
+            stat_labels["Max"] = "Max"
 
         if not stat_columns and generic_value_col is not None:
             stat_columns["Mean"] = generic_value_col
@@ -4479,7 +5298,6 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         fit_ids = set(stat_columns.keys())
 
         min_col = find_col(lookup, ["Min", "Minimum"])
-        max_col = find_col(lookup, ["Max", "Maximum"])
         plot_ids = set(fit_ids)
         if min_col is not None:
             plot_ids.add("Min")
@@ -4497,13 +5315,17 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         iqr_col = find_col(lookup, ["IQR", "InterquartileRange"])
         peak_stdev_col = find_col(lookup, ["PeakStDev", "PeakStdDev", "SUVpeakStDev"])
         generic_sigma_col = find_col(lookup, ["Sigma", "Uncertainty", "Error", "SEM", "StandardError"])
+        max_sigma_col = find_col(lookup, ["MaxSigma", "SUVmaxSigma", "MaxUncertainty", "MaxSEM"])
 
         q1_col = find_col(lookup, ["Q1"])
         q3_col = find_col(lookup, ["Q3"])
         voxel_count_col = find_col(lookup, ["VoxelCount", "Count"])
         peak_count_col = find_col(lookup, ["PeakVoxelCount"])
-        vol_mm3_col = find_col(lookup, ["Volume(mm3)", "Volume_mm3", "VolumeMM3"])
-        vol_cm3_col = find_col(lookup, ["Volume(cm3)", "Volume_cm3", "VolumeCC", "Volume(cc)"])
+        vol_mm3_col = find_col(lookup, ["PETVolume(mm3)", "Volume(mm3)", "Volume_mm3", "VolumeMM3"])
+        vol_cm3_col = find_col(lookup, ["PETVolume(cm3)", "Volume(cm3)", "Volume_cm3", "VolumeCC", "Volume(cc)"])
+        if vol_cm3_col is not None or vol_mm3_col is not None:
+            plot_ids.add("VolumePET")
+            stat_labels["VolumePET"] = "Volume [PET] (cm3)"
 
         rows = []
         for i, (_, source_row) in enumerate(df.iterrows()):
@@ -4528,7 +5350,6 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
             row["PeakVoxelCount"] = optional_value(source_row, peak_count_col)
             row["Volume(mm3)"] = optional_value(source_row, vol_mm3_col)
             row["Volume(cm3)"] = optional_value(source_row, vol_cm3_col)
-
             # Normalize uncertainty to one-sigma values for WLS, irrespective
             # of whether the workbook stored SD, IQR or an explicit sigma/SEM.
             mean_sigma = optional_value(source_row, stdev_col)
@@ -4548,7 +5369,14 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
 
             row["MeanSigma"] = mean_sigma
             row["MedianSigma"] = median_sigma
+            max_sigma = optional_value(source_row, max_sigma_col)
+            if max_sigma is None and "Max" in stat_columns:
+                # Only use a generic sigma if the workbook explicitly has one;
+                # image-derived SUVmax itself has no automatic uncertainty proxy.
+                max_sigma = optional_value(source_row, generic_sigma_col)
+
             row["PeakSigma"] = peak_sigma
+            row["MaxSigma"] = max_sigma
             rows.append(row)
 
         if reference_ends is None:
@@ -4572,7 +5400,7 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
     if not common_fit_ids:
         return {"ok": False, "error": "The ROI sheets do not share a common usable TAC value type."}
 
-    order = ["Mean", "Median", "Peak", "Min", "Max"]
+    order = ["Mean", "Median", "Peak", "Max", "Min", "VolumePET"]
 
     def display_label(stat_id):
         labels = labels_by_id.get(stat_id, [stat_id])
@@ -5677,6 +6505,7 @@ def DPE_export_parametric_map(
   // Initialize enabled/disabled states once setupUi() and all
   // connections are complete.
   this->updateBodySupportUI();
+  this->rebuildTACStatisticUI();
 
   this->updateInputFunctionUI();
 }
@@ -6263,8 +7092,21 @@ void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
     bool wasSelected = previouslyPlotSelectedIDs.contains(QString::fromStdString(segmentID));
     checkbox->setChecked(wasSelected);
     this->PlotsegmentCheckLayout->addWidget(checkbox);
-    // QObject::connect(checkbox, SIGNAL(stateChanged(int)),
-    //              q, SLOT(onPlotSegmentsChanged()));
+    QObject::connect(
+        checkbox, &QCheckBox::toggled, q,
+        [this, checkbox](bool checked)
+        {
+            if (!checked)
+            {
+                return;
+            }
+            this->lastPlotSegmentID =
+                checkbox->property("SegmentID").toString().toStdString();
+            if (this->plotDistributionSelected())
+            {
+                this->enforceDistributionSelection();
+            }
+        });
   }
 
   this->PlotsegmentCheckLayout->addStretch();
@@ -6731,10 +7573,14 @@ updateInputFunctionUI()
         this->IFAdvancedCollapsibleButton->setCollapsed(true);
     }
 
-    const bool lowessSelected =
-        this->IFSourceProcessingSelector->currentIndex() == 1;
+    const int sourceProcessingIndex =
+        this->IFSourceProcessingSelector->currentIndex();
+    const bool lowessSelected = sourceProcessingIndex == 1;
+    const bool gaussianSelected = sourceProcessingIndex == 2;
     this->IFLowessSpanLabel->setVisible(lowessSelected);
     this->IFLowessSpanSpinBox->setVisible(lowessSelected);
+    this->IFGaussianSigmaLabel->setVisible(gaussianSelected);
+    this->IFGaussianSigmaSpinBox->setVisible(gaussianSelected);
 
     this->IFLabel->setText(
         this->tableBasedMode
@@ -6916,7 +7762,7 @@ updateInputFunctionUI()
         {
             status += QObject::tr(" | processing=%1")
                 .arg(result.sourceProcessingLabel);
-            if (this->IFSourceProcessingSelector->currentIndex() == 2)
+            if (this->IFSourceProcessingSelector->currentIndex() == 3)
             {
                 status += QObject::tr(" | Feng tau=%1 min, lambdas=%2/%3/%4 min^-1")
                     .arg(result.fengParameters.tau, 0, 'g', 4)
@@ -6997,6 +7843,7 @@ updateInputFunctionUI()
         {
             this->weightFitCheckBoxImg->setChecked(false);
         }
+        this->standardFitCheckBoxImg->setChecked(true);
 
         this->weightedFitCheckBoxImg->setEnabled(false);
         this->weightFitCheckBoxImg->setEnabled(false);
@@ -7862,6 +8709,10 @@ interpolateInputFunction(
     {
         return values[left];
     }
+    if (interpolationType == "pchip")
+    {
+        return pchipInterpolate(times, values, targetTime);
+    }
 
     const double t1 = times[left];
     const double t2 = times[right];
@@ -7920,18 +8771,23 @@ integrateInputFunctionOverInterval(
         {
             const double y =
                 this->interpolateInputFunction(
-                    times,
-                    values,
-                    0.5 * (a + b),
-                    interpolationType);
-
+                    times, values, 0.5 * (a + b), interpolationType);
             if (!std::isfinite(y))
             {
-                return
-                    std::numeric_limits<double>::quiet_NaN();
+                return std::numeric_limits<double>::quiet_NaN();
             }
-
             integral += y * (b - a);
+        }
+        else if (interpolationType == "pchip")
+        {
+            const double ya = this->interpolateInputFunction(times, values, a, interpolationType);
+            const double ym = this->interpolateInputFunction(times, values, 0.5 * (a + b), interpolationType);
+            const double yb = this->interpolateInputFunction(times, values, b, interpolationType);
+            if (!std::isfinite(ya) || !std::isfinite(ym) || !std::isfinite(yb))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+            integral += (b - a) * (ya + 4.0 * ym + yb) / 6.0;
         }
         else
         {
@@ -8123,6 +8979,24 @@ evaluateFrameCurve(
                 midpoints.begin(),
                 upper));
         left = right - 1;
+    }
+
+    if (interpolationType == "pchip")
+    {
+        std::vector<double> splineTimes;
+        std::vector<double> splineValues;
+        splineTimes.reserve(midpoints.size() + 2);
+        splineValues.reserve(frameValues.size() + 2);
+        splineTimes.push_back(0.0);
+        splineValues.push_back(frameValues.front());
+        for (size_t i = 0; i < midpoints.size(); ++i)
+        {
+            splineTimes.push_back(midpoints[i]);
+            splineValues.push_back(frameValues[i]);
+        }
+        splineTimes.push_back(q->timePoints.back());
+        splineValues.push_back(frameValues.back());
+        return pchipInterpolate(splineTimes, splineValues, targetTime);
     }
 
     const double t1 = midpoints[left];
@@ -8659,6 +9533,53 @@ buildCurrentInputFunction(
         }
         else if (sourceProcessing == 2)
         {
+            std::vector<double> retainedTimes;
+            std::vector<double> retainedValues;
+            std::vector<double> evaluationTimes;
+            retainedTimes.reserve(result.supportFrameCount);
+            retainedValues.reserve(result.supportFrameCount);
+            evaluationTimes.reserve(result.supportFrameCount);
+
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                const double midpoint =
+                    q->timePoints[i] - 0.5 * q->durations[i];
+                evaluationTimes.push_back(midpoint);
+                if (result.frameKeep[i])
+                {
+                    retainedTimes.push_back(midpoint);
+                    retainedValues.push_back(observedWholeBlood[i]);
+                }
+            }
+
+            const std::vector<double> smoothed =
+                gaussianKernelPredict(
+                    retainedTimes,
+                    retainedValues,
+                    evaluationTimes,
+                    this->IFGaussianSigmaSpinBox->value());
+            if (smoothed.size() != result.supportFrameCount)
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr(
+                        "Gaussian input-function smoothing failed.");
+                }
+                return false;
+            }
+            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            {
+                result.frameWholeBlood[i] = smoothed[i];
+                result.processedSourcePreviewTimesSec.push_back(q->timePoints[i]);
+                result.processedSourcePreviewValues.push_back(smoothed[i]);
+            }
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel =
+                QObject::tr("Gaussian (sigma %1 s)")
+                    .arg(this->IFGaussianSigmaSpinBox->value(), 0, 'g', 5);
+        }
+        else if (sourceProcessing == 3)
+        {
             vtkSlicerDynamicPETLogic* logic =
                 vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
             if (!logic)
@@ -8927,12 +9848,34 @@ buildCurrentInputFunction(
         }
         else if (sourceProcessing == 2)
         {
+            processedPatientValues =
+                gaussianKernelPredict(
+                    processedPatientTimes,
+                    processedPatientValues,
+                    processedPatientTimes,
+                    this->IFGaussianSigmaSpinBox->value());
+            if (processedPatientValues.size() != processedPatientTimes.size())
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr(
+                        "Gaussian input-function smoothing failed.");
+                }
+                return false;
+            }
+            result.sourceProcessingApplied = true;
+            result.sourceProcessingLabel =
+                QObject::tr("Gaussian (sigma %1 s)")
+                    .arg(this->IFGaussianSigmaSpinBox->value(), 0, 'g', 5);
+        }
+        else if (sourceProcessing == 3)
+        {
             if (sourceDomain == IFCurveDomain::ParentPlasma)
             {
                 if (errorMessage)
                 {
                     *errorMessage = QObject::tr(
-                        "Feng source modeling is intended for whole-blood or total-plasma input functions, not an already metabolite-corrected parent-plasma curve. Use None or LOWESS for this source.");
+                        "Feng source modeling is intended for whole-blood or total-plasma input functions, not an already metabolite-corrected parent-plasma curve. Use None, LOWESS, or Gaussian smoothing for this source.");
                 }
                 return false;
             }
@@ -10384,16 +11327,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateModelComboTCM(
   }
   const auto& modelsForSegment = it->second;
 
-  int comparableModelCount = 0;
-
-  for (const auto& [modelName, params] :
-       modelsForSegment)
-  {
-    if (modelName != "Liver DBIF")
-    {
-      ++comparableModelCount;
-    }
-  }
+  const int comparableModelCount =
+      static_cast<int>(modelsForSegment.size());
 
   this->TCMStatTestButton->
       setEnabled(
@@ -10412,11 +11347,6 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateModelComboTCM(
   int restoredIndex = 0;
   for (const auto& [modelName, params] : modelsForSegment)
   {
-    // Liver DBIF has a different parameterization and is intentionally
-    // excluded from the generic nested/Vuong TCM comparison machinery.
-    if (modelName == "Liver DBIF")
-      continue;
-
     if (!otherSelectedModel.empty() && modelName == otherSelectedModel)
       continue;  // skip what’s selected in the other box
 
@@ -14319,17 +15249,7 @@ ensureParametricVoxelSelection()
             this->BodySupportSourceImg->
                 currentIndex());
 
-    BodySupportSource effectiveSource =
-        requestedSource;
-
-    if (requestedSource ==
-        BodySupportSource::Auto)
-    {
-        effectiveSource =
-            ctNode
-            ? BodySupportSource::CT
-            : BodySupportSource::PET;
-    }
+    const BodySupportSource effectiveSource = requestedSource;
 
     // PET composite choice.
     const PETCompositeMode compositeMode =
@@ -15051,8 +15971,7 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
     {
       return;
     }
-    // Any edited tissue TAC invalidates ROI fits. If the edited segment is
-    // the active IDIF, voxelwise fits and IF previews are stale as well.
+    // Any edited dynamic segmentation invalidates ROI fits.
     this->clearFITdata();
     this->clearFITMTGAdata();
 
@@ -15131,6 +16050,9 @@ void qSlicerDynamicPETModuleWidget::onCTChanged(int index)
 
     d->updateBodySupportUI();
     d->invalidateParametricVoxelSelection();
+
+    // PET TACs are independent of the selected CT. CT remains available
+    // only for the optional parametric-imaging body-support mask.
 
     this->enableTACbutton();
 }
@@ -15667,6 +16589,7 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
 
   // Refresh TAC-dependent UI
   d->populatePlotSegmentCheckboxes();
+  d->rebuildTACStatisticUI();
   d->populateIF();
 
   d->TACCollapsibleButton->setCollapsed(true);
@@ -15804,6 +16727,30 @@ void qSlicerDynamicPETModuleWidget::RemoveExistingPlotChartAndTable()
     this->mrmlScene()->GetFirstNodeByName("DynamicPET.PlotTable"));
   if (tableNode)
     this->mrmlScene()->RemoveNode(tableNode);
+
+  // Error bars use auxiliary table nodes because vtkMRMLPlotSeriesNode does
+  // not expose a native error-column property. Remove them with the chart.
+  vtkCollection* tableNodes =
+      this->mrmlScene()->GetNodesByClass("vtkMRMLTableNode");
+  if (tableNodes)
+  {
+    std::vector<vtkMRMLNode*> removeNodes;
+    for (int i = 0; i < tableNodes->GetNumberOfItems(); ++i)
+    {
+      vtkMRMLNode* node = vtkMRMLNode::SafeDownCast(
+          tableNodes->GetItemAsObject(i));
+      if (node && node->GetName() &&
+          QString::fromUtf8(node->GetName()).startsWith("DynamicPET.ErrorTable."))
+      {
+        removeNodes.push_back(node);
+      }
+    }
+    tableNodes->Delete();
+    for (vtkMRMLNode* node : removeNodes)
+    {
+      this->mrmlScene()->RemoveNode(node);
+    }
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onTACbutton()
@@ -15829,7 +16776,10 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   for (const QString& segmentID_qt : this->segmentIDs)
   {
     std::string segmentID = segmentID_qt.toStdString();
-    if (this->segmentTACsnames.find(segmentID) == this->segmentTACsnames.end())
+    bool needsComputation =
+        this->segmentTACsnames.find(segmentID) == this->segmentTACsnames.end();
+
+    if (needsComputation)
     {
       segmentsToCompute.push_back(segmentID_qt);
     }
@@ -15850,14 +16800,25 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   if (this->stopRequested) {
     return;
   }
-  logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar, this->stopButton, this->stopRequested);
+  if (!segmentsToCompute.empty())
+  {
+    // Any new/updated segmentation TAC also invalidates lazily cached CT
+    // volumes for that dynamic segmentation. Keep normal TAC computation PET-only.
+  }
+
+  if (!segmentsToCompute.empty())
+  {
+    logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar, this->stopButton, this->stopRequested);
+  }
   this->ProgressBar->setValue(0);
   this->ProgressBar->setVisible(false);
   if (this->stopRequested) {
     return;
   }
-  // qApp->processEvents();
+  // CT-referenced ROI volumes are intentionally not computed here.
+
   d->populatePlotSegmentCheckboxes();
+  d->rebuildTACStatisticUI();
   d->populateIF();
   d->populateTimeBarMTGA();
   d->populateTimeBarMTGAImg();
@@ -16210,6 +17171,44 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
     metadata["SUVbwFactor"] = suvbwFactor;
   }
 
+  if (!d->isTableBasedMode() && this->SubjectHierarchyNode)
+  {
+    auto addSHAttribute =
+        [this, &metadata](vtkIdType itemID, const char* attributeName)
+        {
+          if (itemID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID ||
+              !this->SubjectHierarchyNode->HasItemAttribute(itemID, attributeName))
+          {
+            return;
+          }
+          const std::string value =
+              this->SubjectHierarchyNode->GetItemAttribute(itemID, attributeName);
+          if (!value.empty())
+          {
+            metadata[QString::fromUtf8(attributeName)] =
+                QString::fromStdString(value);
+          }
+        };
+
+    for (const char* attr : {
+             "DICOM.PatientSex",
+             "DICOM.PatientAge",
+             "DICOM.PatientWeight",
+             "DICOM.PatientSize"})
+    {
+      addSHAttribute(this->patID, attr);
+    }
+    for (const char* attr : {
+             "DICOM.StudyDate",
+             "DICOM.StudyTime",
+             "DICOM.StudyDescription",
+             "DICOM.StudyID",
+             "DICOM.StudyInstanceUID"})
+    {
+      addSHAttribute(this->stuID, attr);
+    }
+  }
+
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
   const QVariant result = mainContext.call(
       "DPE_save_multisheet_excel",
@@ -16537,6 +17536,31 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
   if (PlotSelectedIDs.empty() || PlotSelectedStats.empty())
     return;
 
+  if (std::find(PlotSelectedStats.begin(), PlotSelectedStats.end(), "Distribution") !=
+      PlotSelectedStats.end())
+  {
+    if (d->isTableBasedMode())
+    {
+      QMessageBox::information(
+          this, tr("ROI distribution"),
+          tr("Voxel distributions require image data and are not available in Table mode."));
+      return;
+    }
+    d->enforceDistributionSelection();
+
+    std::string segmentID = d->lastPlotSegmentID;
+    if (segmentID.empty() || this->segmentTACs.find(segmentID) == this->segmentTACs.end())
+    {
+      segmentID = PlotSelectedIDs.front();
+    }
+    QString distributionError;
+    if (!d->plotROIDistribution(segmentID, &distributionError))
+    {
+      QMessageBox::warning(this, tr("ROI distribution"), distributionError);
+    }
+    return;
+  }
+
   // Clear previous plot/chart/table
   this->RemoveExistingPlotChartAndTable();
 
@@ -16586,8 +17610,34 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
   chartNode->SetTitle("Time Activity Curve");
   chartNode->SetXAxisTitle("Time (min)");
   const ActivityUnit displayUnit = d->selectedDisplayActivityUnit();
-  chartNode->SetYAxisTitle(
-      d->activityUnitLabel(displayUnit).toStdString().c_str());
+
+  const auto isVolumeStatistic = [](const std::string& name)
+  {
+    return name == "VolumePET";
+  };
+  bool allActivity = true;
+  bool allVolume = true;
+  for (const std::string& stat : PlotSelectedStats)
+  {
+    const bool activity =
+        stat == "Mean" || stat == "Median" || stat == "Peak" ||
+        stat == "Min" || stat == "Max";
+    allActivity = allActivity && activity;
+    allVolume = allVolume && isVolumeStatistic(stat);
+  }
+  if (allActivity)
+  {
+    chartNode->SetYAxisTitle(
+        d->activityUnitLabel(displayUnit).toStdString().c_str());
+  }
+  else if (allVolume)
+  {
+    chartNode->SetYAxisTitle("ROI volume (cm3)");
+  }
+  else
+  {
+    chartNode->SetYAxisTitle("Value (mixed units)");
+  }
 
   auto isActivityStatistic = [](const std::string& name)
   {
@@ -16662,7 +17712,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
           else if (statName == "VoxelCount") value = vs.count;
           else if (statName == "Min")        value = vs.min;
           else if (statName == "Max")        value = vs.max;
-          else if (statName == "Volume(cc)") value = vs.volume_cm3;
+          else if (statName == "VolumePET")  value = vs.volume_cm3;
           else vtkGenericWarningMacro("Unknown stat name: " << statName);
 
           value = convertPlotActivity(value, statName);
@@ -16686,7 +17736,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
                 else if (statName == "VoxelCount") nextValue = vsNext.count;
                 else if (statName == "Min") nextValue = vsNext.min;
                 else if (statName == "Max") nextValue = vsNext.max;
-                else if (statName == "Volume(cc)") nextValue = vsNext.volume_cm3;
+                else if (statName == "VolumePET") nextValue = vsNext.volume_cm3;
                 nextValue = convertPlotActivity(nextValue, statName);
                 break;
             }
@@ -16708,7 +17758,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
                 else if (statName == "VoxelCount") prevValue = vsPrev.count;
                 else if (statName == "Min") prevValue = vsPrev.min;
                 else if (statName == "Max") prevValue = vsPrev.max;
-                else if (statName == "Volume(cc)") prevValue = vsPrev.volume_cm3;
+                else if (statName == "VolumePET") prevValue = vsPrev.volume_cm3;
                 prevValue = convertPlotActivity(prevValue, statName);
                 break;
             }
@@ -16755,6 +17805,81 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
       series->SetColor(lineSeries->GetColor());
       chartNode->AddAndObservePlotSeriesNodeID(series->GetID());
       LabelToSeriesID[colName] = series->GetID();
+
+      if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
+      {
+        vtkSmartPointer<vtkMRMLTableNode> errorTable =
+            vtkSmartPointer<vtkMRMLTableNode>::New();
+        errorTable->SetName(
+            (std::string("DynamicPET.ErrorTable.") + segmentID + "." + statName).c_str());
+        scene->AddNode(errorTable);
+
+        vtkNew<vtkDoubleArray> errorX;
+        vtkNew<vtkDoubleArray> errorY;
+        errorX->SetName("X");
+        errorY->SetName("Y");
+
+        for (size_t ivs = 0; ivs < this->segmentTACs[segmentID].size(); ++ivs)
+        {
+          const VoxelStatistics& vs = this->segmentTACs[segmentID][ivs];
+          if (!vs.keep)
+          {
+            continue;
+          }
+
+          double center = std::numeric_limits<double>::quiet_NaN();
+          if (statName == "Mean") center = vs.mean;
+          else if (statName == "Median") center = vs.median;
+          else if (statName == "Peak") center = vs.peak;
+          else if (statName == "Max") center = vs.max;
+
+          double sigma = d->tissueSigmaForWeighting(
+              segmentID, ivs, statName, vs);
+          if (!std::isfinite(center) || !std::isfinite(sigma) || sigma <= 0.0)
+          {
+            continue;
+          }
+
+          center = convertPlotActivity(center, statName);
+          sigma = convertPlotActivity(sigma, statName);
+          if (!std::isfinite(center) || !std::isfinite(sigma))
+          {
+            continue;
+          }
+
+          const double xMin = plotTimeSec(ivs) / 60.0;
+          errorX->InsertNextValue(xMin);
+          errorY->InsertNextValue(center - sigma);
+          errorX->InsertNextValue(xMin);
+          errorY->InsertNextValue(center + sigma);
+          errorX->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+          errorY->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
+        }
+
+        if (errorX->GetNumberOfTuples() > 0)
+        {
+          errorTable->AddColumn(errorX);
+          errorTable->AddColumn(errorY);
+
+          vtkSmartPointer<vtkMRMLPlotSeriesNode> errorSeries =
+              vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+          scene->AddNode(errorSeries);
+          errorSeries->SetName("");
+          errorSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+          errorSeries->SetAndObserveTableNodeID(errorTable->GetID());
+          errorSeries->SetXColumnName("X");
+          errorSeries->SetYColumnName("Y");
+          errorSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+          errorSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleSolid);
+          errorSeries->SetLineWidth(1.0);
+          errorSeries->SetColor(lineSeries->GetColor());
+          chartNode->AddAndObservePlotSeriesNodeID(errorSeries->GetID());
+        }
+        else
+        {
+          scene->RemoveNode(errorTable);
+        }
+      }
     }
   }
 
@@ -16818,6 +17943,8 @@ onIFSelectionChanged(int index)
   else
     d->imageIFID = this->IFID;
 
+  const bool previewOpen = d->previewGroupExists("InputFunctionPreview");
+
   // Selecting None must immediately invalidate all IF-dependent QC/results.
   // The source selector itself remains available so a new IDIF can be chosen.
   d->invalidateInputFunctionResults();
@@ -16841,6 +17968,11 @@ onIFSelectionChanged(int index)
   this->enableFITMTGAbutton();
   this->enableFITMTGAImgbutton();
   this->enableFITTCMImgbutton();
+
+  if (previewOpen && index >= 0)
+  {
+    d->previewInputFunction();
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onVOISelectionChanged(int index)
@@ -17029,7 +18161,8 @@ void qSlicerDynamicPETModuleWidget::onStdFitclicked()
   d->weightFitCheckBox->blockSignals(true);
   d->weightFitCheckBox->setChecked(false);
   d->weightFitCheckBox->blockSignals(false);
-  if (!d->standardFitCheckBox->isChecked()) {
+  if (!d->standardFitCheckBox->isChecked())
+  {
     d->standardFitCheckBox->setChecked(true);
   }
 }
@@ -17040,7 +18173,8 @@ void qSlicerDynamicPETModuleWidget::onStdFitImgclicked()
   d->weightFitCheckBoxImg->blockSignals(true);
   d->weightFitCheckBoxImg->setChecked(false);
   d->weightFitCheckBoxImg->blockSignals(false);
-  if (!d->standardFitCheckBoxImg->isChecked()) {
+  if (!d->standardFitCheckBoxImg->isChecked())
+  {
     d->standardFitCheckBoxImg->setChecked(true);
   }
 }
@@ -17051,7 +18185,8 @@ void qSlicerDynamicPETModuleWidget::onWFitclicked()
   d->standardFitCheckBox->blockSignals(true);
   d->standardFitCheckBox->setChecked(false);
   d->standardFitCheckBox->blockSignals(false);
-  if (!d->weightFitCheckBox->isChecked()) {
+  if (!d->weightFitCheckBox->isChecked())
+  {
     d->standardFitCheckBox->setChecked(true);
   }
 }
@@ -17062,7 +18197,8 @@ void qSlicerDynamicPETModuleWidget::onWFitImgclicked()
   d->standardFitCheckBoxImg->blockSignals(true);
   d->standardFitCheckBoxImg->setChecked(false);
   d->standardFitCheckBoxImg->blockSignals(false);
-  if (!d->weightFitCheckBoxImg->isChecked()) {
+  if (!d->weightFitCheckBoxImg->isChecked())
+  {
     d->standardFitCheckBoxImg->setChecked(true);
   }
 }
@@ -17690,6 +18826,29 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
 
     tac[segmentName].reserve(Nframe);
     keeptacvec[segmentName].reserve(Nframe);
+
+    std::vector<double> segmentSigmas;
+
+    if (d->weightFitCheckBox->isChecked())
+    {
+      segmentSigmas.reserve(statsVec.size());
+
+      for (size_t i = 0; i < statsVec.size(); ++i)
+      {
+        segmentSigmas.push_back(
+            d->tissueSigmaForWeighting(
+                segmentName,
+                i,
+                currentSelectedStatID,
+                statsVec[i]));
+      }
+    }
+
+    const double fallbackSigma =
+        d->weightFitCheckBox->isChecked()
+        ? medianValidSigma(segmentSigmas)
+        : std::numeric_limits<double>::quiet_NaN();
+
     for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
       const auto& vs = statsVec[ivs];
@@ -17698,8 +18857,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.mean;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -17708,8 +18868,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.median;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -17718,8 +18879,20 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.peak;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
+        } else {
+          wgtVec[segmentName].push_back(1.);
+        }
+      }
+      else if (currentSelectedStatID == "Max") {
+        value = vs.max;
+        if (d->weightFitCheckBox->isChecked()) {
+          wgtVec[segmentName].push_back(
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -17824,6 +18997,15 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
 
     const size_t fitFrameCount =
         std::min(maximumFitCount, tissueSupportCount);
+
+    // Keep the plotted observations consistent with the exact data used for
+    // AIC/BIC and fitting. Frames beyond retained IF/tissue support are not
+    // part of the fit and should not visually look like model residuals.
+    auto& fittedKeepMask = this->segmentkeep4TCMfits[segmentID];
+    for (size_t i = fitFrameCount; i < fittedKeepMask.size(); ++i)
+    {
+      fittedKeepMask[i] = false;
+    }
 
     if (fitFrameCount < 2)
     {
@@ -18194,6 +19376,77 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
           this->segmentTCMfits[segmentID][modelID],
           fitFrameCount,
           static_cast<size_t>(Nframe));
+
+      // Diagnostic reported on exactly the observations used by the optimizer.
+      // This makes it easy to distinguish a genuinely weighted-AIC preference
+      // from a plotting/data-support mismatch.
+      double unweightedSSE = 0.0;
+      double weightedSSE = 0.0;
+      size_t diagnosticCount = 0;
+      double* diagnosticFit = this->segmentTCMfits[segmentID][modelID];
+      if (diagnosticFit)
+      {
+        for (size_t i = 0; i < fitFrameCount; ++i)
+        {
+          if (i >= weightFit.size() || !(weightFit[i] > 0.0))
+          {
+            continue;
+          }
+          const double residual = tacFit[i][0] - diagnosticFit[i];
+          if (!std::isfinite(residual))
+          {
+            continue;
+          }
+          unweightedSSE += residual * residual;
+          weightedSSE += weightFit[i] * residual * residual;
+          ++diagnosticCount;
+        }
+      }
+      const auto parameterIt = this->segmentTCM[segmentID].find(modelID);
+      if (parameterIt != this->segmentTCM[segmentID].end())
+      {
+        d->logToPythonConsole(
+            tr("[SlicerDynamicPET TCM] ROI=%1 | model=%2 | frames=%3 | weighting=%4 | AIC=%5 | SSE=%6 | weightedSSE=%7")
+                .arg(QString::fromStdString(this->segmentTACsnames[segmentID]))
+                .arg(QString::fromStdString(modelID))
+                .arg(diagnosticCount)
+                .arg(d->weightFitCheckBox->isChecked() ? "WLS" : "OLS")
+                .arg(parameterIt->second.AIC, 0, 'g', 8)
+                .arg(unweightedSSE, 0, 'g', 8)
+                .arg(weightedSSE, 0, 'g', 8));
+      }
+    }
+
+    const auto liverFitIt = this->segmentTCMfits[segmentID].find("Liver DBIF");
+    const auto tdFitIt = this->segmentTCMfits[segmentID].find("2TdCM");
+    if (liverFitIt != this->segmentTCMfits[segmentID].end() &&
+        tdFitIt != this->segmentTCMfits[segmentID].end() &&
+        liverFitIt->second && tdFitIt->second)
+    {
+      const bool distinctBuffers = liverFitIt->second != tdFitIt->second;
+      double maxAbsDifference = 0.0;
+      double maxMagnitude = 0.0;
+      for (size_t i = 0; i < fitFrameCount; ++i)
+      {
+        const double a = liverFitIt->second[i];
+        const double b = tdFitIt->second[i];
+        if (std::isfinite(a) && std::isfinite(b))
+        {
+          maxAbsDifference = std::max(maxAbsDifference, std::abs(a - b));
+          maxMagnitude = std::max(maxMagnitude, std::max(std::abs(a), std::abs(b)));
+        }
+      }
+      const double relativeDifference =
+          maxAbsDifference / std::max(1.0, maxMagnitude);
+      d->logToPythonConsole(
+          tr("[SlicerDynamicPET liver] Liver DBIF vs 2TdCM | independent buffers=%1 | max curve difference=%2 | relative=%3")
+              .arg(distinctBuffers ? "yes" : "NO")
+              .arg(maxAbsDifference, 0, 'g', 6)
+              .arg(relativeDifference, 0, 'g', 6));
+      if (!distinctBuffers)
+      {
+        qCritical() << "Liver DBIF and 2TdCM unexpectedly share the same fitted-curve buffer.";
+      }
     }
   }
   d->populateResultsVOI();
@@ -18916,6 +20169,29 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     }
 
     tac[segmentName].reserve(Nframe);
+
+    std::vector<double> segmentSigmas;
+
+    if (d->weightedFitCheckBox->isChecked())
+    {
+      segmentSigmas.reserve(statsVec.size());
+
+      for (size_t i = 0; i < statsVec.size(); ++i)
+      {
+        segmentSigmas.push_back(
+            d->tissueSigmaForWeighting(
+                segmentName,
+                i,
+                currentSelectedStatID,
+                statsVec[i]));
+      }
+    }
+
+    const double fallbackSigma =
+        d->weightedFitCheckBox->isChecked()
+        ? medianValidSigma(segmentSigmas)
+        : std::numeric_limits<double>::quiet_NaN();
+
     for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
       const auto& vs = statsVec[ivs];
@@ -18924,8 +20200,9 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.mean;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18934,8 +20211,9 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.median;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18944,8 +20222,20 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.peak;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-              inverseVarianceWeightFromSigma(
-                  d->tissueSigmaForWeighting(segmentName, static_cast<size_t>(ivs), currentSelectedStatID, vs)));
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
+        } else {
+          wgtVec[segmentName].push_back(1.);
+        }
+      }
+      else if (currentSelectedStatID == "Max") {
+        value = vs.max;
+        if (d->weightedFitCheckBox->isChecked()) {
+          wgtVec[segmentName].push_back(
+            inverseVarianceWeightFromSigma(
+                segmentSigmas[static_cast<size_t>(ivs)],
+                fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -19420,7 +20710,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
        - 0.5 * this->durations[startFrameIndex])
       / framingNorm;
   const bool robust = d->robustFitCheckBoxImg->isChecked();
-  const bool std = d->standardizationCheckBoxImg->isChecked();
+  const bool std = false;  // MTGA parametric imaging intentionally uses physical graphical variables.
   const double huber_tune = d->huberTuneEditImg->text().toDouble();
   const double tol = d->tolEditImg->text().toDouble();
   const int max_iter = d->maxIterEditImg->text().toInt();
@@ -19473,8 +20763,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
                 d->weightedFitCheckBoxImg->isChecked())
             + "|robust="
             + QString::number(robust)
-            + "|standardize="
-            + QString::number(std);
+            + "|standardize=0";
 
         appendDouble(key, framingNorm);
         appendDouble(key, timeOffset);
@@ -20230,6 +21519,11 @@ void qSlicerDynamicPETModuleWidget::onPlotTCMbutton()
       lineSeries->SetLabelColumnName("ToolTipLabelTAC");
       lineSeries->SetUniqueColor();
       lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
+      if (modelName == "Liver DBIF")
+      {
+        lineSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleDash);
+        lineSeries->SetLineWidth(3.0);
+      }
       chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
   }
 

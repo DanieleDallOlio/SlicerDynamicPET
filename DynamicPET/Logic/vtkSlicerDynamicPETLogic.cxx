@@ -46,6 +46,7 @@
 #include <vtkIdTypeArray.h>
 
 #include <array>
+#include <algorithm>
 #include <cmath>
 #include <numeric>
 #include <limits>
@@ -60,6 +61,122 @@
 
 namespace
 {
+
+  bool ComputePchipSlopes(
+      const std::vector<double>& x,
+      const std::vector<double>& y,
+      std::vector<double>& slopes)
+  {
+      const size_t n = x.size();
+      if (n < 2 || n != y.size())
+      {
+          return false;
+      }
+      for (size_t i = 1; i < n; ++i)
+      {
+          if (!(x[i] > x[i - 1]))
+          {
+              return false;
+          }
+      }
+      slopes.assign(n, 0.0);
+      if (n == 2)
+      {
+          const double d = (y[1] - y[0]) / (x[1] - x[0]);
+          slopes[0] = slopes[1] = d;
+          return true;
+      }
+      std::vector<double> h(n - 1), delta(n - 1);
+      for (size_t i = 0; i + 1 < n; ++i)
+      {
+          h[i] = x[i + 1] - x[i];
+          delta[i] = (y[i + 1] - y[i]) / h[i];
+      }
+      for (size_t i = 1; i + 1 < n; ++i)
+      {
+          if (delta[i - 1] == 0.0 || delta[i] == 0.0 ||
+              delta[i - 1] * delta[i] <= 0.0)
+          {
+              slopes[i] = 0.0;
+          }
+          else
+          {
+              const double w1 = 2.0 * h[i] + h[i - 1];
+              const double w2 = h[i] + 2.0 * h[i - 1];
+              slopes[i] = (w1 + w2) /
+                  (w1 / delta[i - 1] + w2 / delta[i]);
+          }
+      }
+      auto endpointSlope = [](double h0, double h1, double d0, double d1)
+      {
+          double m = ((2.0 * h0 + h1) * d0 - h0 * d1) / (h0 + h1);
+          if (m * d0 <= 0.0)
+              return 0.0;
+          if (d0 * d1 < 0.0 && std::abs(m) > 3.0 * std::abs(d0))
+              return 3.0 * d0;
+          return m;
+      };
+      slopes.front() = endpointSlope(h[0], h[1], delta[0], delta[1]);
+      slopes.back() = endpointSlope(h[n - 2], h[n - 3], delta[n - 2], delta[n - 3]);
+      return true;
+  }
+
+  double EvaluatePchip(
+      const std::vector<double>& x,
+      const std::vector<double>& y,
+      const std::vector<double>& slopes,
+      double t)
+  {
+      if (x.size() < 2 || x.size() != y.size() || slopes.size() != x.size() ||
+          t < x.front() || t > x.back())
+      {
+          return std::numeric_limits<double>::quiet_NaN();
+      }
+      if (t == x.back())
+      {
+          return y.back();
+      }
+      const auto upper = std::upper_bound(x.begin(), x.end(), t);
+      const size_t right = static_cast<size_t>(std::distance(x.begin(), upper));
+      const size_t left = right - 1;
+      const double h = x[right] - x[left];
+      const double u = (t - x[left]) / h;
+      const double u2 = u * u;
+      const double u3 = u2 * u;
+      const double h00 = 2.0 * u3 - 3.0 * u2 + 1.0;
+      const double h10 = u3 - 2.0 * u2 + u;
+      const double h01 = -2.0 * u3 + 3.0 * u2;
+      const double h11 = u3 - u2;
+      return std::max(0.0,
+          h00 * y[left] + h10 * h * slopes[left] +
+          h01 * y[right] + h11 * h * slopes[right]);
+  }
+
+  void BuildFrameRepresentativeCurve(
+      double** scant,
+      const std::vector<double>& frameValues,
+      std::vector<double>& times,
+      std::vector<double>& values)
+  {
+      const size_t n = frameValues.size();
+      times.clear();
+      values.clear();
+      if (n == 0)
+      {
+          return;
+      }
+      times.reserve(n + 2);
+      values.reserve(n + 2);
+      times.push_back(scant[0][0]);
+      values.push_back(frameValues.front());
+      for (size_t i = 0; i < n; ++i)
+      {
+          times.push_back(0.5 * (scant[i][0] + scant[i][1]));
+          values.push_back(frameValues[i]);
+      }
+      times.push_back(scant[n - 1][1]);
+      values.push_back(frameValues.back());
+  }
 
   double*
   FineSampleExplicitInputFunction(
@@ -93,6 +210,14 @@ namespace
 
       double* output =
           new double[numberOfSamples];
+
+      std::vector<double> pchipSlope;
+      if (interpolationType == "pchip" &&
+          !ComputePchipSlopes(timesSec, values, pchipSlope))
+      {
+          delete[] output;
+          throw std::invalid_argument("Invalid PCHIP input-function sampling.");
+      }
 
       for (long int i = 0;
            i < numberOfSamples;
@@ -145,8 +270,11 @@ namespace
 
           if (interpolationType == "const")
           {
-              output[i] =
-                  values[left];
+              output[i] = values[left];
+          }
+          else if (interpolationType == "pchip")
+          {
+              output[i] = EvaluatePchip(timesSec, values, pchipSlope, t);
           }
           else
           {
@@ -1079,6 +1207,37 @@ static void parentFractionJacobianInternal(
 
 } // end anonymous namespace
 
+static double DynamicPETBinaryLabelmapVolumeMm3(
+    vtkMRMLScalarVolumeNode* referenceVolume,
+    vtkImageData* labelmap,
+    int labelValue = 1)
+{
+    if (!referenceVolume || !labelmap ||
+        !labelmap->GetPointData() ||
+        !labelmap->GetPointData()->GetScalars())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    double spacing[3] = {1.0, 1.0, 1.0};
+    referenceVolume->GetSpacing(spacing);
+    const double voxelVolume =
+        std::abs(spacing[0] * spacing[1] * spacing[2]);
+
+    vtkDataArray* labels =
+        labelmap->GetPointData()->GetScalars();
+    const vtkIdType n = labelmap->GetNumberOfPoints();
+    vtkIdType count = 0;
+    for (vtkIdType i = 0; i < n; ++i)
+    {
+        if (static_cast<int>(labels->GetComponent(i, 0)) == labelValue)
+        {
+            ++count;
+        }
+    }
+    return voxelVolume * static_cast<double>(count);
+}
+
 static const std::map<std::string, std::set<std::string>> MODEL_PARAMS = {
   {"1TiCM",  {"K1", "vb"}},
   {"1TCM",   {"K1", "k2", "vb"}},
@@ -1940,10 +2099,13 @@ void vtkSlicerDynamicPETLogic::computeTAC(vtkIdType ctID,
   if (!shNode) {
     return;
   }
-  // Fetch CT
-  vtkMRMLScalarVolumeNode* ctNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(ctID));
-  if (!ctNode) {
-    return;
+  // Fetch CT when available. TAC extraction itself remains PET-centered;
+  // CT is optional and is used only to quantify the same ROI on the CT grid.
+  vtkMRMLScalarVolumeNode* ctNode = nullptr;
+  if (ctID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    ctNode = vtkMRMLScalarVolumeNode::SafeDownCast(
+        shNode->GetItemDataNode(ctID));
   }
   // Fetch PET
   vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(shNode->GetItemDataNode(petID));
@@ -2246,6 +2408,39 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
 {
   ModelComparisonResult res;
 
+  // Liver DBIF changes the input-function construction itself (arterial plus
+  // portal contribution). Even though it shares several kinetic parameter
+  // names with 2TCM-family models, it is not a nested restriction of them.
+  // Comparisons involving Liver DBIF are therefore explicitly non-nested
+  // and use Vuong on the common tissue-response residual scale.
+  if (modelA == "Liver DBIF" || modelB == "Liver DBIF")
+  {
+    if (m1.r.size() != m2.r.size() ||
+        m1.weights.size() != m2.weights.size() ||
+        m1.weights.size() != m1.r.size())
+    {
+      throw std::invalid_argument(
+          "Liver DBIF Vuong comparison requires matching residual/weight vectors.");
+    }
+
+    std::vector<double> wgt(m1.weights.size(), 1.0);
+    for (size_t i = 0; i < wgt.size(); ++i)
+    {
+      wgt[i] = 0.5 * (m1.weights[i] + m2.weights[i]);
+    }
+
+    res.type = "Vuong";
+    res.p_value = this->computeVuongP(
+        m1.r,
+        m2.r,
+        &wgt,
+        m1.dof,
+        m2.dof,
+        VuongCorrection::BIC,
+        Tail::TwoSided);
+    return res;
+  }
+
   const auto& paramsA = MODEL_PARAMS.at(modelA);
   const auto& paramsB = MODEL_PARAMS.at(modelB);
 
@@ -2330,7 +2525,6 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
                              std::atomic<bool>& stopRequested
                          )
 {
-
   if (!sequencePETNode || !segSequenceNode)
   {
     std::cerr << "Invalid input nodes!" << std::endl;
@@ -2479,6 +2673,7 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
             PETVolume,
             labelmap,
             1);
+
       }
 
       segmentTACs[segmentID][i] = stats;
@@ -2644,14 +2839,18 @@ void vtkSlicerDynamicPETLogic::callTCM(
   }
   else
   {
-      Cp_new =
-          finesample(
-              scant,
-              Cp,
-              Nframe,
-              N_cp,
-              timestep,
-              interpolationType);
+      if (interpolationType == "pchip")
+      {
+          std::vector<double> frameValues(Nframe);
+          for (long int i = 0; i < Nframe; ++i) frameValues[i] = Cp[i][0];
+          std::vector<double> times, values;
+          BuildFrameRepresentativeCurve(scant, frameValues, times, values);
+          Cp_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, "pchip", N_cp);
+      }
+      else
+      {
+          Cp_new = finesample(scant, Cp, Nframe, N_cp, timestep, interpolationType);
+      }
   }
 
   const bool useNativeWholeBlood =
@@ -2674,14 +2873,18 @@ void vtkSlicerDynamicPETLogic::callTCM(
   }
   else
   {
-      cwb_new =
-          finesample(
-              scant,
-              Cwb,
-              Nframe,
-              N_wb,
-              timestep,
-              interpolationType);
+      if (interpolationType == "pchip")
+      {
+          std::vector<double> frameValues(Nframe);
+          for (long int i = 0; i < Nframe; ++i) frameValues[i] = Cwb[i][0];
+          std::vector<double> times, values;
+          BuildFrameRepresentativeCurve(scant, frameValues, times, values);
+          cwb_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, "pchip", N_wb);
+      }
+      else
+      {
+          cwb_new = finesample(scant, Cwb, Nframe, N_wb, timestep, interpolationType);
+      }
   }
 
   if (N_cp != N_wb)
@@ -3400,7 +3603,7 @@ double vtkSlicerDynamicPETLogic::computeAIC(const std::vector<double>& obs,
         ss += weights[i] * diff * diff;
     }
 
-    int numpar_new = numpar + 1; // intercept term
+    int numpar_new = numpar + 1; // fitted kinetic parameters + residual-variance scale
 
     double mse = (numfrm > 0 ? ss / static_cast<double>(numfrm) : 0.0);
     if (mse <= 0.0 || !std::isfinite(mse))
@@ -3496,7 +3699,7 @@ double vtkSlicerDynamicPETLogic::computeBIC(const std::vector<double>& obs,
         ss += weights[i] * diff * diff;
     }
 
-    int p = numpar + 1; // intercept term
+    int p = numpar + 1; // fitted kinetic parameters + residual-variance scale
     double BIC = n * std::log(ss / static_cast<double>(n))
                  + p * std::log(static_cast<double>(n));
 
@@ -6845,13 +7048,16 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     }
     else
     {
-        Cp_new =
-            finesample2(
-                scant,
-                Cp,
-                N_cp,
-                timestep,
-                interpolationType);
+        if (interpolationType == "pchip")
+        {
+            std::vector<double> times, values;
+            BuildFrameRepresentativeCurve(scant.data(), Cp, times, values);
+            Cp_new = FineSampleExplicitInputFunction(times, values, cumsum.back(), timestep, "pchip", N_cp);
+        }
+        else
+        {
+            Cp_new = finesample2(scant, Cp, N_cp, timestep, interpolationType);
+        }
     }
 
     const bool useNativeWholeBlood =
@@ -6874,13 +7080,16 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     }
     else
     {
-        cwb_new =
-            finesample2(
-                scant,
-                Cwb,
-                N_wb,
-                timestep,
-                interpolationType);
+        if (interpolationType == "pchip")
+        {
+            std::vector<double> times, values;
+            BuildFrameRepresentativeCurve(scant.data(), Cwb, times, values);
+            cwb_new = FineSampleExplicitInputFunction(times, values, cumsum.back(), timestep, "pchip", N_wb);
+        }
+        else
+        {
+            cwb_new = finesample2(scant, Cwb, N_wb, timestep, interpolationType);
+        }
     }
 
     if (N_cp != N_wb)

@@ -559,10 +559,11 @@
                         <item row="0" column="1" colspan="3">
                           <widget class="QComboBox" name="IFSourceProcessingSelector">
                             <property name="toolTip">
-                              <string>Optional denoising or analytic modeling of the measured patient-specific source curve before blood/plasma conversion and PBIF calibration. LOWESS is a local robust smoother. Feng fits the standard seven-parameter analytic input-function model.</string>
+                              <string>Optional denoising or analytic modeling of the measured patient-specific source curve before blood/plasma conversion and PBIF calibration. LOWESS is robust but may attenuate a sharp bolus. Gaussian kernel smoothing is a gentler, directly tunable alternative for irregularly sampled data. Feng fits the standard analytic input-function model. For a smooth curve that still passes through retained observations without denoising, leave processing at None and choose shape-preserving cubic (PCHIP) interpolation below.</string>
                             </property>
                             <item><property name="text"><string>None</string></property></item>
                             <item><property name="text"><string>LOWESS smoothing</string></property></item>
+                            <item><property name="text"><string>Gaussian smoothing</string></property></item>
                             <item><property name="text"><string>Feng model</string></property></item>
                           </widget>
                         </item>
@@ -583,6 +584,22 @@
                             <property name="value"><double>0.250000000000000</double></property>
                           </widget>
                         </item>
+                        <item row="1" column="2">
+                          <widget class="QLabel" name="IFGaussianSigmaLabel">
+                            <property name="text"><string>Gaussian sigma</string></property>
+                            <property name="toolTip"><string>Gaussian kernel width in seconds. Smaller values preserve the measured bolus shape more closely; larger values provide stronger denoising. The kernel works directly on irregular sample times.</string></property>
+                          </widget>
+                        </item>
+                        <item row="1" column="3">
+                          <widget class="QDoubleSpinBox" name="IFGaussianSigmaSpinBox">
+                            <property name="decimals"><number>1</number></property>
+                            <property name="minimum"><double>0.100000000000000</double></property>
+                            <property name="maximum"><double>600.000000000000000</double></property>
+                            <property name="singleStep"><double>0.500000000000000</double></property>
+                            <property name="value"><double>1.000000000000000</double></property>
+                            <property name="suffix"><string> s</string></property>
+                          </widget>
+                        </item>
 
                         <!-- Input interpolation -->
                         <item row="2" column="0">
@@ -593,10 +610,11 @@
                         <item row="2" column="1" colspan="3">
                           <widget class="QComboBox" name="IFInterpolationSelector">
                             <property name="toolTip">
-                              <string>Interpolation used to evaluate the input function between available samples. Linear is recommended for most input functions. Piecewise constant holds frame/sample values between sampling locations.</string>
+                              <string>Interpolation used to evaluate the input function between available samples. Linear is conservative. Piecewise constant holds frame/sample values between sampling locations. Shape-preserving cubic spline (PCHIP) gives a smooth curve through the retained observations while limiting overshoot; unlike LOWESS it does not denoise or attenuate the measured peak.</string>
                             </property>
                             <item><property name="text"><string>Linear</string></property></item>
                             <item><property name="text"><string>Piecewise constant</string></property></item>
+                            <item><property name="text"><string>Shape-preserving cubic spline</string></property></item>
                           </widget>
                         </item>
 
@@ -821,19 +839,19 @@
                          </property>
                         </widget>
                       </item>
-                      <!-- <item>
+                      <item>
                         <widget class="QCheckBox" name="PlotErrorCheckbox">
                          <property name="toolTip">
-                          <string>Show errors in plot.</string>
+                          <string>Show vertical bars when available. In image mode these are ROI dispersion measures (SD for Mean, IQR/1.349 for Median, local SUVpeak-region SD for Peak), not automatically the uncertainty of the ROI estimator. In Table mode imported one-sigma uncertainty is used. Max has no automatic image-derived uncertainty.</string>
                          </property>
                          <property name="text">
-                          <string>Plot errors</string>
+                          <string>Show error / dispersion bars</string>
                          </property>
                          <property name="checked">
-                          <bool>true</bool>
+                          <bool>false</bool>
                          </property>
                         </widget>
-                      </item> -->
+                      </item>
                     </layout>
                   </item>
                   <item row="2" column="1">
@@ -1803,7 +1821,7 @@
                   <item row="7" column="0" colspan="4">
                     <widget class="QLabel" name="fitTypeLabel">
                       <property name="text">
-                        <string>Fit Type</string>
+                        <string>Weighting</string>
                       </property>
                     </widget>
                   </item>
@@ -1811,27 +1829,21 @@
                     <layout class="QHBoxLayout" name="fitTypeLayout">
                       <item>
                         <widget class="QCheckBox" name="standardFitCheckBox">
-                          <property name="text">
-                            <string>Standardize MTGA variables</string>
-                          </property>
-                          <property name="toolTip">
-                            <string>Z-standardize each model's graphical X/Y variables before regression. Kinetic slope/intercept are transformed back to physical graphical units, while residual-based model-selection diagnostics are retained in standardized space to reduce scale differences across Patlak/Logan/RE transformations. These standardized diagnostics are comparative heuristics, not likelihoods on one common response scale.</string>
-                          </property>
-                          <property name="checked">
-                            <bool>true</bool>
-                          </property>
+                          <property name="text"><string>OLS</string></property>
+                          <property name="checked"><bool>true</bool></property>
+                          <property name="toolTip"><string>Ordinary unweighted least-squares TCM fit.</string></property>
                         </widget>
                       </item>
                       <item>
                         <widget class="QCheckBox" name="weightFitCheckBox">
                           <property name="text">
-                            <string>Weighted Fit</string>
+                            <string>WLS</string>
                           </property>
                           <property name="checked">
                             <bool>false</bool>
                           </property>
                           <property name="toolTip">
-                            <string>ROI WLS uses normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.</string>
+                            <string>Weighted least squares using normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.</string>
                           </property>
                         </widget>
                       </item>
@@ -2283,19 +2295,17 @@
 
                         <item row="0" column="1">
                           <widget class="QComboBox" name="BodySupportSourceImg">
+                            <property name="currentIndex">
+                              <number>0</number>
+                            </property>
                             <item>
                               <property name="text">
-                                <string>Auto (CT preferred)</string>
+                                <string>PET</string>
                               </property>
                             </item>
                             <item>
                               <property name="text">
                                 <string>CT</string>
-                              </property>
-                            </item>
-                            <item>
-                              <property name="text">
-                                <string>PET</string>
                               </property>
                             </item>
                             <item>
@@ -2598,16 +2608,6 @@
                             <widget class="QLineEdit" name="framingNormEditImg">
                               <property name="text">
                                 <string>60.0</string>
-                              </property>
-                            </widget>
-                          </item>
-                          <item row="5" column="0" colspan="2">
-                            <widget class="QCheckBox" name="standardizationCheckBoxImg">
-                              <property name="text">
-                                <string>Standardize Data</string>
-                              </property>
-                              <property name="checked">
-                                <bool>true</bool>
                               </property>
                             </widget>
                           </item>
@@ -3226,7 +3226,7 @@
                           <item row="7" column="0" colspan="4">
                             <widget class="QLabel" name="fitTypeLabelImg">
                               <property name="text">
-                                <string>Fit Type</string>
+                                <string>Weighting</string>
                               </property>
                             </widget>
                           </item>
@@ -3234,27 +3234,21 @@
                             <layout class="QHBoxLayout" name="fitTypeLayoutImg">
                               <item>
                                 <widget class="QCheckBox" name="standardFitCheckBoxImg">
-                                  <property name="text">
-                                    <string>Standardize MTGA variables</string>
-                                  </property>
-                                  <property name="toolTip">
-                                    <string>Z-standardize each model's graphical X/Y variables before regression. Kinetic slope/intercept are transformed back to physical graphical units, while residual-based model-selection diagnostics are retained in standardized space to reduce scale differences across Patlak/Logan/RE transformations.</string>
-                                  </property>
-                                  <property name="checked">
-                                    <bool>true</bool>
-                                  </property>
+                                  <property name="text"><string>OLS</string></property>
+                                  <property name="checked"><bool>true</bool></property>
+                                  <property name="toolTip"><string>Ordinary unweighted voxelwise TCM fit.</string></property>
                                 </widget>
                               </item>
                               <item>
                                 <widget class="QCheckBox" name="weightFitCheckBoxImg">
                                   <property name="text">
-                                    <string>Weighted Fit</string>
+                                    <string>WLS</string>
                                   </property>
                                   <property name="checked">
                                     <bool>false</bool>
                                   </property>
                           <property name="toolTip">
-                            <string>Experimental global frame weighting for voxelwise TCM using the selected segment-derived IDIF dispersion estimate when available. This is not yet a per-voxel PET noise model.</string>
+                            <string>Experimental global-frame voxelwise WLS using the selected segment-derived IDIF dispersion estimate when available. This is not a per-voxel PET noise model.</string>
                           </property>
                                 </widget>
                               </item>

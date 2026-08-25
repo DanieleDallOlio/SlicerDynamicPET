@@ -4,3 +4,6 @@
 [submodule "KMAP-CPP"]
 	path = KMAP-CPP
 	url = https://github.com/DanieleDallOlio/KMAP-CPP.git
+[submodule "dRTImporter"]
+	path = dRTImporter
+	url = https://github.com/DanieleDallOlio/dRTImporter.git

@@ -264,6 +264,7 @@ message(STATUS ""                                                               
 # Extension modules
 add_subdirectory(DynamicPET)
 add_subdirectory(dPETImporter/dPETImporter)
+add_subdirectory(dRTImporter/dRTImporter)
 ## NEXT_MODULE
 # -----------------------------------------------------------------------------
 include(${Slicer_EXTENSION_GENERATE_CONFIG})

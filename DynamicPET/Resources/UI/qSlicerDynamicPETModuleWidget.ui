@@ -778,6 +778,80 @@
               </widget>
             </item>
             <item>
+              <widget class="ctkCollapsibleButton" name="SegmentationAdvancedCollapsibleButton">
+                <property name="text">
+                  <string>Advanced [Segmentation]</string>
+                </property>
+                <property name="collapsed">
+                  <bool>true</bool>
+                </property>
+                <layout class="QFormLayout" name="SegmentationAdvancedLayout">
+                  <item row="0" column="0" colspan="2">
+                    <layout class="QHBoxLayout" name="SegmentationEditingLayout">
+                      <item>
+                        <widget class="QCheckBox" name="PlotLiveSegEdit">
+                          <property name="toolTip">
+                            <string>Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections.</string>
+                          </property>
+                          <property name="text">
+                            <string>Track Segment Editor corrections</string>
+                          </property>
+                          <property name="checked">
+                            <bool>true</bool>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="OpenSegmentEditorButton">
+                          <property name="text">
+                            <string>Open Segment Editor</string>
+                          </property>
+                          <property name="toolTip">
+                            <string>Open Slicer's Segment Editor with the currently selected dynamic segmentation and PET frame.</string>
+                          </property>
+                        </widget>
+                      </item>
+                      <item>
+                        <spacer name="SegmentationEditingSpacer">
+                          <property name="orientation"><enum>Qt::Horizontal</enum></property>
+                          <property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property>
+                        </spacer>
+                      </item>
+                    </layout>
+                  </item>
+                  <item row="1" column="0">
+                    <widget class="QLabel" name="DynamicRTStructSaveLabel">
+                      <property name="text"><string>Save Dynamic RTSTRUCT:</string></property>
+                    </widget>
+                  </item>
+                  <item row="1" column="1">
+                    <layout class="QHBoxLayout" name="DynamicRTStructSaveLayout">
+                      <item>
+                        <widget class="ctkPathLineEdit" name="DynamicRTStructDirectory">
+                          <property name="filters">
+                            <set>ctkPathLineEdit::Dirs|ctkPathLineEdit::Drives|ctkPathLineEdit::Executable|ctkPathLineEdit::NoDot|ctkPathLineEdit::NoDotDot|ctkPathLineEdit::Readable</set>
+                          </property>
+                          <property name="showHistoryButton"><bool>false</bool></property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QLineEdit" name="DynamicRTStructFilename">
+                          <property name="text"><string>RTSTRUCT.dcm</string></property>
+                          <property name="placeholderText"><string>patient_RTSTRUCT.dcm</string></property>
+                        </widget>
+                      </item>
+                      <item>
+                        <widget class="QPushButton" name="SaveDynamicRTStructButton">
+                          <property name="text"><string>Save</string></property>
+                          <property name="toolTip"><string>Export the complete segmentation sequence as one Dynamic RT Structure Set.</string></property>
+                        </widget>
+                      </item>
+                    </layout>
+                  </item>
+                </layout>
+              </widget>
+            </item>
+            <item>
               <widget class="ctkCollapsibleButton" name="TACCollapsibleButton">
                 <property name="text">
                  <string>Plot</string>
@@ -844,19 +918,6 @@
                         </widget>
                       </item>
                       <item>
-                        <widget class="QCheckBox" name="PlotLiveSegEdit">
-                         <property name="toolTip">
-                          <string>Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections.</string>
-                         </property>
-                         <property name="text">
-                          <string>SegmentEditor corrections</string>
-                         </property>
-                         <property name="checked">
-                          <bool>true</bool>
-                         </property>
-                        </widget>
-                      </item>
-                      <item>
                         <widget class="QCheckBox" name="PlotErrorCheckbox">
                          <property name="toolTip">
                           <string>Show vertical bars when available. In image mode these are ROI dispersion measures (SD for Mean, IQR/1.349 for Median, local SUVpeak-region SD for Peak), not automatically the uncertainty of the ROI estimator. In Table mode imported one-sigma uncertainty is used. Max has no automatic image-derived uncertainty.</string>
@@ -919,7 +980,7 @@
                           <string>Choose filename to save EXCEL.</string>
                          </property>
                          <property name="text">
-                          <string>tac.xlsx</string>
+                          <string>TAC.xlsx</string>
                          </property>
                         </widget>
                       </item>
@@ -1402,7 +1463,7 @@
                           <string>Choose filename to save EXCEL.</string>
                          </property>
                          <property name="text">
-                          <string>parameters_mtga.xlsx</string>
+                          <string>MTGAparameters.xlsx</string>
                          </property>
                         </widget>
                       </item>
@@ -1458,7 +1519,7 @@
                           <string>Choose filename to save EXCEL.</string>
                          </property>
                          <property name="text">
-                          <string>fitted_mtga.xlsx</string>
+                          <string>MTGAfitted.xlsx</string>
                          </property>
                         </widget>
                       </item>
@@ -2098,7 +2159,7 @@
                           <string>Choose filename to save EXCEL.</string>
                          </property>
                          <property name="text">
-                          <string>parameters_tcm.xlsx</string>
+                          <string>TCMparameters.xlsx</string>
                          </property>
                         </widget>
                       </item>
@@ -2154,7 +2215,7 @@
                           <string>Choose filename to save EXCEL.</string>
                          </property>
                          <property name="text">
-                          <string>fitted_tcm.xlsx</string>
+                          <string>TCMfitted.xlsx</string>
                          </property>
                         </widget>
                       </item>

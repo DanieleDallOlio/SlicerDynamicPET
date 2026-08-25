@@ -2607,6 +2607,9 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
     stopButton->show();
     qApp->processEvents();
   }
+  const std::string binaryLabelmapRep =
+      vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+
   for (int i = 0; i < numberOfTimepoints; ++i)
   {
     std::string indexValue = sequencePETNode->GetNthIndexValue(i);
@@ -2618,6 +2621,48 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
     {
       std::cerr << "Missing data for timepoint " << i << std::endl;
       continue;
+    }
+
+    // Dynamic RTSTRUCT imports intentionally keep Planar contours as their
+    // source representation and Closed surface for display.  TAC extraction,
+    // however, requires Binary labelmap.  Materialize it lazily for this
+    // temporal item using the matching PET frame as reference geometry.
+    // The representation remains stored on the sequence data node, so this
+    // conversion is paid only once per frame and future TAC computations reuse it.
+    vtkSegmentation* frameSegmentation = segmentationNode->GetSegmentation();
+    if (frameSegmentation && !frameSegmentation->ContainsRepresentation(binaryLabelmapRep))
+    {
+      if (ProgressBar)
+      {
+        ProgressBar->setFormat(
+            QString("Preparing segmentation frame %1/%2 (%p%)")
+                .arg(i + 1)
+                .arg(numberOfTimepoints));
+        qApp->processEvents();
+      }
+
+      segmentationNode->SetReferenceImageGeometryParameterFromVolumeNode(PETVolume);
+      if (!frameSegmentation->CreateRepresentation(binaryLabelmapRep))
+      {
+        std::cerr
+            << "Failed to create Binary labelmap representation at timepoint "
+            << i << std::endl;
+
+        for (int s = 0; s < segmentsID.size(); ++s)
+        {
+          const std::string& segmentID = segmentsID[s].toStdString();
+          VoxelStatistics stats;
+          stats.keep = false;
+          stats.empty = true;
+          segmentTACs[segmentID][i] = stats;
+        }
+        continue;
+      }
+
+      if (ProgressBar)
+      {
+        ProgressBar->setFormat("Computing TAC (%p%)");
+      }
     }
 
     // MRML/segmentation export is intentionally serialized.

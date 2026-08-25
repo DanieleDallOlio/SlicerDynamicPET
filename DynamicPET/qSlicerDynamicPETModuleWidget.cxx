@@ -38,6 +38,7 @@
 #include <QGroupBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QLineEdit>
 #include <QFileInfo>
 #include <QSignalBlocker>
 #include <QSizePolicy>
@@ -787,6 +788,7 @@ public:
   void populatePlotSegmentCheckboxes();
   void populateIF();
   void updateInputFunctionStatus();
+  void updateSegmentationAdvancedUI();
   void updateROIModelingAvailability();
   void updateParametricImagingAvailability();
   void updateKineticModelAvailability();
@@ -3971,7 +3973,7 @@ setTableBasedMode(bool enabled)
     }
 
     // Image-only controls are hidden, not merely disabled, in table mode.
-    this->PlotLiveSegEdit->setVisible(!this->tableBasedMode);
+    this->SegmentationAdvancedCollapsibleButton->setVisible(!this->tableBasedMode);
     this->Plottacsave->setVisible(!this->tableBasedMode);
     this->direxcel->setVisible(!this->tableBasedMode);
     this->fileexcel->setVisible(!this->tableBasedMode);
@@ -3992,6 +3994,7 @@ setTableBasedMode(bool enabled)
     this->invalidateInputFunctionResults();
     this->updateTableUnitUI();
     this->updateInputFunctionStatus();
+    this->updateSegmentationAdvancedUI();
     this->setPostTACEnabled(!q->segmentTACs.empty());
     this->updateParametricImagingAvailability();
 
@@ -4135,6 +4138,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   this->PlotLiveSegEdit->setToolTip(
       QObject::tr(
           "Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections."));
+  this->OpenSegmentEditorButton->setEnabled(false);
+  this->SaveDynamicRTStructButton->setEnabled(false);
+  this->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
   this->RESETbutton->setToolTip(
       QObject::tr(
           "Restore points removed from the active mode's tissue TACs and external input function."));
@@ -4733,11 +4739,21 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this, q]()
       {
+          QString exportBaseName;
+          if (q->SubjectHierarchyNode
+              && q->patID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+          {
+              exportBaseName = QString::fromStdString(
+                  q->SubjectHierarchyNode->GetItemName(q->patID));
+          }
+          const QString suggestedFileName = exportBaseName.isEmpty()
+              ? QStringLiteral("IF.csv")
+              : exportBaseName + QStringLiteral("_IF.csv");
           const QString suggestedPath =
               this->sharedOutputDirectory.trimmed().isEmpty()
-              ? QStringLiteral("DynamicPET_final_IF.csv")
+              ? suggestedFileName
               : QDir(this->sharedOutputDirectory)
-                    .filePath(QStringLiteral("DynamicPET_final_IF.csv"));
+                    .filePath(suggestedFileName);
 
           QString filePath = QFileDialog::getSaveFileName(
               q,
@@ -4792,6 +4808,20 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onPETChanged(int)) );
   QObject::connect( this->SegSelector, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onSegChanged(int)));
+  QObject::connect( this->OpenSegmentEditorButton, SIGNAL(clicked(bool)),
+    q, SLOT(onOpenSegmentEditor()));
+  QObject::connect( this->SaveDynamicRTStructButton, SIGNAL(clicked(bool)),
+    q, SLOT(onSaveDynamicRTStruct()));
+  QObject::connect(
+      this->DynamicRTStructDirectory,
+      &ctkPathLineEdit::currentPathChanged,
+      q,
+      [this](const QString&) { this->updateSegmentationAdvancedUI(); });
+  QObject::connect(
+      this->DynamicRTStructFilename,
+      &QLineEdit::textChanged,
+      q,
+      [this](const QString&) { this->updateSegmentationAdvancedUI(); });
   QObject::connect( this->TACbutton, SIGNAL(clicked(bool)),
     q, SLOT(onTACbutton()));
   QObject::connect( this->segmentSelectAll, SIGNAL(clicked(bool)),
@@ -4890,7 +4920,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
            this->direxceltcm,
            this->direxcelmtga,
            this->direxceltcmfitted,
-           this->direxcelmtgafitted})
+           this->direxcelmtgafitted,
+           this->DynamicRTStructDirectory})
   {
     QObject::connect(
         outputDirectory,
@@ -5041,6 +5072,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   #endif
 
 
+  this->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
   this->TACCollapsibleButton->setCollapsed(true);
   this->TCMCollapsibleButton->setCollapsed(true);
   this->MTGACollapsibleButton->setCollapsed(true);
@@ -6221,6 +6253,111 @@ def DPE_export_parametric_map(
                 str(exc)
                 + "\n\n"
                 + traceback.format_exc()
+        }
+)PYTHON");
+
+  // Small Python bridge for dynamic RTSTRUCT import/export.  The DICOM work
+  // remains in the scripted dRTImporter/dRTExporter helpers; C++ only passes
+  // MRML node IDs and displays the result.
+  mainContext.evalScript(R"PYTHON(
+import traceback
+import slicer
+
+
+def DPE_adopt_dynamic_rtstruct(
+        segmentation_node_id,
+        pet_sequence_node_id,
+        pet_browser_node_id):
+    try:
+        from dRTImporterLib.dRTImporterPlugin import (
+            adopt_dynamic_rtstruct_to_pet
+        )
+
+        return adopt_dynamic_rtstruct_to_pet(
+            segmentation_node_id,
+            pet_sequence_node_id,
+            pet_browser_node_id
+        )
+
+    except Exception as exc:
+        return {
+            'ok': False,
+            'error': str(exc) + '\n\n' + traceback.format_exc()
+        }
+
+
+def DPE_export_dynamic_rtstruct(
+        segmentation_sequence_node_id,
+        pet_sequence_node_id,
+        reference_volume_node_id,
+        output_path,
+        overwrite=False):
+    try:
+        from dRTImporterLib.dRTExporter import (
+            export_dynamic_rtstruct_from_node_ids
+        )
+
+        path = export_dynamic_rtstruct_from_node_ids(
+            segmentation_sequence_node_id,
+            pet_sequence_node_id,
+            reference_volume_node_id,
+            output_path,
+            overwrite=bool(overwrite),
+            show_progress=True
+        )
+
+        return {
+            'ok': True,
+            'path': path
+        }
+
+    except Exception as exc:
+        return {
+            'ok': False,
+            'error': str(exc) + '\n\n' + traceback.format_exc()
+        }
+
+
+def DPE_open_segment_editor(
+        segmentation_node_id,
+        source_volume_node_id=''):
+    try:
+        segmentation_node = slicer.mrmlScene.GetNodeByID(
+            segmentation_node_id
+        )
+        if segmentation_node is None:
+            raise ValueError(
+                'Selected segmentation node is no longer available.'
+            )
+
+        source_volume = (
+            slicer.mrmlScene.GetNodeByID(source_volume_node_id)
+            if source_volume_node_id
+            else None
+        )
+
+        slicer.util.selectModule('SegmentEditor')
+
+        module_widget = (
+            slicer.modules.segmenteditor.widgetRepresentation()
+        )
+        if module_widget is None:
+            raise RuntimeError(
+                'Segment Editor module widget is unavailable.'
+            )
+
+        editor = module_widget.self().editor
+        editor.setSegmentationNode(segmentation_node)
+
+        if source_volume is not None:
+            editor.setSourceVolumeNode(source_volume)
+
+        return {'ok': True}
+
+    except Exception as exc:
+        return {
+            'ok': False,
+            'error': str(exc) + '\n\n' + traceback.format_exc()
         }
 )PYTHON");
 
@@ -8887,6 +9024,47 @@ currentObservedInputStartSec() const
 
 void
 qSlicerDynamicPETModuleWidgetPrivate::
+updateSegmentationAdvancedUI()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    const bool imageMode = !this->tableBasedMode;
+    vtkMRMLSegmentationNode* segmentationNode = nullptr;
+    if (imageMode
+        && q->mrmlScene()
+        && q->segID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+        vtkMRMLSubjectHierarchyNode* shNode =
+            vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(q->mrmlScene());
+        if (shNode)
+        {
+            segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+                shNode->GetItemDataNode(q->segID));
+        }
+    }
+
+    const bool hasSegmentation = segmentationNode != nullptr;
+    const bool hasDynamicSegmentation =
+        hasSegmentation
+        && q->segSequenceNode
+        && q->segSequenceNode->GetNumberOfDataNodes() > 0
+        && q->sequencePETNode
+        && q->sequenceBrowserPETNode;
+
+    this->SegmentationAdvancedCollapsibleButton->setVisible(imageMode);
+    this->PlotLiveSegEdit->setEnabled(hasSegmentation);
+    this->OpenSegmentEditorButton->setEnabled(hasSegmentation);
+    this->DynamicRTStructDirectory->setEnabled(hasDynamicSegmentation);
+    this->DynamicRTStructFilename->setEnabled(hasDynamicSegmentation);
+    const bool hasOutputPath =
+        !this->DynamicRTStructDirectory->currentPath().trimmed().isEmpty()
+        && !this->DynamicRTStructFilename->text().trimmed().isEmpty();
+    this->SaveDynamicRTStructButton->setEnabled(
+        hasDynamicSegmentation && hasOutputPath);
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
 propagateOutputDirectory(const QString& path)
 {
     if (this->propagatingOutputDirectory)
@@ -8910,6 +9088,7 @@ propagateOutputDirectory(const QString& path)
              this->direxcelmtga,
              this->direxceltcmfitted,
              this->direxcelmtgafitted,
+             this->DynamicRTStructDirectory,
              this->MTGADICOMDirectoryImg,
              this->TCMDICOMDirectoryImg})
     {
@@ -15772,11 +15951,24 @@ exportParametricMapDICOM(
   const QString fieldQString =
       QString::fromStdString(field);
 
+  QString exportBaseName;
+  if (q->SubjectHierarchyNode
+      && q->patID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    exportBaseName = QString::fromStdString(
+        q->SubjectHierarchyNode->GetItemName(q->patID));
+  }
+  if (exportBaseName.trimmed().isEmpty())
+  {
+    exportBaseName = QStringLiteral("SlicerDynamicPET");
+  }
+
   const QString outputPath =
       outputDir.filePath(
           QString(
-              "SlicerDynamicPET_%1_%2_%3.dcm")
+              "%1_PMAP_%2_%3_%4.dcm")
               .arg(
+                  exportBaseName,
                   methodQString,
                   modelQString,
                   fieldQString));
@@ -16705,6 +16897,7 @@ setPETItemID(vtkIdType newPetID)
   q->petID = newPetID;
 
   this->updateBodySupportUI();
+  this->updateSegmentationAdvancedUI();
 }
 
 
@@ -16976,21 +17169,28 @@ void qSlicerDynamicPETModuleWidget::onPatChanged (int index) {
   d->populateStudyComboBox(this->patID);
   if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   {
-    // "None" selected — ignore or reset state
-    d->fileexcel->setText(QString::fromStdString(".xlsx"));
+    // No patient name is available: keep neutral, usable fallback names for
+    // every user-editable export field instead of resetting TAC only.
+    d->fileexcel->setText(QStringLiteral("TAC.xlsx"));
+    d->fileexceltcm->setText(QStringLiteral("TCMparameters.xlsx"));
+    d->fileexceltcmfitted->setText(QStringLiteral("TCMfitted.xlsx"));
+    d->fileexcelmtga->setText(QStringLiteral("MTGAparameters.xlsx"));
+    d->fileexcelmtgafitted->setText(QStringLiteral("MTGAfitted.xlsx"));
+    d->DynamicRTStructFilename->setText(QStringLiteral("RTSTRUCT.dcm"));
     return;
   }
-  std :: string name = this->SubjectHierarchyNode->GetItemName(this->patID);
-  std :: string excelfile = name + "_TAC.xlsx";
-  d->fileexcel->setText(QString::fromStdString(excelfile));
-  std :: string excelfiletcm = name + "_TCMparameters.xlsx";
-  d->fileexceltcm->setText(QString::fromStdString(excelfiletcm));
-  std :: string excelfiletcmfitted = name + "_TCMfitted.xlsx";
-  d->fileexceltcmfitted->setText(QString::fromStdString(excelfiletcmfitted));
-  std :: string excelfilemtga = name + "_MTGAparameters.xlsx";
-  d->fileexcelmtga->setText(QString::fromStdString(excelfilemtga));
-  std :: string excelfilemtgafitted = name + "_MTGAfitted.xlsx";
-  d->fileexcelmtgafitted->setText(QString::fromStdString(excelfilemtgafitted));
+
+  const QString name = QString::fromStdString(
+      this->SubjectHierarchyNode->GetItemName(this->patID));
+
+  // Keep all editable export filenames on the same convention:
+  // <patient name>_<export type>.<extension>
+  d->fileexcel->setText(name + QStringLiteral("_TAC.xlsx"));
+  d->fileexceltcm->setText(name + QStringLiteral("_TCMparameters.xlsx"));
+  d->fileexceltcmfitted->setText(name + QStringLiteral("_TCMfitted.xlsx"));
+  d->fileexcelmtga->setText(name + QStringLiteral("_MTGAparameters.xlsx"));
+  d->fileexcelmtgafitted->setText(name + QStringLiteral("_MTGAfitted.xlsx"));
+  d->DynamicRTStructFilename->setText(name + QStringLiteral("_RTSTRUCT.dcm"));
 }
 
 
@@ -17355,6 +17555,7 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
           .value<vtkIdType>();
 
   this->segSequenceNode = nullptr;
+  d->updateSegmentationAdvancedUI();
 
   vtkMRMLScene* scene = this->mrmlScene();
   if (scene==nullptr) {
@@ -17424,6 +17625,61 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 
   vtkMRMLSequenceNode* seqNode =
   this->sequenceBrowserPETNode->GetSequenceNode(segNode);
+
+  // A dynamic RTSTRUCT may have been imported before its PET.  In that case
+  // the dRTImporter deliberately creates a standalone browser.  Adopt that
+  // existing temporal sequence into the selected PET browser instead of
+  // treating the proxy as a static segmentation and cloning one frame.
+  const char* importedDynamicAttribute =
+      segNode->GetAttribute("dRTImporter.DynamicRTStruct");
+  const bool importedDynamicSegmentation =
+      importedDynamicAttribute
+      && QString::fromUtf8(importedDynamicAttribute) == QStringLiteral("1");
+
+  if (!seqNode && importedDynamicSegmentation)
+  {
+    PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+    const QVariant resultVariant = mainContext.call(
+        "DPE_adopt_dynamic_rtstruct",
+        QVariantList{
+            QString::fromUtf8(segNode->GetID()),
+            QString::fromUtf8(this->sequencePETNode->GetID()),
+            QString::fromUtf8(this->sequenceBrowserPETNode->GetID())});
+    const QVariantMap result = resultVariant.toMap();
+
+    if (!result.value("ok").toBool())
+    {
+      this->ProgressBar->hide();
+      this->ProgressBar->setValue(0);
+      this->ProgressBar->setFormat("%p%");
+      d->populateSegmentCheckboxes(this->segID);
+      d->updateSegmentationAdvancedUI();
+      QMessageBox::warning(
+          this,
+          tr("Dynamic RTSTRUCT"),
+          tr("The imported dynamic segmentation could not be matched to the selected PET.\n\n%1")
+              .arg(result.value("error").toString()));
+      return;
+    }
+
+    const QByteArray sequenceNodeID =
+        result.value("sequence_node_id").toString().toUtf8();
+    seqNode = vtkMRMLSequenceNode::SafeDownCast(
+        scene->GetNodeByID(sequenceNodeID.constData()));
+    if (!seqNode)
+    {
+      this->ProgressBar->hide();
+      this->ProgressBar->setValue(0);
+      this->ProgressBar->setFormat("%p%");
+      d->updateSegmentationAdvancedUI();
+      QMessageBox::warning(
+          this,
+          tr("Dynamic RTSTRUCT"),
+          tr("The imported dynamic segmentation was matched to the PET, but its aligned sequence could not be recovered."));
+      return;
+    }
+  }
+
   if (!seqNode)
   {
     vtkSmartPointer<vtkMRMLSequenceNode> newSeqNode =
@@ -17497,9 +17753,11 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
   }
 
   this->segSequenceNode = seqNode;
+  this->SegWatcher->ObserveSegmentationNode(segNode);
 
   d->populateSegmentCheckboxes(this->segID);
   this->enableTACbutton();
+  d->updateSegmentationAdvancedUI();
 
   // Finished
   this->ProgressBar->setValue(100);
@@ -17532,6 +17790,158 @@ void qSlicerDynamicPETModuleWidget::onSegmentsChanged()
   // }
   // this->segmentIDs = selectedSegmentIDs;
   d->populateSegmentCheckboxes(this->segID);
+}
+
+void qSlicerDynamicPETModuleWidget::onOpenSegmentEditor()
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  vtkMRMLSubjectHierarchyNode* shNode =
+      scene ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene) : nullptr;
+  vtkMRMLSegmentationNode* segNode =
+      (shNode && this->segID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+      ? vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(this->segID))
+      : nullptr;
+
+  if (!segNode)
+  {
+    QMessageBox::warning(
+        this, tr("Segment Editor"), tr("Select a segmentation first."));
+    d->updateSegmentationAdvancedUI();
+    return;
+  }
+
+  vtkMRMLScalarVolumeNode* sourceVolume = nullptr;
+  if (this->sequenceBrowserPETNode && this->sequencePETNode)
+  {
+    sourceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+        this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+  }
+
+  PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+  const QVariant resultVariant = mainContext.call(
+      "DPE_open_segment_editor",
+      QVariantList{
+          QString::fromUtf8(segNode->GetID()),
+          sourceVolume ? QString::fromUtf8(sourceVolume->GetID()) : QString()});
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("Segment Editor"),
+        tr("Could not open Segment Editor.\n\n%1")
+            .arg(result.value("error").toString()));
+  }
+}
+
+void qSlicerDynamicPETModuleWidget::onSaveDynamicRTStruct()
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+
+  if (!this->segSequenceNode
+      || !this->sequencePETNode
+      || !this->sequenceBrowserPETNode)
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("Select a dynamic PET and segmentation first."));
+    d->updateSegmentationAdvancedUI();
+    return;
+  }
+
+  QString directory = d->DynamicRTStructDirectory->currentPath().trimmed();
+  QString fileName = d->DynamicRTStructFilename->text().trimmed();
+  if (directory.isEmpty() || fileName.isEmpty())
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("Choose an output directory and filename."));
+    return;
+  }
+  if (!fileName.endsWith(QStringLiteral(".dcm"), Qt::CaseInsensitive))
+  {
+    fileName += QStringLiteral(".dcm");
+    d->DynamicRTStructFilename->setText(fileName);
+  }
+
+  QDir outputDirectory(directory);
+  if (!outputDirectory.exists() && !QDir().mkpath(directory))
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("The output directory could not be created:\n%1").arg(directory));
+    return;
+  }
+
+  const QString outputPath = outputDirectory.filePath(fileName);
+  if (QFileInfo::exists(outputPath))
+  {
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("The file already exists:\n%1\n\nReplace it?").arg(outputPath),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+    {
+      return;
+    }
+  }
+
+  vtkMRMLScene* scene = this->mrmlScene();
+  vtkMRMLSubjectHierarchyNode* shNode =
+      scene ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene) : nullptr;
+  vtkMRMLScalarVolumeNode* referenceVolume = nullptr;
+  if (shNode && this->ctID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+  {
+    referenceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+        shNode->GetItemDataNode(this->ctID));
+  }
+  if (!referenceVolume)
+  {
+    referenceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+        this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+  }
+  if (!referenceVolume)
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("No CT or current PET volume is available as export geometry reference."));
+    return;
+  }
+
+  PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+  const QVariant resultVariant = mainContext.call(
+      "DPE_export_dynamic_rtstruct",
+      QVariantList{
+          QString::fromUtf8(this->segSequenceNode->GetID()),
+          QString::fromUtf8(this->sequencePETNode->GetID()),
+          QString::fromUtf8(referenceVolume->GetID()),
+          outputPath,
+          true});
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save Dynamic RTSTRUCT"),
+        tr("Dynamic RTSTRUCT export failed.\n\n%1")
+            .arg(result.value("error").toString()));
+    return;
+  }
+
+  d->propagateOutputDirectory(QFileInfo(outputPath).absolutePath());
+  QMessageBox::information(
+      this,
+      tr("Save Dynamic RTSTRUCT"),
+      tr("Dynamic RTSTRUCT saved successfully:\n%1")
+          .arg(result.value("path").toString()));
 }
 
 void qSlicerDynamicPETModuleWidget::clearTACdata()

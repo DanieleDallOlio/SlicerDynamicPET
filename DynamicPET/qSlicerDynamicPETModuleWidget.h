@@ -129,6 +129,8 @@ public slots:
   void onPETChanged(int index);
   void onSegChanged(int index);
   void onSegmentsChanged();
+  void onOpenSegmentEditor();
+  void onSaveDynamicRTStruct();
   void onTACbutton();
   void onSelectAllbutton();
   void onExcelPathChanged(const QString& path);

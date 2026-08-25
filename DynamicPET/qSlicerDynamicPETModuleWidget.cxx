@@ -41,6 +41,8 @@
 #include <QFileInfo>
 #include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QDateTime>
+#include <QDir>
 
 #include <vtkWeakPointer.h>
 #include <vtkDataArray.h>
@@ -85,9 +87,8 @@ enum class IFCurveDomain
 
 enum class PBIFTemplateDomain
 {
-  MatchPatient = 0,
-  WholeBlood = 1,
-  TotalPlasma = 2
+  WholeBlood = 0,
+  TotalPlasma = 1
 };
 
 enum class ActivityUnit
@@ -126,11 +127,19 @@ struct InputFunctionResult
   // Number of complete PET frames for which the final input function is
   // supported. Terminally removed IDIF observations shorten this support
   // instead of invalidating the whole input function.
+  size_t supportFrameStartIndex{0};
   size_t supportFrameCount{0};
 
   bool plasmaIsParent{false};
   bool applyParentFraction{false};
   bool hasWholeBlood{false};
+
+  // Internal support classification for the forthcoming relative-model gate.
+  // This is deliberately not exported as workbook metadata.
+  bool inputCoversFromInjection{false};
+  bool inputCoverageReconstructedByPBIF{false};
+  double earliestAvailableInputTimeSec{
+      std::numeric_limits<double>::quiet_NaN()};
 
   bool pbifApplied{false};
   double pbifScale{1.0};
@@ -165,6 +174,19 @@ struct TACModeState
   std::vector<double> durations;
   int numberOfTimepoints{0};
   std::vector<std::string> segmentDisplayOrder;
+};
+
+struct AcquisitionTimingContext
+{
+  bool timingAvailable{false};
+  bool delayedAcquisition{false};
+  bool tableTimesAlreadyPostInjection{false};
+  double rawInjectionToAcquisitionOffsetSec{
+      std::numeric_limits<double>::quiet_NaN()};
+  double acquisitionStartPostInjectionSec{0.0};
+  QString injectionDateTime;
+  QString firstFrameDateTime;
+  QString source;
 };
 
 struct TACStatisticOption
@@ -477,6 +499,23 @@ static double pchipInterpolate(
         h01 * y[right] + h11 * h * m[right]);
 }
 
+QDateTime parseDICOMDateTimeText(const QString& value)
+{
+  QString text = value.trimmed();
+  if (text.size() < 14)
+  {
+    return QDateTime();
+  }
+
+  // DynamicPET only needs a robust seconds-level difference here.  Ignore
+  // optional fractional seconds and timezone suffixes after YYYYMMDDHHMMSS.
+  const QDateTime dt = QDateTime::fromString(
+      text.left(14),
+      QStringLiteral("yyyyMMddHHmmss"));
+  return dt;
+}
+
+
 bool segmentNameLessCaseInsensitive(
     const std::string& a,
     const std::string& b)
@@ -522,7 +561,6 @@ double medianValidSigma(const std::vector<double>& sigmas)
 {
   std::vector<double> valid;
   valid.reserve(sigmas.size());
-
   for (double sigma : sigmas)
   {
     if (std::isfinite(sigma) && sigma > 1e-12)
@@ -537,29 +575,22 @@ double medianValidSigma(const std::vector<double>& sigmas)
   }
 
   std::sort(valid.begin(), valid.end());
-
   const size_t n = valid.size();
-  if (n % 2 == 1)
-  {
-    return valid[n / 2];
-  }
-
-  return 0.5 * (valid[n / 2 - 1] + valid[n / 2]);
+  return (n % 2 == 1)
+      ? valid[n / 2]
+      : 0.5 * (valid[n / 2 - 1] + valid[n / 2]);
 }
 
 
 double inverseVarianceWeightFromSigma(
     double sigma,
-    double fallbackSigma =
-        std::numeric_limits<double>::quiet_NaN())
+    double fallbackSigma = std::numeric_limits<double>::quiet_NaN())
 {
   if (!std::isfinite(sigma) || sigma <= 1e-12)
   {
     sigma = fallbackSigma;
   }
 
-  // This should normally only happen if the entire uncertainty
-  // series is invalid. WLS availability checks should prevent that.
   if (!std::isfinite(sigma) || sigma <= 1e-12)
   {
     return 1.0;
@@ -758,6 +789,7 @@ public:
   void updateInputFunctionStatus();
   void updateROIModelingAvailability();
   void updateParametricImagingAvailability();
+  void updateKineticModelAvailability();
   std::string selectedIFStatistic();
   bool buildCurrentSegmentInputFunction(
       std::vector<double>& values,
@@ -781,6 +813,13 @@ public:
   void rebuildTACStatisticUI();
   void updateTableWeightingAvailability();
   void updateTableUnitUI();
+  void updateAcquisitionTimingContext(bool logMessage = true);
+  double frameTimeShiftForInputSec() const;
+  double frameEndForInputSec(size_t frameIndex) const;
+  double frameStartForInputSec(size_t frameIndex) const;
+  double frameMidForInputSec(size_t frameIndex) const;
+  double currentObservedInputStartSec() const;
+  void propagateOutputDirectory(const QString& path);
   ActivityUnit selectedTableActivityUnit() const;
   QString selectedTableTimeMode() const;
   double tissueSigmaForWeighting(
@@ -888,6 +927,9 @@ public:
       const std::vector<double>& parentValues,
       double startTime,
       double endTime);
+  double initialModelPlasmaIntegralSec(
+      const InputFunctionResult& result,
+      double endTimeSec);
   bool pbrAtTime(
       double timeSec,
       double& pbr,
@@ -905,6 +947,10 @@ public:
   QString tableWorkbookPath;
   bool tableFramingExact{false};
   QString tableTimingSummary;
+  QVariantMap tableWorkbookMetadata;
+  AcquisitionTimingContext acquisitionTiming;
+  QString sharedOutputDirectory;
+  bool propagatingOutputDirectory{false};
   std::vector<double> tablePlotTimesSec;
   std::vector<TACStatisticOption> tableFitStatistics;
   std::vector<TACStatisticOption> tablePlotStatistics;
@@ -948,8 +994,11 @@ public:
   void populateResultsMTGATable(std :: string segmentID);
   void populateModelsTCM(std :: string segmentID);
   void populateModelsMTGA(std :: string segmentID);
-  void populateTimeBarMTGA();
-  void populateTimeBarMTGAImg();
+  void populateTimeBarMTGA(bool resetRange = false);
+  void populateTimeBarMTGAImg(bool resetRange = false);
+  void updateFitRangeSliders(const InputFunctionResult& result);
+  void refreshFitRangeSliderLabels();
+  void resetAcquisitionTimingDisplay();
   void populateModelCombo(QComboBox* comboToFill,
                           const std::string& otherSelectedModel,
                           const std::string& currentSelectedModel,
@@ -1674,7 +1723,7 @@ previewInputFunction()
             }
 
             sourceTimes.push_back(
-                q->timePoints[i]);
+                this->frameEndForInputSec(i));
             sourceValues.push_back(allSourceValues[i]);
         }
     }
@@ -1762,7 +1811,7 @@ previewInputFunction()
          ++i)
     {
         frameTimes.push_back(
-            q->timePoints[i]);
+            this->frameEndForInputSec(i));
     }
 
     auto clippedFrameValues =
@@ -1778,7 +1827,7 @@ previewInputFunction()
 
     const std::string previewInterpolation = this->selectedIFInterpolation();
     const double previewEndSec =
-        previewFrameCount > 0 ? q->timePoints[previewFrameCount - 1] : 0.0;
+        previewFrameCount > 0 ? this->frameEndForInputSec(previewFrameCount - 1) : 0.0;
     const double requestedStep = this->timeStepEdit->text().toDouble();
     const double densePreviewStepSec =
         std::max(0.25, std::min(1.0, requestedStep > 0.0 ? requestedStep : 1.0));
@@ -1833,7 +1882,8 @@ previewInputFunction()
             {
                 return false;
             }
-            for (double t = 0.0; t < previewEndSec; t += densePreviewStepSec)
+            const double previewStartSec = this->frameStartForInputSec(0);
+            for (double t = previewStartSec; t < previewEndSec; t += densePreviewStepSec)
             {
                 const double value = this->evaluateFrameCurve(
                     frameValues, t, previewInterpolation);
@@ -1875,9 +1925,17 @@ previewInputFunction()
             QMessageBox::warning(q, QObject::tr("Input Function"), error);
             return;
         }
+        std::vector<double> processedPreviewTimes =
+            result.processedSourcePreviewTimesSec;
+        if (segmentSource &&
+            processedDisplayValues.size() == previewFrameCount &&
+            result.sourceProcessingLabel != QObject::tr("Feng model"))
+        {
+            processedPreviewTimes = frameTimes;
+        }
         curves.push_back(
             {result.sourceProcessingLabel,
-             result.processedSourcePreviewTimesSec,
+             processedPreviewTimes,
              processedDisplayValues,
              false});
     }
@@ -2201,7 +2259,7 @@ previewParentFraction()
 
     const double requiredEndTimeSec =
         !q->timePoints.empty()
-        ? q->timePoints.back()
+        ? this->frameEndForInputSec(q->timePoints.size() - 1)
         : this->parentFractionTimesSec.back();
 
     std::vector<double> processedTimes;
@@ -2434,20 +2492,9 @@ PBIFTemplateDomain
 qSlicerDynamicPETModuleWidgetPrivate::
 selectedPBIFTemplateDomain() const
 {
-    const int index =
-        this->PBIFDomainSelector->currentIndex();
-
-    if (index == 1)
-    {
-        return PBIFTemplateDomain::WholeBlood;
-    }
-
-    if (index == 2)
-    {
-        return PBIFTemplateDomain::TotalPlasma;
-    }
-
-    return PBIFTemplateDomain::MatchPatient;
+    return this->PBIFDomainSelector->currentIndex() == 1
+        ? PBIFTemplateDomain::TotalPlasma
+        : PBIFTemplateDomain::WholeBlood;
 }
 
 ActivityUnit
@@ -3430,7 +3477,7 @@ plotROIDistribution(
     const std::string roiName = nameIt != q->segmentTACsnames.end()
         ? nameIt->second : segmentID;
     const double frameEnd = frameIndex < static_cast<int>(q->timePoints.size())
-        ? q->timePoints[static_cast<size_t>(frameIndex)] : 0.0;
+        ? this->frameEndForInputSec(static_cast<size_t>(frameIndex)) : 0.0;
     chartNode->SetTitle(
         QString("ROI distribution - %1 - frame %2 (end %3 s)")
             .arg(QString::fromStdString(roiName))
@@ -3659,6 +3706,7 @@ loadTableWorkbook(
     this->TableSUVbwFactorEdit->clear();
 
     const QVariantMap metadata = result.value("metadata").toMap();
+    this->tableWorkbookMetadata = metadata;
     QString activityUnit = metadata.value("ActivityUnit").toString().trimmed();
     if (activityUnit.isEmpty())
     {
@@ -3710,7 +3758,8 @@ loadTableWorkbook(
         this->populateIF();
         this->populateVOI(std::string());
         this->populateVOIMTGA(std::string());
-        this->populateTimeBarMTGA();
+        this->populateTimeBarMTGA(true);
+        this->updateAcquisitionTimingContext(true);
         this->invalidateInputFunctionResults();
         this->updateInputFunctionStatus();
         this->setPostTACEnabled(true);
@@ -3752,6 +3801,8 @@ clearTableWorkbook()
     this->tableWorkbookPath.clear();
     this->tableFramingExact = false;
     this->tableTimingSummary.clear();
+    this->tableWorkbookMetadata.clear();
+    this->acquisitionTiming = AcquisitionTimingContext{};
 
     if (this->TableWorkbookPathEdit)
     {
@@ -3808,6 +3859,10 @@ setTableBasedMode(bool enabled)
         this->imageIFID = q->IFID;
 
         this->tableBasedMode = true;
+        if (this->AcquisitionTimingStatusLabel)
+        {
+            this->AcquisitionTimingStatusLabel->setVisible(false);
+        }
         this->setImageSetupVisible(false);
         this->TableSetupGroupBox->setVisible(true);
         this->IFSourceSelector->setItemText(0, QObject::tr("Table ROI (IDIF)"));
@@ -3933,6 +3988,7 @@ setTableBasedMode(bool enabled)
     }
 
     this->externalIFPreviewSelectedIndex = -1;
+    this->updateAcquisitionTimingContext(true);
     this->invalidateInputFunctionResults();
     this->updateTableUnitUI();
     this->updateInputFunctionStatus();
@@ -4372,16 +4428,18 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 
           if (this->pbifZeroAnchorAdded)
           {
-              QMessageBox::warning(
-                  q,
-                  QObject::tr("PBIF calibration"),
+              this->logToPythonConsole(
                   QObject::tr(
-                      "The PBIF template begins after 0 seconds.\n\n"
-                      "An assumed point (0 s, 0) was added internally. "
-                      "The original CSV file was not modified."));
+                      "[SlicerDynamicPET PBIF] Template begins after 0 s; "
+                      "an internal (0 s, 0) interpolation anchor was added. "
+                      "The CSV file was not modified."));
           }
 
-          this->PBIFCalibrationStartSpinBox->setValue(0.0);
+          this->updateAcquisitionTimingContext(false);
+
+          double startTime = std::max(
+              this->pbifTimesSec.empty() ? 0.0 : this->pbifTimesSec.front(),
+              this->currentObservedInputStartSec());
 
           double endTime =
               this->pbifTimesSec.empty()
@@ -4392,11 +4450,14 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           {
               endTime = std::min(
                   endTime,
-                  q->timePoints.back());
+                  this->frameEndForInputSec(q->timePoints.size() - 1));
           }
 
-          this->PBIFCalibrationEndSpinBox->setValue(
-              endTime);
+          if (endTime > startTime)
+          {
+              this->PBIFCalibrationStartSpinBox->setValue(startTime);
+              this->PBIFCalibrationEndSpinBox->setValue(endTime);
+          }
 
           const bool previewOpen = this->previewGroupExists("InputFunctionPreview");
           this->invalidateInputFunctionResults();
@@ -4490,7 +4551,18 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           this->updateParametricImagingAvailability();
           if (previewOpen)
           {
-              this->previewInputFunction();
+              const bool pbifIncomplete =
+                  this->PBIFOptionCheckBox->isChecked() &&
+                  (this->pbifTimesSec.size() < 2 ||
+                   this->pbifTimesSec.size() != this->pbifTemplateValues.size());
+              if (pbifIncomplete)
+              {
+                  this->removePreviewGroup("InputFunctionPreview");
+              }
+              else
+              {
+                  this->previewInputFunction();
+              }
           }
       };
 
@@ -4661,15 +4733,23 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this, q]()
       {
+          const QString suggestedPath =
+              this->sharedOutputDirectory.trimmed().isEmpty()
+              ? QStringLiteral("DynamicPET_final_IF.csv")
+              : QDir(this->sharedOutputDirectory)
+                    .filePath(QStringLiteral("DynamicPET_final_IF.csv"));
+
           QString filePath = QFileDialog::getSaveFileName(
               q,
               QObject::tr("Export final input function"),
-              QStringLiteral("DynamicPET_final_IF.csv"),
+              suggestedPath,
               QObject::tr("CSV files (*.csv)"));
           if (filePath.isEmpty())
               return;
           if (!filePath.endsWith(".csv", Qt::CaseInsensitive))
               filePath += ".csv";
+
+          this->propagateOutputDirectory(QFileInfo(filePath).absolutePath());
 
           QString error;
           if (!this->exportFinalInputFunctionCSV(filePath, &error))
@@ -4802,6 +4882,25 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onExcelTCMfittedPathChanged(const QString&)));
   QObject::connect( this->direxcelmtgafitted, SIGNAL(currentPathChanged(const QString&)),
     q, SLOT(onExcelMTGAfittedPathChanged(const QString&)));
+
+  // One output directory selection is shared across all output destinations.
+  // Filenames remain independent; only directory browsing is synchronized.
+  for (ctkPathLineEdit* outputDirectory : {
+           this->direxcel,
+           this->direxceltcm,
+           this->direxcelmtga,
+           this->direxceltcmfitted,
+           this->direxcelmtgafitted})
+  {
+    QObject::connect(
+        outputDirectory,
+        &ctkPathLineEdit::currentPathChanged,
+        q,
+        [this](const QString& path)
+        {
+          this->propagateOutputDirectory(path);
+        });
+  }
   QObject::connect( this->fileexceltcmfitted, SIGNAL(textChanged(const QString&)),
     q, SLOT(onExcelTCMfittedPathChanged(const QString&)));
   QObject::connect( this->fileexcelmtgafitted, SIGNAL(textChanged(const QString&)),
@@ -6127,11 +6226,28 @@ def DPE_export_parametric_map(
 
   for (const QString& name : q->ModelsNamesMTGA)
   {
+    auto mtgaTooltip = [](const QString& modelName) -> QString
+    {
+      if (modelName == "Patlak")
+        return QObject::tr("Standard Patlak. Requires plasma input from injection. A delayed tissue acquisition is allowed when a complete measured or PBIF-reconstructed input is available.");
+      if (modelName == "Relative Patlak")
+        return QObject::tr("Relative Patlak for late/partial acquisitions. The plasma integral restarts at the selected late-time start t*, so early input is not required; the slope is relative Ki' rather than absolute Ki. Zuo, Qi & Wang, Phys Med Biol 2018, 63:165004.");
+      if (modelName == "Logan")
+        return QObject::tr("Standard Logan. Requires both tissue and plasma histories from the early acquisition.");
+      if (modelName == "RE")
+        return QObject::tr("Reversible-equilibrium Logan (RE). Requires tissue and plasma integrals from injection and a user-selected equilibrium start for the regression.");
+      if (modelName == "Relative RE")
+        return QObject::tr("Relative reversible-equilibrium analysis for late acquisitions. Both tissue and plasma integrals restart at the selected equilibrium start t*. The slope is relative DV_T' rather than absolute DV_T. Tian et al., Phys Med Biol 2024, 69:165005.");
+      return QString();
+    };
+
     QCheckBox* cb = new QCheckBox(name, this->ModelsMTGACheckContents);
+    cb->setToolTip(mtgaTooltip(name));
     this->ModelsMTGACheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsMTGAChanged()));
     QCheckBox* cb2 = new QCheckBox(name, this->ModelsMTGACheckContents);
+    cb2->setToolTip(mtgaTooltip(name));
     this->ModelsCheckLayoutMTGAImg->addWidget(cb2);
     QObject::connect(cb2, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsMTGAImgChanged()));
@@ -6222,8 +6338,9 @@ def DPE_export_parametric_map(
       this->MTGADICOMDirectoryImg,
       &ctkPathLineEdit::currentPathChanged,
       q,
-      [this](const QString&)
+      [this](const QString& path)
       {
+        this->propagateOutputDirectory(path);
         this->updateMTGAOutputUI();
       });
 
@@ -6250,8 +6367,9 @@ def DPE_export_parametric_map(
       this->TCMDICOMDirectoryImg,
       &ctkPathLineEdit::currentPathChanged,
       q,
-      [this](const QString&)
+      [this](const QString& path)
       {
+        this->propagateOutputDirectory(path);
         this->updateTCMOutputUI();
       });
 
@@ -7113,7 +7231,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
   this->PlotSegmentCheckContents->blockSignals(false);
 }
 
-void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA(bool resetRange)
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
@@ -7125,18 +7243,21 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
   }
 
   const int lastFrame = q->numberOfTimepoints;
+  const int lastValidStartFrame = std::max(1, lastFrame - 1);
 
   this->timeOffsetSlider->setMinimum(1);
-  this->timeOffsetSlider->setMaximum(lastFrame);
-  if (this->timeOffsetSlider->value() < 1 ||
-      this->timeOffsetSlider->value() > lastFrame)
+  this->timeOffsetSlider->setMaximum(lastValidStartFrame);
+  if (resetRange ||
+      this->timeOffsetSlider->value() < 1 ||
+      this->timeOffsetSlider->value() > lastValidStartFrame)
   {
     this->timeOffsetSlider->setValue(1);
   }
 
   this->timeEndSlider->setMinimum(1);
   this->timeEndSlider->setMaximum(lastFrame);
-  if (this->timeEndSlider->value() < 1 ||
+  if (resetRange ||
+      this->timeEndSlider->value() < 1 ||
       this->timeEndSlider->value() > lastFrame)
   {
     this->timeEndSlider->setValue(lastFrame);
@@ -7144,7 +7265,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
 
   this->TCMEndSlider->setMinimum(1);
   this->TCMEndSlider->setMaximum(lastFrame);
-  if (this->TCMEndSlider->value() < 1 ||
+  if (resetRange ||
+      this->TCMEndSlider->value() < 1 ||
       this->TCMEndSlider->value() > lastFrame)
   {
     this->TCMEndSlider->setValue(lastFrame);
@@ -7159,7 +7281,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
     const int index = this->timeEndSlider->value();
     if (index < 1 || index > static_cast<int>(q->timePoints.size()))
       return;
-    const double endSec = q->timePoints[index - 1];
+    const double endSec = this->frameEndForInputSec(index - 1);
     this->timeEndInfoEdit->setText(
         QObject::tr("Frame %1 | end %2 s (%3 min)")
             .arg(index)
@@ -7172,9 +7294,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
     const int index = this->TCMEndSlider->value();
     if (index < 1 || index > static_cast<int>(q->timePoints.size()))
       return;
-    const double endSec = q->timePoints[index - 1];
+    const double endSec = this->frameEndForInputSec(index - 1);
     this->TCMEndInfoEdit->setText(
-        QObject::tr("Frame %1 | complete through %2 s (%3 min)")
+        QObject::tr("Frame %1 | end %2 s (%3 min)")
             .arg(index)
             .arg(endSec, 0, 'f', 2)
             .arg(endSec / 60.0, 0, 'f', 2));
@@ -7222,7 +7344,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGA()
   updateTCMEndInfo();
 }
 
-void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
+void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg(bool resetRange)
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
@@ -7234,18 +7356,21 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
   }
 
   const int lastFrame = q->numberOfTimepoints;
+  const int lastValidStartFrame = std::max(1, lastFrame - 1);
 
   this->timeOffsetSliderImg->setMinimum(1);
-  this->timeOffsetSliderImg->setMaximum(lastFrame);
-  if (this->timeOffsetSliderImg->value() < 1 ||
-      this->timeOffsetSliderImg->value() > lastFrame)
+  this->timeOffsetSliderImg->setMaximum(lastValidStartFrame);
+  if (resetRange ||
+      this->timeOffsetSliderImg->value() < 1 ||
+      this->timeOffsetSliderImg->value() > lastValidStartFrame)
   {
     this->timeOffsetSliderImg->setValue(1);
   }
 
   this->timeEndSliderImg->setMinimum(1);
   this->timeEndSliderImg->setMaximum(lastFrame);
-  if (this->timeEndSliderImg->value() < 1 ||
+  if (resetRange ||
+      this->timeEndSliderImg->value() < 1 ||
       this->timeEndSliderImg->value() > lastFrame)
   {
     this->timeEndSliderImg->setValue(lastFrame);
@@ -7253,7 +7378,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
 
   this->TCMEndSliderImg->setMinimum(1);
   this->TCMEndSliderImg->setMaximum(lastFrame);
-  if (this->TCMEndSliderImg->value() < 1 ||
+  if (resetRange ||
+      this->TCMEndSliderImg->value() < 1 ||
       this->TCMEndSliderImg->value() > lastFrame)
   {
     this->TCMEndSliderImg->setValue(lastFrame);
@@ -7268,7 +7394,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
     const int index = this->timeEndSliderImg->value();
     if (index < 1 || index > static_cast<int>(q->timePoints.size()))
       return;
-    const double endSec = q->timePoints[index - 1];
+    const double endSec = this->frameEndForInputSec(index - 1);
     this->timeEndInfoEditImg->setText(
         QObject::tr("Frame %1 | end %2 s (%3 min)")
             .arg(index)
@@ -7281,9 +7407,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
     const int index = this->TCMEndSliderImg->value();
     if (index < 1 || index > static_cast<int>(q->timePoints.size()))
       return;
-    const double endSec = q->timePoints[index - 1];
+    const double endSec = this->frameEndForInputSec(index - 1);
     this->TCMEndInfoEditImg->setText(
-        QObject::tr("Frame %1 | complete through %2 s (%3 min)")
+        QObject::tr("Frame %1 | end %2 s (%3 min)")
             .arg(index)
             .arg(endSec, 0, 'f', 2)
             .arg(endSec / 60.0, 0, 'f', 2));
@@ -7329,6 +7455,149 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTimeBarMTGAImg()
   q->onSliderImgChanged(this->timeOffsetSliderImg->value());
   updateMTGAEndInfo();
   updateTCMEndInfo();
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+refreshFitRangeSliderLabels()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (q->timePoints.empty())
+    {
+        return;
+    }
+
+    if (this->timeOffsetSlider && this->timeOffsetSlider->value() >= 1)
+    {
+        q->onSliderChanged(this->timeOffsetSlider->value());
+    }
+    if (this->timeOffsetSliderImg && this->timeOffsetSliderImg->value() >= 1)
+    {
+        q->onSliderImgChanged(this->timeOffsetSliderImg->value());
+    }
+
+    auto setEndText =
+        [this](QSlider* slider, QLineEdit* edit)
+        {
+            if (!slider || !edit) return;
+            const int frame = slider->value();
+            if (frame < 1) return;
+            const size_t index = static_cast<size_t>(frame - 1);
+            const double endSec = this->frameEndForInputSec(index);
+            edit->setText(
+                QObject::tr("Frame %1 | end %2 s (%3 min)")
+                    .arg(frame)
+                    .arg(endSec, 0, 'f', 2)
+                    .arg(endSec / 60.0, 0, 'f', 2));
+        };
+
+    setEndText(this->timeEndSlider, this->timeEndInfoEdit);
+    setEndText(this->TCMEndSlider, this->TCMEndInfoEdit);
+    setEndText(this->timeEndSliderImg, this->timeEndInfoEditImg);
+    setEndText(this->TCMEndSliderImg, this->TCMEndInfoEditImg);
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateFitRangeSliders(const InputFunctionResult& result)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    const int totalFrames = static_cast<int>(q->timePoints.size());
+    if (totalFrames < 2)
+    {
+        return;
+    }
+
+    const int firstUsableFrame =
+        static_cast<int>(
+            std::min(result.supportFrameStartIndex, q->timePoints.size() - 1)) + 1;
+
+    const int lastUsableFrame =
+        static_cast<int>(
+            std::min(
+                result.supportFrameCount > 0
+                    ? result.supportFrameCount
+                    : q->timePoints.size(),
+                q->timePoints.size()));
+
+    if (lastUsableFrame - firstUsableFrame + 1 < 2)
+    {
+        return;
+    }
+
+    const int lastStartFrame =
+        std::max(firstUsableFrame, lastUsableFrame - 1);
+    const int firstEndFrame =
+        std::min(lastUsableFrame, firstUsableFrame + 1);
+
+    auto updateStartSlider =
+        [](QSlider* slider, int minimum, int maximum)
+        {
+            if (!slider) return;
+            const int oldValue = slider->value();
+            QSignalBlocker blocker(slider);
+            slider->setMinimum(minimum);
+            slider->setMaximum(maximum);
+            if (oldValue < minimum || oldValue > maximum)
+            {
+                slider->setValue(minimum);
+            }
+            else
+            {
+                slider->setValue(oldValue);
+            }
+        };
+
+    auto updateEndSlider =
+        [](QSlider* slider, int minimum, int maximum)
+        {
+            if (!slider) return;
+            const int oldValue = slider->value();
+            const int oldMaximum = slider->maximum();
+            const bool pinnedToEnd = oldValue >= oldMaximum;
+
+            QSignalBlocker blocker(slider);
+            slider->setMinimum(minimum);
+            slider->setMaximum(maximum);
+
+            if (pinnedToEnd || oldValue > maximum)
+            {
+                slider->setValue(maximum);
+            }
+            else if (oldValue < minimum)
+            {
+                slider->setValue(minimum);
+            }
+            else
+            {
+                slider->setValue(oldValue);
+            }
+        };
+
+    updateStartSlider(this->timeOffsetSlider, firstUsableFrame, lastStartFrame);
+    updateStartSlider(this->timeOffsetSliderImg, firstUsableFrame, lastStartFrame);
+
+    updateEndSlider(this->timeEndSlider, firstEndFrame, lastUsableFrame);
+    updateEndSlider(this->TCMEndSlider, firstEndFrame, lastUsableFrame);
+    updateEndSlider(this->timeEndSliderImg, firstEndFrame, lastUsableFrame);
+    updateEndSlider(this->TCMEndSliderImg, firstEndFrame, lastUsableFrame);
+
+    this->refreshFitRangeSliderLabels();
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+resetAcquisitionTimingDisplay()
+{
+    this->acquisitionTiming = AcquisitionTimingContext{};
+    if (this->AcquisitionTimingStatusLabel)
+    {
+        this->AcquisitionTimingStatusLabel->setText(
+            QObject::tr("Acquisition timing: —"));
+        this->AcquisitionTimingStatusLabel->setVisible(false);
+    }
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::populateIF()
@@ -7815,6 +8084,11 @@ updateInputFunctionUI()
                     " | TCM requires companion whole blood");
         }
 
+        // One authoritative usable-frame range drives all ROI/imaging
+        // TCM/MTGA sliders. End sliders remain pinned to the last supported
+        // frame if the user had previously left them at the end.
+        this->updateFitRangeSliders(result);
+
         this->logToPythonConsole(
             QObject::tr("[SlicerDynamicPET IF] %1").arg(status));
         this->IFStatusLabel->clear();
@@ -7823,9 +8097,27 @@ updateInputFunctionUI()
     }
     else
     {
-        this->IFStatusLabel->setText(error);
-        this->IFStatusLabel->setToolTip(error);
-        this->IFStatusLabel->setVisible(!error.isEmpty());
+        const bool pbifConfigurationIncomplete =
+            this->PBIFOptionCheckBox->isChecked() &&
+            (this->pbifTimesSec.size() < 2 ||
+             this->pbifTimesSec.size() != this->pbifTemplateValues.size());
+
+        if (pbifConfigurationIncomplete)
+        {
+            // Enabling PBIF before choosing a template is an incomplete setup,
+            // not an error worth occupying the GUI with. A real error is still
+            // reported if the user later tries to fit/preview with invalid data.
+            this->IFStatusLabel->clear();
+            this->IFStatusLabel->setToolTip(
+                QObject::tr("Select a PBIF template CSV to complete PBIF setup."));
+            this->IFStatusLabel->setVisible(false);
+        }
+        else
+        {
+            this->IFStatusLabel->setText(error);
+            this->IFStatusLabel->setToolTip(error);
+            this->IFStatusLabel->setVisible(!error.isEmpty());
+        }
     }
 
     // External CSV and processed IF stages do not yet carry
@@ -7853,6 +8145,8 @@ updateInputFunctionUI()
         this->weightedFitCheckBoxImg->setEnabled(true);
         this->weightFitCheckBoxImg->setEnabled(true);
     }
+
+    this->updateKineticModelAvailability();
 }
 
 void
@@ -7933,6 +8227,104 @@ updateParametricImagingAvailability()
     this->PlotsTabWidget->setTabEnabled(
         imagingIndex,
         enabled);
+}
+
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateKineticModelAvailability()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    // Checking PBIF before choosing a template is only an incomplete setup
+    // state. Preserve the current model selections until a real PBIF exists.
+    if (this->PBIFOptionCheckBox->isChecked() &&
+        (this->pbifTimesSec.size() < 2 ||
+         this->pbifTimesSec.size() != this->pbifTemplateValues.size()))
+    {
+        return;
+    }
+
+    InputFunctionResult result;
+    QString ignoredError;
+    const bool inputValid =
+        this->buildCurrentInputFunction(result, false, &ignoredError);
+
+    const bool fullInput = inputValid && result.inputCoversFromInjection;
+    const bool delayedTissue = this->acquisitionTiming.delayedAcquisition;
+    const bool lateOrPartial =
+        inputValid &&
+        (delayedTissue || !fullInput || result.supportFrameStartIndex > 0);
+
+    auto updateLayout =
+        [&](QLayout* layout, bool tcmLayout)
+        {
+            if (!layout) return;
+            for (int i = 0; i < layout->count(); ++i)
+            {
+                QCheckBox* cb = qobject_cast<QCheckBox*>(layout->itemAt(i)->widget());
+                if (!cb) continue;
+                const QString name = cb->text();
+                bool enabled = inputValid;
+                QString availability;
+
+                if (tcmLayout)
+                {
+                    enabled = inputValid && fullInput && result.hasWholeBlood;
+                    availability = enabled
+                        ? QObject::tr("Complete plasma and whole-blood input from injection is available. Delayed tissue acquisition is permitted, although late-only tissue data may reduce microparameter identifiability.")
+                        : (!result.hasWholeBlood
+                           ? QObject::tr("Compartment modeling requires total whole blood in addition to plasma. Provide/derive a compatible whole-blood input.")
+                           : QObject::tr("Compartment modeling requires a complete input function from injection. Use a full external IF or a PBIF that reconstructs the missing early input."));
+                }
+                else if (name == "Patlak")
+                {
+                    enabled = inputValid && fullInput;
+                    availability = enabled
+                        ? QObject::tr("Standard Patlak is available because the plasma input covers injection onward.")
+                        : QObject::tr("Standard Patlak requires the plasma integral from injection. Use Relative Patlak when early input is unavailable.");
+                }
+                else if (name == "Logan" || name == "RE")
+                {
+                    enabled = inputValid && fullInput && !delayedTissue && result.supportFrameStartIndex == 0;
+                    availability = enabled
+                        ? QObject::tr("Standard reversible graphical analysis is available because early tissue and plasma histories are present.")
+                        : QObject::tr("Standard Logan/RE require early tissue and plasma integrals. Use Relative RE for a delayed or partial acquisition.");
+                }
+                else if (name == "Relative Patlak")
+                {
+                    enabled = lateOrPartial;
+                    availability = enabled
+                        ? QObject::tr("Relative Patlak is enabled for the current delayed/partial acquisition. The selected MTGA start is t* and output is Ki'. Zuo, Qi & Wang, Phys Med Biol 2018, 63:165004.")
+                        : QObject::tr("Relative Patlak is intended for delayed or partial acquisitions; standard Patlak is available for this complete early-time dataset.");
+                }
+                else if (name == "Relative RE")
+                {
+                    enabled = lateOrPartial;
+                    availability = enabled
+                        ? QObject::tr("Relative RE is enabled for the current delayed/partial acquisition. Both integrals restart at the selected equilibrium start and output is DV_T'. Tian et al., Phys Med Biol 2024.")
+                        : QObject::tr("Relative RE is intended for delayed or partial acquisitions; standard RE is available for this complete early-time dataset.");
+                }
+
+                cb->setEnabled(enabled);
+                if (!cb->property("BaseScientificTooltipInitialized").toBool())
+                {
+                    cb->setProperty("BaseScientificTooltip", cb->toolTip());
+                    cb->setProperty("BaseScientificTooltipInitialized", true);
+                }
+                const QString scientificTip = cb->property("BaseScientificTooltip").toString();
+                cb->setToolTip(scientificTip + (scientificTip.isEmpty() ? QString() : QString("\n\n")) + availability);
+                if (!enabled && cb->isChecked())
+                {
+                    cb->setChecked(false);
+                }
+            }
+        };
+
+    updateLayout(this->ModelsMTGACheckLayout, false);
+    updateLayout(this->ModelsCheckLayoutMTGAImg, false);
+    updateLayout(this->ModelsCheckLayout, true);
+    updateLayout(this->ModelsCheckLayoutTCMImg, true);
 }
 
 void
@@ -8189,6 +8581,350 @@ activeExternalIFKeep() const
 
 void
 qSlicerDynamicPETModuleWidgetPrivate::
+updateAcquisitionTimingContext(bool logMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (this->AcquisitionTimingStatusLabel)
+    {
+        this->AcquisitionTimingStatusLabel->setVisible(false);
+    }
+
+    AcquisitionTimingContext ctx;
+
+    if (this->tableBasedMode)
+    {
+        if (q->timePoints.empty() || q->durations.empty())
+        {
+            this->acquisitionTiming = ctx;
+            if (this->AcquisitionTimingStatusLabel)
+            {
+                this->AcquisitionTimingStatusLabel->setText(
+                    QObject::tr("Acquisition timing: —"));
+            }
+            return;
+        }
+
+        const double firstFrameStartSec =
+            q->timePoints.front() - q->durations.front();
+
+        bool metadataOffsetOk = false;
+        const double metadataOffset =
+            this->tableWorkbookMetadata
+                .value("AcquisitionStartPostInjection_s")
+                .toDouble(&metadataOffsetOk);
+
+        if (metadataOffsetOk &&
+            std::isfinite(metadataOffset) &&
+            metadataOffset > 60.0)
+        {
+            const QString timeConvention =
+                this->tableWorkbookMetadata.value("TimeConvention").toString();
+            const bool metadataTimesPostInjection =
+                timeConvention.contains("PostInjection", Qt::CaseInsensitive);
+
+            // DynamicPET exports delayed studies directly on the post-injection
+            // time axis. Older workbooks may still be scan-relative; support
+            // both without ever applying the injection offset twice.
+            ctx.timingAvailable = true;
+            ctx.delayedAcquisition = true;
+            ctx.tableTimesAlreadyPostInjection =
+                metadataTimesPostInjection || firstFrameStartSec > 60.0;
+            ctx.rawInjectionToAcquisitionOffsetSec = metadataOffset;
+            ctx.acquisitionStartPostInjectionSec =
+                ctx.tableTimesAlreadyPostInjection && firstFrameStartSec > 60.0
+                ? firstFrameStartSec
+                : metadataOffset;
+            ctx.source = QObject::tr("_DynamicPET timing metadata");
+        }
+        else
+        {
+            ctx.timingAvailable = true;
+            ctx.tableTimesAlreadyPostInjection = firstFrameStartSec > 60.0;
+            ctx.rawInjectionToAcquisitionOffsetSec = firstFrameStartSec;
+            ctx.delayedAcquisition = firstFrameStartSec > 60.0;
+            ctx.acquisitionStartPostInjectionSec =
+                ctx.delayedAcquisition ? firstFrameStartSec : 0.0;
+            ctx.source = QObject::tr("table frame timing");
+        }
+
+        this->acquisitionTiming = ctx;
+    }
+    else
+    {
+        vtkMRMLSequenceNode* sequence = q->sequencePETNode;
+        if (!sequence)
+        {
+            this->acquisitionTiming = ctx;
+            if (this->AcquisitionTimingStatusLabel)
+            {
+                this->AcquisitionTimingStatusLabel->setText(
+                    QObject::tr("Acquisition timing: —"));
+            }
+            return;
+        }
+
+        QString injectionText =
+            QString::fromUtf8(
+                sequence->GetAttribute("RadiopharmaceuticalStartDateTime")
+                    ? sequence->GetAttribute("RadiopharmaceuticalStartDateTime")
+                    : "");
+        if (injectionText.trimmed().isEmpty())
+        {
+            injectionText =
+                QString::fromUtf8(
+                    sequence->GetAttribute("RadionuclideStartDateTime")
+                        ? sequence->GetAttribute("RadionuclideStartDateTime")
+                        : "");
+        }
+
+        const QString firstFrameText =
+            QString::fromUtf8(
+                sequence->GetAttribute("dPET.FirstFrameAcquisitionDateTime")
+                    ? sequence->GetAttribute("dPET.FirstFrameAcquisitionDateTime")
+                    : "");
+
+        const QDateTime injectionDT = parseDICOMDateTimeText(injectionText);
+        const QDateTime firstFrameDT = parseDICOMDateTimeText(firstFrameText);
+
+        bool rawOffsetOk = false;
+        double rawOffsetSec =
+            QString::fromUtf8(
+                sequence->GetAttribute("dPET.InjectionToAcquisitionOffsetSec")
+                    ? sequence->GetAttribute("dPET.InjectionToAcquisitionOffsetSec")
+                    : "")
+                .toDouble(&rawOffsetOk);
+
+        if ((!rawOffsetOk || !std::isfinite(rawOffsetSec)) &&
+            injectionDT.isValid() && firstFrameDT.isValid())
+        {
+            rawOffsetSec = static_cast<double>(
+                injectionDT.secsTo(firstFrameDT));
+            rawOffsetOk = true;
+        }
+
+        if (rawOffsetOk && std::isfinite(rawOffsetSec))
+        {
+            ctx.timingAvailable = true;
+            ctx.rawInjectionToAcquisitionOffsetSec = rawOffsetSec;
+            ctx.injectionDateTime = injectionText;
+            ctx.firstFrameDateTime = firstFrameText;
+            ctx.source = QString::fromUtf8(
+                sequence->GetAttribute("dPET.InjectionDateTimeSource")
+                    ? sequence->GetAttribute("dPET.InjectionDateTimeSource")
+                    : "DICOM");
+
+            // The administration timestamp is often entered manually.  Do not
+            // use small, merely plausible differences as a kinetic time origin.
+            // Only an unambiguous post-injection acquisition (>= 5 min) changes
+            // the IF/PBIF clock.  Negative or small differences remain scan-zero.
+            constexpr double ClearDelayThresholdSec = 300.0;
+            if (rawOffsetSec >= ClearDelayThresholdSec)
+            {
+                ctx.delayedAcquisition = true;
+                ctx.acquisitionStartPostInjectionSec = rawOffsetSec;
+            }
+        }
+
+        this->acquisitionTiming = ctx;
+    }
+
+    if (this->AcquisitionTimingStatusLabel)
+    {
+        const bool showTimingLabel =
+            !this->tableBasedMode && q->sequencePETNode != nullptr;
+        this->AcquisitionTimingStatusLabel->setVisible(showTimingLabel);
+        QString text = QObject::tr("Acquisition timing: —");
+        QString tooltip = QObject::tr(
+            "Timing classification used by IF/PBIF processing. "
+            "For delayed DICOM studies, the displayed delay is the interval from "
+            "the recorded radiopharmaceutical start time to the START of the first "
+            "acquired PET frame (not its midpoint or end). Early-time means the "
+            "analysis starts near t=0.");
+
+        if (this->acquisitionTiming.timingAvailable ||
+            (this->tableBasedMode && !q->timePoints.empty()))
+        {
+            if (this->acquisitionTiming.delayedAcquisition)
+            {
+                text = QObject::tr("Acquisition timing: Delayed start (+%1 min)")
+                    .arg(this->acquisitionTiming.acquisitionStartPostInjectionSec / 60.0, 0, 'f', 1);
+            }
+            else
+            {
+                text = QObject::tr("Acquisition timing: Early-time (t≈0)");
+                tooltip += QObject::tr(
+                    " For DICOM image mode, a near-start injection timestamp is not "
+                    "treated as quantitatively trusted; scan start simply remains analysis t=0.");
+            }
+        }
+
+        this->AcquisitionTimingStatusLabel->setText(text);
+        this->AcquisitionTimingStatusLabel->setToolTip(tooltip);
+    }
+
+    if (logMessage &&
+        !this->pbifTimesSec.empty() &&
+        !q->timePoints.empty())
+    {
+        const double startTime = std::max(
+            this->pbifTimesSec.front(),
+            this->currentObservedInputStartSec());
+        const double endTime = std::min(
+            this->pbifTimesSec.back(),
+            this->frameEndForInputSec(q->timePoints.size() - 1));
+        if (endTime > startTime)
+        {
+            QSignalBlocker startBlocker(this->PBIFCalibrationStartSpinBox);
+            QSignalBlocker endBlocker(this->PBIFCalibrationEndSpinBox);
+            this->PBIFCalibrationStartSpinBox->setValue(startTime);
+            this->PBIFCalibrationEndSpinBox->setValue(endTime);
+        }
+    }
+
+    if (!logMessage || !this->acquisitionTiming.timingAvailable)
+    {
+        return;
+    }
+
+    if (this->acquisitionTiming.delayedAcquisition)
+    {
+        this->logToPythonConsole(
+            QObject::tr(
+                "[SlicerDynamicPET timing] Delayed tissue acquisition detected: "
+                "first acquired tissue frame starts about %1 s post injection (%2). "
+                "IF/PBIF operations use the post-injection clock; standard/relative "
+                "kinetic-model availability is updated from the current input support.")
+                .arg(this->acquisitionTiming.acquisitionStartPostInjectionSec, 0, 'g', 10)
+                .arg(this->acquisitionTiming.source));
+    }
+    else if (!this->tableBasedMode)
+    {
+        this->logToPythonConsole(
+            QObject::tr(
+                "[SlicerDynamicPET timing] Injection timing metadata found, but it is "
+                "not used to shift kinetic time because no clear >=5 min post-injection "
+                "acquisition delay was established."));
+    }
+}
+
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+frameTimeShiftForInputSec() const
+{
+    if (!this->acquisitionTiming.delayedAcquisition ||
+        this->acquisitionTiming.tableTimesAlreadyPostInjection)
+    {
+        return 0.0;
+    }
+    return this->acquisitionTiming.acquisitionStartPostInjectionSec;
+}
+
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+frameEndForInputSec(size_t frameIndex) const
+{
+    Q_Q(const qSlicerDynamicPETModuleWidget);
+    if (frameIndex >= q->timePoints.size())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return q->timePoints[frameIndex] + this->frameTimeShiftForInputSec();
+}
+
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+frameStartForInputSec(size_t frameIndex) const
+{
+    Q_Q(const qSlicerDynamicPETModuleWidget);
+    if (frameIndex >= q->timePoints.size() || frameIndex >= q->durations.size())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return this->frameEndForInputSec(frameIndex) - q->durations[frameIndex];
+}
+
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+frameMidForInputSec(size_t frameIndex) const
+{
+    Q_Q(const qSlicerDynamicPETModuleWidget);
+    if (frameIndex >= q->timePoints.size() || frameIndex >= q->durations.size())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return this->frameEndForInputSec(frameIndex) - 0.5 * q->durations[frameIndex];
+}
+
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+currentObservedInputStartSec() const
+{
+    Q_Q(const qSlicerDynamicPETModuleWidget);
+    const int source = this->IFSourceSelector ? this->IFSourceSelector->currentIndex() : 0;
+
+    if (source == 1 && !this->externalIFTimesSec.empty())
+    {
+        if (this->externalIFZeroAnchorAdded && this->externalIFTimesSec.size() > 1)
+        {
+            return this->externalIFTimesSec[1];
+        }
+        return this->externalIFTimesSec.front();
+    }
+
+    if (!q->timePoints.empty() && !q->durations.empty())
+    {
+        return this->frameStartForInputSec(0);
+    }
+    return 0.0;
+}
+
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+propagateOutputDirectory(const QString& path)
+{
+    if (this->propagatingOutputDirectory)
+    {
+        return;
+    }
+
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty())
+    {
+        return;
+    }
+
+    const QString cleanPath = QDir::cleanPath(trimmed);
+    this->sharedOutputDirectory = cleanPath;
+    this->propagatingOutputDirectory = true;
+
+    for (ctkPathLineEdit* editor : {
+             this->direxcel,
+             this->direxceltcm,
+             this->direxcelmtga,
+             this->direxceltcmfitted,
+             this->direxcelmtgafitted,
+             this->MTGADICOMDirectoryImg,
+             this->TCMDICOMDirectoryImg})
+    {
+        if (editor && editor->currentPath() != cleanPath)
+        {
+            editor->setCurrentPath(cleanPath);
+        }
+    }
+
+    this->propagatingOutputDirectory = false;
+}
+
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
 logToPythonConsole(const QString& message) const
 {
     PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
@@ -8229,7 +8965,7 @@ exportFinalInputFunctionCSV(
     sampleStepSec = std::max(0.01, sampleStepSec);
 
     const double endTimeSec =
-        q->timePoints[result.supportFrameCount - 1];
+        this->frameEndForInputSec(result.supportFrameCount - 1);
     if (!std::isfinite(endTimeSec) || endTimeSec <= 0.0)
     {
         if (errorMessage)
@@ -8240,10 +8976,17 @@ exportFinalInputFunctionCSV(
     const std::string plasmaInterpolation =
         result.pbifApplied ? std::string("linear") : this->selectedIFInterpolation();
 
+    const double startTimeSec =
+        result.inputCoversFromInjection
+        ? 0.0
+        : (std::isfinite(result.earliestAvailableInputTimeSec)
+           ? std::max(0.0, result.earliestAvailableInputTimeSec)
+           : 0.0);
+
     std::vector<double> exportTimes;
     std::vector<double> exportValuesNative;
     const size_t reserveCount =
-        static_cast<size_t>(std::ceil(endTimeSec / sampleStepSec)) + 1;
+        static_cast<size_t>(std::ceil((endTimeSec - startTimeSec) / sampleStepSec)) + 2;
     exportTimes.reserve(reserveCount);
     exportValuesNative.reserve(reserveCount);
 
@@ -8285,7 +9028,7 @@ exportFinalInputFunctionCSV(
             return plasma;
         };
 
-    for (double t = 0.0; t < endTimeSec; t += sampleStepSec)
+    for (double t = startTimeSec; t < endTimeSec; t += sampleStepSec)
     {
         const double value = finalPlasmaAt(t);
         if (!std::isfinite(value))
@@ -8858,24 +9601,23 @@ integrateFrameAverageCurveOverInterval(
 
     if (frameValues.size() != q->durations.size() ||
         q->durations.empty() ||
-        endTime <= startTime ||
-        startTime < 0.0 ||
         q->timePoints.empty() ||
-        endTime > q->timePoints.back())
+        endTime <= startTime ||
+        startTime < q->timePoints.front() - q->durations.front() - 1e-9 ||
+        endTime > q->timePoints.back() + 1e-9)
     {
         return
             std::numeric_limits<double>::quiet_NaN();
     }
 
     double integral = 0.0;
-    double frameStart = 0.0;
 
     for (size_t i = 0;
          i < q->durations.size();
          ++i)
     {
-        const double frameEnd =
-            frameStart + q->durations[i];
+        const double frameEnd = q->timePoints[i];
+        const double frameStart = frameEnd - q->durations[i];
 
         const double overlapStart =
             std::max(startTime, frameStart);
@@ -8889,8 +9631,6 @@ integrateFrameAverageCurveOverInterval(
                 frameValues[i] *
                 (overlapEnd - overlapStart);
         }
-
-        frameStart = frameEnd;
     }
 
     return integral;
@@ -8908,8 +9648,8 @@ evaluateFrameCurve(
     if (frameValues.size() != q->durations.size() ||
         frameValues.empty() ||
         q->timePoints.size() != frameValues.size() ||
-        targetTime < 0.0 ||
-        targetTime > q->timePoints.back())
+        targetTime < this->frameStartForInputSec(0) - 1e-9 ||
+        targetTime > this->frameEndForInputSec(frameValues.size() - 1) + 1e-9)
     {
         return
             std::numeric_limits<double>::quiet_NaN();
@@ -8917,22 +9657,17 @@ evaluateFrameCurve(
 
     if (interpolationType == "const")
     {
-        double frameStart = 0.0;
-
         for (size_t i = 0;
              i < q->durations.size();
              ++i)
         {
-            const double frameEnd =
-                frameStart + q->durations[i];
+            const double frameEnd = this->frameEndForInputSec(i);
 
             if (targetTime < frameEnd ||
                 i + 1 == q->durations.size())
             {
                 return frameValues[i];
             }
-
-            frameStart = frameEnd;
         }
     }
 
@@ -8949,8 +9684,7 @@ evaluateFrameCurve(
          ++i)
     {
         midpoints.push_back(
-            q->timePoints[i] -
-            0.5 * q->durations[i]);
+            this->frameMidForInputSec(i));
     }
 
     size_t left = 0;
@@ -8987,14 +9721,14 @@ evaluateFrameCurve(
         std::vector<double> splineValues;
         splineTimes.reserve(midpoints.size() + 2);
         splineValues.reserve(frameValues.size() + 2);
-        splineTimes.push_back(0.0);
+        splineTimes.push_back(this->frameStartForInputSec(0));
         splineValues.push_back(frameValues.front());
         for (size_t i = 0; i < midpoints.size(); ++i)
         {
             splineTimes.push_back(midpoints[i]);
             splineValues.push_back(frameValues[i]);
         }
-        splineTimes.push_back(q->timePoints.back());
+        splineTimes.push_back(this->frameEndForInputSec(frameValues.size() - 1));
         splineValues.push_back(frameValues.back());
         return pchipInterpolate(splineTimes, splineValues, targetTime);
     }
@@ -9191,6 +9925,65 @@ averagePlasmaTimesParentFractionOverInterval(
     return integral / (endTime - startTime);
 }
 
+double
+qSlicerDynamicPETModuleWidgetPrivate::
+initialModelPlasmaIntegralSec(
+    const InputFunctionResult& result,
+    double endTimeSec)
+{
+    if (!(endTimeSec > 0.0))
+    {
+        return 0.0;
+    }
+
+    if (result.nativePlasmaTimesSec.size() < 2 ||
+        result.nativePlasmaTimesSec.size() != result.nativePlasmaValues.size())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    if (result.nativePlasmaTimesSec.front() > 1e-6 ||
+        result.nativePlasmaTimesSec.back() + 1e-6 < endTimeSec)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const std::string interpolation = this->selectedIFInterpolation();
+
+    // If plasma is already parent plasma, or no metabolite correction is
+    // active, integrate the native model input directly.
+    if (result.plasmaIsParent || !result.applyParentFraction)
+    {
+        return this->integrateInputFunctionOverInterval(
+            result.nativePlasmaTimesSec,
+            result.nativePlasmaValues,
+            0.0,
+            endTimeSec,
+            interpolation);
+    }
+
+    if (result.parentFractionTimesSec.size() < 2 ||
+        result.parentFractionTimesSec.size() != result.parentFractionValues.size() ||
+        result.parentFractionTimesSec.front() > 1e-6 ||
+        result.parentFractionTimesSec.back() + 1e-6 < endTimeSec)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double average = this->averagePlasmaTimesParentFractionOverInterval(
+            result.nativePlasmaTimesSec,
+            result.nativePlasmaValues,
+            false,
+            interpolation,
+            result.parentFractionTimesSec,
+            result.parentFractionValues,
+            0.0,
+            endTimeSec);
+
+    return std::isfinite(average) ? average * endTimeSec
+                                  : std::numeric_limits<double>::quiet_NaN();
+}
+
 bool
 qSlicerDynamicPETModuleWidgetPrivate::
 pbrAtTime(
@@ -9281,8 +10074,10 @@ buildCurrentInputFunction(
         return false;
     }
 
+    this->updateAcquisitionTimingContext(false);
+
     const double petEndTimeSec =
-        q->timePoints.back();
+        this->frameEndForInputSec(q->timePoints.size() - 1);
     double modelEndTimeSec = petEndTimeSec;
 
     const std::string inputInterpolation =
@@ -9296,16 +10091,18 @@ buildCurrentInputFunction(
             const std::vector<double>& values,
             const std::string& interpolation,
             std::vector<double>& output,
-            size_t frameCount) -> bool
+            size_t frameCount,
+            size_t firstFrameIndex) -> bool
         {
             frameCount = std::min(frameCount, q->durations.size());
+            firstFrameIndex = std::min(firstFrameIndex, frameCount);
             output.assign(
                 q->durations.size(),
                 std::numeric_limits<double>::quiet_NaN());
 
-            for (size_t i = 0; i < frameCount; ++i)
+            for (size_t i = firstFrameIndex; i < frameCount; ++i)
             {
-                const double frameEnd = q->timePoints[i];
+                const double frameEnd = this->frameEndForInputSec(i);
                 const double frameStart = frameEnd - q->durations[i];
 
                 const double value =
@@ -9409,7 +10206,10 @@ buildCurrentInputFunction(
                     lastKeepIt));
 
         result.supportFrameCount = lastKeptIndex + 1;
-        modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
+        modelEndTimeSec = this->frameEndForInputSec(result.supportFrameCount - 1);
+        result.earliestAvailableInputTimeSec = this->frameStartForInputSec(0);
+        result.inputCoversFromInjection =
+            result.earliestAvailableInputTimeSec <= 60.0 + 1e-6;
 
         const size_t retainedCount =
             static_cast<size_t>(
@@ -9448,8 +10248,7 @@ buildCurrentInputFunction(
                 }
 
                 retainedTimes.push_back(
-                    q->timePoints[i] -
-                    0.5 * q->durations[i]);
+                    this->frameMidForInputSec(i));
                 retainedValues.push_back(
                     observedWholeBlood[i]);
             }
@@ -9466,8 +10265,7 @@ buildCurrentInputFunction(
                 }
 
                 const double midpoint =
-                    q->timePoints[i] -
-                    0.5 * q->durations[i];
+                    this->frameMidForInputSec(i);
 
                 result.frameWholeBlood[i] =
                     this->interpolateInputFunction(
@@ -9493,7 +10291,7 @@ buildCurrentInputFunction(
             for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
                 const double midpoint =
-                    q->timePoints[i] - 0.5 * q->durations[i];
+                    this->frameMidForInputSec(i);
                 evaluationTimes.push_back(midpoint);
                 if (result.frameKeep[i])
                 {
@@ -9523,7 +10321,7 @@ buildCurrentInputFunction(
             for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
                 result.frameWholeBlood[i] = smoothed[i];
-                result.processedSourcePreviewTimesSec.push_back(q->timePoints[i]);
+                result.processedSourcePreviewTimesSec.push_back(this->frameEndForInputSec(i));
                 result.processedSourcePreviewValues.push_back(smoothed[i]);
             }
             result.sourceProcessingApplied = true;
@@ -9543,7 +10341,7 @@ buildCurrentInputFunction(
             for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
                 const double midpoint =
-                    q->timePoints[i] - 0.5 * q->durations[i];
+                    this->frameMidForInputSec(i);
                 evaluationTimes.push_back(midpoint);
                 if (result.frameKeep[i])
                 {
@@ -9570,7 +10368,7 @@ buildCurrentInputFunction(
             for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
                 result.frameWholeBlood[i] = smoothed[i];
-                result.processedSourcePreviewTimesSec.push_back(q->timePoints[i]);
+                result.processedSourcePreviewTimesSec.push_back(this->frameEndForInputSec(i));
                 result.processedSourcePreviewValues.push_back(smoothed[i]);
             }
             result.sourceProcessingApplied = true;
@@ -9602,10 +10400,10 @@ buildCurrentInputFunction(
                     continue;
                 }
                 retainedTimes.push_back(
-                    q->timePoints[i] - 0.5 * q->durations[i]);
+                    this->frameMidForInputSec(i));
                 retainedValues.push_back(observedWholeBlood[i]);
-                retainedFrameStarts.push_back(q->timePoints[i] - q->durations[i]);
-                retainedFrameEnds.push_back(q->timePoints[i]);
+                retainedFrameStarts.push_back(this->frameStartForInputSec(i));
+                retainedFrameEnds.push_back(this->frameEndForInputSec(i));
             }
 
             std::vector<double> fittedObservations;
@@ -9633,19 +10431,23 @@ buildCurrentInputFunction(
             {
                 result.frameWholeBlood[i] =
                     logic->AverageFengInputFunction(
-                        q->timePoints[i] - q->durations[i],
-                        q->timePoints[i],
+                        this->frameStartForInputSec(i),
+                        this->frameEndForInputSec(i),
                         result.fengParameters);
             }
 
             const double supportEndSec =
-                q->timePoints[result.supportFrameCount - 1];
+                this->frameEndForInputSec(result.supportFrameCount - 1);
             // Dense representation of the analytic Feng curve is independent
             // of the user-selected TCM integration step. The TCM backend may
             // subsequently sample this continuous representation more finely.
             const double denseStepSec = 0.25;
+            const double denseStartSec =
+                result.inputCoversFromInjection
+                ? 0.0
+                : std::max(0.0, result.earliestAvailableInputTimeSec);
 
-            for (double t = 0.0; t < supportEndSec; t += denseStepSec)
+            for (double t = denseStartSec; t < supportEndSec; t += denseStepSec)
             {
                 result.nativeWholeBloodTimesSec.push_back(t);
                 result.nativeWholeBloodValues.push_back(
@@ -9677,8 +10479,7 @@ buildCurrentInputFunction(
              ++i)
         {
             const double midpoint =
-                q->timePoints[i] -
-                0.5 * q->durations[i];
+                this->frameMidForInputSec(i);
 
             double pbr = 0.0;
             if (!this->pbrAtTime(
@@ -9769,21 +10570,49 @@ buildCurrentInputFunction(
             return false;
         }
 
+        double retainedIFObservedStartSec = retainedExternalTimes.front();
+        if (this->externalIFZeroAnchorAdded)
+        {
+            const auto firstRealIt = std::find_if(
+                retainedExternalTimes.begin(),
+                retainedExternalTimes.end(),
+                [](double t) { return t > 1e-6; });
+            if (firstRealIt != retainedExternalTimes.end())
+            {
+                retainedIFObservedStartSec = *firstRealIt;
+            }
+        }
         const double retainedIFEndSec = retainedExternalTimes.back();
+        result.earliestAvailableInputTimeSec = retainedIFObservedStartSec;
+        result.inputCoversFromInjection =
+            retainedIFObservedStartSec <= 60.0 + 1e-6;
+
+        // A real first sample within the first minute is accepted as an
+        // early-time input and the internal (0,0) anchor may support the very
+        // first frames.  A much later first sample remains genuinely partial;
+        // the artificial anchor must never make it look complete.
+        const double retainedIFCoverageStartSec =
+            result.inputCoversFromInjection ? 0.0 : retainedIFObservedStartSec;
+
+        result.supportFrameStartIndex = q->timePoints.size();
         result.supportFrameCount = 0;
         for (size_t i = 0; i < q->timePoints.size(); ++i)
         {
-            if (q->timePoints[i] <= retainedIFEndSec + 1e-6)
+            const double frameStart = this->frameStartForInputSec(i);
+            const double frameEnd = this->frameEndForInputSec(i);
+            if (frameStart + 1e-6 >= retainedIFCoverageStartSec &&
+                frameEnd <= retainedIFEndSec + 1e-6)
             {
+                if (result.supportFrameStartIndex == q->timePoints.size())
+                {
+                    result.supportFrameStartIndex = i;
+                }
                 result.supportFrameCount = i + 1;
-            }
-            else
-            {
-                break;
             }
         }
 
-        if (result.supportFrameCount < 2)
+        if (result.supportFrameStartIndex >= result.supportFrameCount ||
+            result.supportFrameCount - result.supportFrameStartIndex < 2)
         {
             if (errorMessage)
             {
@@ -9793,7 +10622,7 @@ buildCurrentInputFunction(
             return false;
         }
 
-        modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
+        modelEndTimeSec = this->frameEndForInputSec(result.supportFrameCount - 1);
         if (modelEndTimeSec + 1e-6 < petEndTimeSec)
         {
             this->logToPythonConsole(
@@ -9918,7 +10747,11 @@ buildCurrentInputFunction(
             // of the user-selected TCM integration step. The TCM backend may
             // subsequently sample this continuous representation more finely.
             const double denseStepSec = 0.25;
-            for (double t = 0.0; t < modelEndTimeSec; t += denseStepSec)
+            const double denseStartSec =
+                result.inputCoversFromInjection
+                ? 0.0
+                : std::max(0.0, result.earliestAvailableInputTimeSec);
+            for (double t = denseStartSec; t < modelEndTimeSec; t += denseStepSec)
             {
                 processedPatientTimes.push_back(t);
                 processedPatientValues.push_back(
@@ -10053,42 +10886,51 @@ buildCurrentInputFunction(
             }
         }
 
-        if (!fillFrameAverages(
-                result.nativePlasmaTimesSec,
-                result.nativePlasmaValues,
-                inputInterpolation,
-                result.framePlasma,
-                result.supportFrameCount))
+        const bool pbifWillReplacePatientCurve =
+            this->PBIFOptionCheckBox->isChecked() && !result.plasmaIsParent;
+
+        const bool plasmaFramesAvailable = fillFrameAverages(
+            result.nativePlasmaTimesSec,
+            result.nativePlasmaValues,
+            inputInterpolation,
+            result.framePlasma,
+            result.supportFrameCount,
+            result.supportFrameStartIndex);
+
+        if (!plasmaFramesAvailable && !pbifWillReplacePatientCurve)
         {
             if (errorMessage)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "Could not calculate PET-frame plasma values.");
+                *errorMessage = QObject::tr(
+                    "The external input could not be sampled over its supported tissue-frame interval.");
             }
             return false;
         }
 
-        if (result.hasWholeBlood &&
-            !fillFrameAverages(
+        if (result.hasWholeBlood)
+        {
+            const bool wholeBloodFramesAvailable = fillFrameAverages(
                 result.nativeWholeBloodTimesSec,
                 result.nativeWholeBloodValues,
                 inputInterpolation,
                 result.frameWholeBlood,
-                result.supportFrameCount))
-        {
-            if (errorMessage)
+                result.supportFrameCount,
+                result.supportFrameStartIndex);
+
+            if (!wholeBloodFramesAvailable && !pbifWillReplacePatientCurve)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "Could not calculate PET-frame whole-blood values.");
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr(
+                        "The external whole-blood input could not be sampled over its supported tissue-frame interval.");
+                }
+                return false;
             }
-            return false;
         }
 
         result.frameKeep.assign(q->durations.size(), false);
         std::fill(
-            result.frameKeep.begin(),
+            result.frameKeep.begin() + static_cast<std::ptrdiff_t>(result.supportFrameStartIndex),
             result.frameKeep.begin() + static_cast<std::ptrdiff_t>(result.supportFrameCount),
             true);
     }
@@ -10121,72 +10963,165 @@ buildCurrentInputFunction(
             {
                 *errorMessage =
                     QObject::tr(
-                        "Enable PBIF calibration only after loading a "
-                        "valid time_s,template_value CSV.");
+                        "Select a valid PBIF time_s,template_value CSV.");
             }
             return false;
         }
 
-        if (this->pbifTimesSec.back() + 1e-6 <
-            modelEndTimeSec)
+        const double patientSourceSupportStart =
+            this->frameStartForInputSec(
+                std::min(result.supportFrameStartIndex, q->timePoints.size() - 1));
+        const double patientSourceSupportEnd =
+            this->frameEndForInputSec(
+                std::min(
+                    result.supportFrameCount > 0 ? result.supportFrameCount - 1 : size_t{0},
+                    q->timePoints.size() - 1));
+
+        // PBIF is never extrapolated beyond its supplied support. Determine
+        // the tissue frames that are fully covered by the real template
+        // samples. An artificial (0,0) anchor does not extend real support.
+        const double pbifObservedStartSec =
+            this->pbifZeroAnchorAdded && this->pbifTimesSec.size() > 1
+            ? this->pbifTimesSec[1]
+            : this->pbifTimesSec.front();
+        const bool pbifCoversFromInjection =
+            pbifObservedStartSec <= 60.0 + 1e-6;
+        const double pbifCoverageStartSec =
+            pbifCoversFromInjection ? 0.0 : pbifObservedStartSec;
+
+        size_t pbifSupportStartIndex = q->timePoints.size();
+        size_t pbifSupportFrameCount = 0;
+        for (size_t i = 0; i < q->timePoints.size(); ++i)
+        {
+            const double frameStart = this->frameStartForInputSec(i);
+            const double frameEnd = this->frameEndForInputSec(i);
+            if (frameStart + 1e-6 >= pbifCoverageStartSec &&
+                frameEnd <= this->pbifTimesSec.back() + 1e-6)
+            {
+                if (pbifSupportStartIndex == q->timePoints.size())
+                {
+                    pbifSupportStartIndex = i;
+                }
+                pbifSupportFrameCount = i + 1;
+            }
+        }
+
+        if (pbifSupportStartIndex >= pbifSupportFrameCount ||
+            pbifSupportFrameCount - pbifSupportStartIndex < 2)
         {
             if (errorMessage)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "PBIF coverage is insufficient for the retained "
-                        "acquisition. Extrapolation is not performed.");
+                *errorMessage = QObject::tr(
+                    "The PBIF template does not cover at least two tissue frames.");
             }
             return false;
         }
 
-        const double calibrationStart =
-            this->PBIFCalibrationStartSpinBox->value();
-        const double calibrationEnd =
-            this->PBIFCalibrationEndSpinBox->value();
-
-        if (calibrationStart < 0.0 ||
-            calibrationEnd <= calibrationStart ||
-            calibrationEnd > modelEndTimeSec ||
-            calibrationStart < this->pbifTimesSec.front() ||
-            calibrationEnd > this->pbifTimesSec.back())
+        // Once calibrated, the PBIF template is the authoritative model
+        // input. Its own temporal support - not the shorter patient
+        // calibration curve - determines which tissue frames are usable.
+        result.supportFrameStartIndex = pbifSupportStartIndex;
+        result.supportFrameCount = pbifSupportFrameCount;
+        if (result.supportFrameCount - result.supportFrameStartIndex < 2)
         {
             if (errorMessage)
             {
-                *errorMessage =
-                    QObject::tr(
-                        "Invalid PBIF AUC calibration interval. "
-                        "It must lie inside both the patient IF and "
-                        "PBIF temporal coverage.");
+                *errorMessage = QObject::tr(
+                    "The common PBIF/tissue support contains fewer than two frames.");
             }
             return false;
         }
 
-        PBIFTemplateDomain templateChoice =
+        modelEndTimeSec =
+            this->frameEndForInputSec(result.supportFrameCount - 1);
+
+        if (result.frameKeep.size() == q->durations.size())
+        {
+            std::fill(result.frameKeep.begin(), result.frameKeep.end(), false);
+            std::fill(result.frameKeep.begin() + static_cast<std::ptrdiff_t>(result.supportFrameStartIndex),
+                      result.frameKeep.begin() + static_cast<std::ptrdiff_t>(result.supportFrameCount),
+                      true);
+        }
+
+        if (pbifSupportFrameCount < q->timePoints.size())
+        {
+            this->logToPythonConsole(
+                QObject::tr(
+                    "[SlicerDynamicPET PBIF] Template ends at %1 s; "
+                    "the usable acquisition is shortened to frame %2 ending at %3 s. "
+                    "PBIF extrapolation is not performed.")
+                    .arg(this->pbifTimesSec.back(), 0, 'g', 8)
+                    .arg(result.supportFrameCount)
+                    .arg(modelEndTimeSec, 0, 'g', 8));
+        }
+
+        // Calibrate on the actual overlap of patient and template coverage.
+        // If a previously stored GUI interval falls outside that overlap,
+        // clamp it silently instead of presenting a warning on mode changes.
+        double patientCoverageStart = patientSourceSupportStart;
+        double patientCoverageEnd = patientSourceSupportEnd;
+        if (source != 0)
+        {
+            const std::vector<double>& patientCoverageTimes =
+                result.nativePlasmaTimesSec.empty()
+                ? result.nativeWholeBloodTimesSec
+                : result.nativePlasmaTimesSec;
+            if (!patientCoverageTimes.empty())
+            {
+                patientCoverageStart = std::max(patientCoverageStart, patientCoverageTimes.front());
+                patientCoverageEnd = std::min(patientCoverageEnd, patientCoverageTimes.back());
+            }
+        }
+
+        const double overlapStart =
+            std::max(patientCoverageStart, pbifObservedStartSec);
+        const double overlapEnd =
+            std::min(patientCoverageEnd, this->pbifTimesSec.back());
+
+        if (!(overlapEnd > overlapStart + 1e-6))
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "Patient input and PBIF template have no usable common calibration interval.");
+            }
+            return false;
+        }
+
+        double calibrationStart =
+            std::max(this->PBIFCalibrationStartSpinBox->value(), overlapStart);
+        double calibrationEnd =
+            std::min(this->PBIFCalibrationEndSpinBox->value(), overlapEnd);
+        if (!(calibrationEnd > calibrationStart + 1e-6))
+        {
+            calibrationStart = overlapStart;
+            calibrationEnd = overlapEnd;
+        }
+
+        if (std::abs(calibrationStart - this->PBIFCalibrationStartSpinBox->value()) > 1e-6 ||
+            std::abs(calibrationEnd - this->PBIFCalibrationEndSpinBox->value()) > 1e-6)
+        {
+            QSignalBlocker startBlocker(this->PBIFCalibrationStartSpinBox);
+            QSignalBlocker endBlocker(this->PBIFCalibrationEndSpinBox);
+            this->PBIFCalibrationStartSpinBox->setValue(calibrationStart);
+            this->PBIFCalibrationEndSpinBox->setValue(calibrationEnd);
+            this->logToPythonConsole(
+                QObject::tr(
+                    "[SlicerDynamicPET PBIF] Calibration interval adjusted to the common "
+                    "patient/template support: %1-%2 s.")
+                    .arg(calibrationStart, 0, 'g', 8)
+                    .arg(calibrationEnd, 0, 'g', 8));
+        }
+
+        const PBIFTemplateDomain templateChoice =
             this->selectedPBIFTemplateDomain();
 
-        IFCurveDomain calibrationDomain =
-            IFCurveDomain::WholeBlood;
-
-        if (templateChoice ==
-            PBIFTemplateDomain::WholeBlood)
-        {
-            calibrationDomain =
-                IFCurveDomain::WholeBlood;
-        }
-        else if (templateChoice ==
-                 PBIFTemplateDomain::TotalPlasma)
-        {
-            calibrationDomain =
-                IFCurveDomain::TotalPlasma;
-        }
-        else
-        {
-            calibrationDomain =
-                sourceDomain == IFCurveDomain::TotalPlasma
-                ? IFCurveDomain::TotalPlasma
-                : IFCurveDomain::WholeBlood;
-        }
+        // The template domain is an intrinsic property of the supplied PBIF.
+        // Always convert/use the patient calibration curve in that same domain.
+        const IFCurveDomain calibrationDomain =
+            templateChoice == PBIFTemplateDomain::TotalPlasma
+            ? IFCurveDomain::TotalPlasma
+            : IFCurveDomain::WholeBlood;
 
         double patientAUC =
             std::numeric_limits<double>::quiet_NaN();
@@ -10198,11 +11133,13 @@ buildCurrentInputFunction(
                 ? result.frameWholeBlood
                 : result.framePlasma;
 
+            const double frameTimeShift =
+                this->frameTimeShiftForInputSec();
             patientAUC =
                 this->integrateFrameAverageCurveOverInterval(
                     patientFrames,
-                    calibrationStart,
-                    calibrationEnd);
+                    calibrationStart - frameTimeShift,
+                    calibrationEnd - frameTimeShift);
 
             result.pbifPatientCalibrationTimesSec.reserve(
                 patientFrames.size());
@@ -10214,8 +11151,7 @@ buildCurrentInputFunction(
                  ++i)
             {
                 result.pbifPatientCalibrationTimesSec.push_back(
-                    q->timePoints[i] -
-                    0.5 * q->durations[i]);
+                    this->frameEndForInputSec(i));
             }
         }
         else
@@ -10270,6 +11206,19 @@ buildCurrentInputFunction(
         result.pbifScale =
             patientAUC / pbifAUC;
         result.pbifApplied = true;
+
+        if (pbifCoversFromInjection)
+        {
+            result.inputCoversFromInjection = true;
+            result.inputCoverageReconstructedByPBIF = true;
+            result.earliestAvailableInputTimeSec = pbifObservedStartSec;
+        }
+        else
+        {
+            result.inputCoversFromInjection = false;
+            result.inputCoverageReconstructedByPBIF = false;
+            result.earliestAvailableInputTimeSec = pbifObservedStartSec;
+        }
         result.pbifCalibrationDomain =
             calibrationDomain;
 
@@ -10347,13 +11296,15 @@ buildCurrentInputFunction(
                 result.nativePlasmaValues,
                 "linear",
                 result.framePlasma,
-                result.supportFrameCount) ||
+                result.supportFrameCount,
+                result.supportFrameStartIndex) ||
             !fillFrameAverages(
                 result.nativeWholeBloodTimesSec,
                 result.nativeWholeBloodValues,
                 "linear",
                 result.frameWholeBlood,
-                result.supportFrameCount))
+                result.supportFrameCount,
+                result.supportFrameStartIndex))
         {
             if (errorMessage)
             {
@@ -10405,16 +11356,16 @@ buildCurrentInputFunction(
         if (this->selectedParentFractionModel() == ParentFractionModel::Linear &&
             processedParentTimes.back() + 1e-6 < modelEndTimeSec)
         {
-            size_t parentSupportFrameCount = 0;
-            for (size_t i = 0; i < result.supportFrameCount; ++i)
+            size_t parentSupportFrameCount = result.supportFrameStartIndex;
+            for (size_t i = result.supportFrameStartIndex; i < result.supportFrameCount; ++i)
             {
-                if (q->timePoints[i] <= processedParentTimes.back() + 1e-6)
+                if (this->frameEndForInputSec(i) <= processedParentTimes.back() + 1e-6)
                     parentSupportFrameCount = i + 1;
                 else
                     break;
             }
 
-            if (parentSupportFrameCount < 2)
+            if (parentSupportFrameCount - result.supportFrameStartIndex < 2)
             {
                 if (errorMessage)
                 {
@@ -10425,7 +11376,7 @@ buildCurrentInputFunction(
             }
 
             result.supportFrameCount = parentSupportFrameCount;
-            modelEndTimeSec = q->timePoints[result.supportFrameCount - 1];
+            modelEndTimeSec = this->frameEndForInputSec(result.supportFrameCount - 1);
             this->logToPythonConsole(
                 QObject::tr("[SlicerDynamicPET parent fraction] Linear parent fraction ends at %1 s; fitting is shortened to TAC frame %2 ending at %3 s.")
                     .arg(processedParentTimes.back(), 0, 'g', 8)
@@ -10444,9 +11395,9 @@ buildCurrentInputFunction(
         const bool plasmaIsFrameCurve = result.nativePlasmaTimesSec.empty();
         const std::string plasmaInterpolation = result.pbifApplied ? "linear" : inputInterpolation;
 
-        for (size_t i = 0; i < result.supportFrameCount; ++i)
+        for (size_t i = result.supportFrameStartIndex; i < result.supportFrameCount; ++i)
         {
-            const double frameEnd = q->timePoints[i];
+            const double frameEnd = this->frameEndForInputSec(i);
             const double frameStart = frameEnd - q->durations[i];
             const std::vector<double>& plasmaValues =
                 plasmaIsFrameCurve ? result.framePlasma : result.nativePlasmaValues;
@@ -10478,6 +11429,7 @@ buildCurrentInputFunction(
 
     if (result.supportFrameCount == 0)
     {
+        result.supportFrameStartIndex = 0;
         result.supportFrameCount = q->durations.size();
     }
 
@@ -10638,20 +11590,26 @@ buildCurrentInputFunctionWeights(
     weights.reserve(
         it->second.size());
 
-    for (const VoxelStatistics& vs :
-         it->second)
+    std::vector<double> sigmas;
+    double fallbackSigma = std::numeric_limits<double>::quiet_NaN();
+    if (weighted)
     {
+        sigmas.reserve(it->second.size());
+        for (const VoxelStatistics& vs : it->second)
+        {
+            sigmas.push_back(statisticDispersionSigma(vs, statistic));
+        }
+        fallbackSigma = medianValidSigma(sigmas);
+    }
+
+    for (size_t i = 0; i < it->second.size(); ++i)
+    {
+        const VoxelStatistics& vs = it->second[i];
         double weight = 1.0;
 
         if (weighted)
         {
-            const double sigma =
-                statisticDispersionSigma(
-                    vs,
-                    statistic);
-            weight =
-                inverseVarianceWeightFromSigma(
-                    sigma);
+            weight = inverseVarianceWeightFromSigma(sigmas[i], fallbackSigma);
         }
 
         if (excludeRemovedInputFrames && !vs.keep)
@@ -11091,7 +12049,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsMTGATable(std :: strin
   }
 
   // Define column headers
-  QStringList headers = { "", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"};
+  QStringList headers = { "", "Ki / Ki'", "DV / DV'", "Intercept", "R2", "AIC", "MASE"};
   this->MTGAResultsTable->setColumnCount(headers.size());
   this->MTGAResultsTable->setHorizontalHeaderLabels(headers);
 
@@ -14192,11 +15150,11 @@ outputMTGAParametricResult(
   // ------------------------------------------------------------------------
   std::vector<std::string> fields;
 
-  if (modelID == "Patlak")
+  if (modelID == "Patlak" || modelID == "Relative Patlak")
   {
     fields =
     {
-      "Ki",
+      modelID == "Relative Patlak" ? "KiPrime" : "Ki",
       "Intercept",
       "AIC",
       "MASE",
@@ -14205,11 +15163,12 @@ outputMTGAParametricResult(
     };
   }
   else if (modelID == "Logan" ||
-           modelID == "RE")
+           modelID == "RE" ||
+           modelID == "Relative RE")
   {
     fields =
     {
-      "DV",
+      modelID == "Relative RE" ? "DVPrime" : "DV",
       "Intercept",
       "AIC",
       "MASE",
@@ -14259,9 +15218,11 @@ outputMTGAParametricResult(
 
     int modelIndex = 0;
 
-    if (modelID == "Patlak")      modelIndex = 0;
-    else if (modelID == "Logan")  modelIndex = 1;
-    else if (modelID == "RE")     modelIndex = 2;
+    if (modelID == "Patlak")               modelIndex = 0;
+    else if (modelID == "Relative Patlak") modelIndex = 1;
+    else if (modelID == "Logan")           modelIndex = 2;
+    else if (modelID == "RE")              modelIndex = 3;
+    else if (modelID == "Relative RE")     modelIndex = 4;
 
     const double framingNorm =
         this->framingNormEditImg
@@ -14282,8 +15243,8 @@ outputMTGAParametricResult(
       bool requiresNormalizedTimeUnit = false;
 
       // Patlak slope Ki has inverse normalized-time units.
-      if (modelID == "Patlak" &&
-          field == "Ki")
+      if ((modelID == "Patlak" || modelID == "Relative Patlak") &&
+          (field == "Ki" || field == "KiPrime"))
       {
         requiresNormalizedTimeUnit = true;
 
@@ -14303,7 +15264,8 @@ outputMTGAParametricResult(
 
       // Logan/RE regression intercept is a time quantity.
       if ((modelID == "Logan" ||
-           modelID == "RE") &&
+           modelID == "RE" ||
+           modelID == "Relative RE") &&
           field == "Intercept")
       {
         requiresNormalizedTimeUnit = true;
@@ -14617,10 +15579,20 @@ exportParametricMapDICOM(
     quantityCode = "SDP_KI";
     quantityMeaning = "Net influx rate";
   }
+  else if (field == "KiPrime")
+  {
+    quantityCode = "SDP_KIP";
+    quantityMeaning = "Relative Patlak slope Ki prime";
+  }
   else if (field == "DV")
   {
     quantityCode = "SDP_DV";
     quantityMeaning = "Distribution volume";
+  }
+  else if (field == "DVPrime")
+  {
+    quantityCode = "SDP_DVP";
+    quantityMeaning = "Relative equilibrium slope DV T prime";
   }
   else if (field == "Intercept")
   {
@@ -14670,10 +15642,14 @@ exportParametricMapDICOM(
 
   if (modelID == "Patlak")
     methodCode = "SDP_PATLAK";
+  else if (modelID == "Relative Patlak")
+    methodCode = "SDP_RPATLAK";
   else if (modelID == "Logan")
     methodCode = "SDP_LOGAN";
   else if (modelID == "RE")
     methodCode = "SDP_RE";
+  else if (modelID == "Relative RE")
+    methodCode = "SDP_RRE";
   else if (modelID == "MTGAOptimized")
     methodCode = "SDP_MTGAOPT";
   else if (modelID == "1TCM")
@@ -15792,7 +16768,7 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
     "Mean", "Median", "Peak", "Min", "Max"//, "VoxelCount", "Volume(cc)"
   };
   this->ModelsNamesMTGA = QStringList{
-    "Patlak", "Logan", "RE"
+    "Patlak", "Relative Patlak", "Logan", "RE", "Relative RE"
   };
   this->ModelsNamesTCM = QStringList{
     "1TCM", "1TdCM", "1TiCM", "1TidCM", "2TCM", "2TdCM", "2TiCM", "2TidCM"
@@ -15994,8 +16970,9 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
 
 void qSlicerDynamicPETModuleWidget::onPatChanged (int index) {
   Q_D(qSlicerDynamicPETModuleWidget);
+  d->resetAcquisitionTimingDisplay();
+  this->resetPETSelection();
   this->patID = d->PatSelector->itemData(index).value<vtkIdType>();
-  d->resetInputFunctionData(true);
   d->populateStudyComboBox(this->patID);
   if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   {
@@ -16019,8 +16996,9 @@ void qSlicerDynamicPETModuleWidget::onPatChanged (int index) {
 
 void qSlicerDynamicPETModuleWidget::onStuChanged (int index) {
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->resetInputFunctionData(true);
+  d->resetAcquisitionTimingDisplay();
   this->stuID = d->StuSelector->itemData(index).value<vtkIdType>();
+  this->resetPETSelection();
   d->populateNodeComboBox(d->CTSelector,
                           this->stuID,
                           "vtkMRMLScalarVolumeNode",
@@ -16068,7 +17046,27 @@ void qSlicerDynamicPETModuleWidget::resetPETSelection()
   this->durations.clear();
   this->timePoints.clear();
   this->suvFactors.clear();
+  this->numberOfTimepoints = 0;
   d->suvbwFactorValidated = false;
+  d->resetAcquisitionTimingDisplay();
+
+  // A PET change is a new temporal problem. Do not carry slider values or
+  // labels from the previous acquisition while no PET is selected.
+  for (QSlider* slider : {d->timeOffsetSlider, d->timeEndSlider, d->TCMEndSlider,
+                          d->timeOffsetSliderImg, d->timeEndSliderImg, d->TCMEndSliderImg})
+  {
+    if (!slider) continue;
+    QSignalBlocker blocker(slider);
+    slider->setRange(1, 1);
+    slider->setValue(1);
+  }
+  for (QLineEdit* edit : {d->frameEdit, d->timeSecEdit, d->timeMinEdit,
+                          d->timeEndInfoEdit, d->TCMEndInfoEdit,
+                          d->frameEditImg, d->timeSecEditImg, d->timeMinEditImg,
+                          d->timeEndInfoEditImg, d->TCMEndInfoEditImg})
+  {
+    if (edit) edit->clear();
+  }
 
   int noneIndex = d->PETSelector->findData(
     QVariant::fromValue(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID));
@@ -16092,6 +17090,7 @@ void qSlicerDynamicPETModuleWidget::resetPETSelection()
 
 void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
   Q_D(qSlicerDynamicPETModuleWidget);
+  d->resetAcquisitionTimingDisplay();
   d->resetInputFunctionData(true);
   const vtkIdType newPetID =
       d->PETSelector
@@ -16278,8 +17277,9 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
   }
   this->dPETvalueType = *uniqueTypes.begin();
   d->updateQuantitativeUnitUI();
-  d->populateTimeBarMTGA();
-  d->populateTimeBarMTGAImg();
+  d->updateAcquisitionTimingContext(true);
+  d->populateTimeBarMTGA(true);
+  d->populateTimeBarMTGAImg(true);
 
   d->populateNodeComboBox(d->SegSelector,
                           this->stuID,
@@ -16817,11 +17817,17 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   }
   // CT-referenced ROI volumes are intentionally not computed here.
 
+  d->updateAcquisitionTimingContext(false);
   d->populatePlotSegmentCheckboxes();
   d->rebuildTACStatisticUI();
   d->populateIF();
   d->populateTimeBarMTGA();
   d->populateTimeBarMTGAImg();
+
+  // Rebuild timing-dependent IF support after TAC extraction so slider ranges
+  // immediately reflect PBIF/external-IF coverage. No checkbox retoggle should
+  // ever be required to refresh the usable frame range.
+  d->updateInputFunctionStatus();
 
   const bool tacReady =
       !this->segmentTACs.empty() &&
@@ -16918,10 +17924,9 @@ QVariantMap qSlicerDynamicPETModuleWidget::TACtoPythonDict()
         QVariantMap vsMap;
         // PET measurements are frame averages.  Keep the familiar frame-end time
         // in the primary Time(s) column while preserving exact start/mid/end bounds.
-        const double frameEndSec = timePoints[i];
-        const double frameStartSec = frameEndSec - durations[i];
-        const double frameMidSec =
-            frameStartSec + 0.5 * durations[i];
+        const double frameEndSec = d->frameEndForInputSec(i);
+        const double frameStartSec = d->frameStartForInputSec(i);
+        const double frameMidSec = d->frameMidForInputSec(i);
 
         vsMap["Time(s)"] = frameEndSec;
         vsMap["FrameStart_s"] = frameStartSec;
@@ -17015,8 +18020,26 @@ QVariantMap qSlicerDynamicPETModuleWidget::MTGAParamsToPythonDict()
     {
       QVariantMap row;
       row["Model"] = QString::fromStdString(modelName);
-      row["Ki"]    = params.Ki;
-      row["DV"]    = params.DV;
+      if (modelName == "Relative Patlak")
+      {
+        row["KiPrime"] = params.Ki;
+        row["Ki"] = QVariant();
+      }
+      else
+      {
+        row["Ki"] = params.Ki;
+        row["KiPrime"] = QVariant();
+      }
+      if (modelName == "Relative RE")
+      {
+        row["DVPrime"] = params.DV;
+        row["DV"] = QVariant();
+      }
+      else
+      {
+        row["DV"] = params.DV;
+        row["DVPrime"] = QVariant();
+      }
       row["Intercept"] = params.Intercept;
       row["R2"]   = params.R2;
       row["AIC"]   = params.AIC;
@@ -17058,11 +18081,9 @@ QVariantMap qSlicerDynamicPETModuleWidget::fittedTCMtoPythonDict()
     for (size_t i = 0; i < N; ++i)
     {
       QVariantMap row;
-      const double frameEndSec = this->timePoints[i];
-      const double frameStartSec =
-          frameEndSec - this->durations[i];
-      const double frameMidSec =
-          frameStartSec + 0.5 * this->durations[i];
+      const double frameEndSec = d->frameEndForInputSec(i);
+      const double frameStartSec = d->frameStartForInputSec(i);
+      const double frameMidSec = d->frameMidForInputSec(i);
       row["Time(s)"] = frameEndSec;
       row["FrameStart_s"] = frameStartSec;
       row["FrameMid_s"] = frameMidSec;
@@ -17162,7 +18183,11 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
   QVariantMap metadata;
   metadata["FormatVersion"] = 1;
   metadata["ActivityUnit"] = d->activityUnitLabel(d->petStoredActivityUnit());
-  metadata["TimeConvention"] = "FrameEnd";
+  d->updateAcquisitionTimingContext(false);
+  metadata["TimeConvention"] =
+      d->acquisitionTiming.delayedAcquisition
+      ? "FrameEndPostInjection"
+      : "FrameEnd";
   metadata["SourceMode"] = d->isTableBasedMode() ? "TableBased" : "ImageBased";
 
   double suvbwFactor = 0.0;
@@ -17206,6 +18231,45 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
              "DICOM.StudyInstanceUID"})
     {
       addSHAttribute(this->stuID, attr);
+    }
+
+    if (this->sequencePETNode)
+    {
+      auto addSequenceAttribute =
+          [this, &metadata](const char* outputKey, const char* attributeName)
+          {
+            const char* value = this->sequencePETNode->GetAttribute(attributeName);
+            if (value && *value)
+            {
+              metadata[QString::fromUtf8(outputKey)] = QString::fromUtf8(value);
+            }
+          };
+
+      addSequenceAttribute(
+          "RadiopharmaceuticalStartDateTime",
+          "RadiopharmaceuticalStartDateTime");
+      addSequenceAttribute(
+          "RadionuclideStartDateTime",
+          "RadionuclideStartDateTime");
+      addSequenceAttribute(
+          "RadionuclideTotalDose",
+          "RadionuclideTotalDose");
+      addSequenceAttribute(
+          "FirstFrameAcquisitionDateTime",
+          "dPET.FirstFrameAcquisitionDateTime");
+      addSequenceAttribute(
+          "InjectionDateTimeSource",
+          "dPET.InjectionDateTimeSource");
+      addSequenceAttribute(
+          "InjectionToAcquisitionOffset_s",
+          "dPET.InjectionToAcquisitionOffsetSec");
+    }
+
+    d->updateAcquisitionTimingContext(false);
+    if (d->acquisitionTiming.delayedAcquisition)
+    {
+      metadata["AcquisitionStartPostInjection_s"] =
+          d->acquisitionTiming.acquisitionStartPostInjectionSec;
     }
   }
 
@@ -17575,18 +18639,25 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
 
   auto plotTimeSec = [this, d](size_t index)
   {
+    double t = this->timePoints[index];
     if (d->isTableBasedMode() &&
         d->tablePlotTimesSec.size() == this->timePoints.size() &&
         index < d->tablePlotTimesSec.size())
     {
-      return d->tablePlotTimesSec[index];
+      t = d->tablePlotTimesSec[index];
     }
-    return this->timePoints[index];
+
+    if (d->acquisitionTiming.delayedAcquisition &&
+        !d->acquisitionTiming.tableTimesAlreadyPostInjection)
+    {
+      t += d->acquisitionTiming.acquisitionStartPostInjectionSec;
+    }
+    return t;
   };
 
   for (int i = 0; i < this->timePoints.size(); ++i)
   {
-    const double frameEndSec = this->timePoints[i];
+    const double frameEndSec = d->frameEndForInputSec(static_cast<size_t>(i));
     const double frameStartSec =
         frameEndSec - this->durations[i];
     const double frameMidSec =
@@ -18207,7 +19278,7 @@ void qSlicerDynamicPETModuleWidget::onSliderChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
   const double timeSec =
-      this->timePoints[index - 1];
+      d->frameEndForInputSec(static_cast<size_t>(index - 1));
   const double timeMin = timeSec / 60.0;
 
   if (d->timeEndSlider->value() < index)
@@ -18224,7 +19295,7 @@ void qSlicerDynamicPETModuleWidget::onSliderImgChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
   const double timeSec =
-      this->timePoints[index - 1];
+      d->frameEndForInputSec(static_cast<size_t>(index - 1));
   const double timeMin = timeSec / 60.0;
 
   if (d->timeEndSliderImg->value() < index)
@@ -18828,26 +19899,18 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     keeptacvec[segmentName].reserve(Nframe);
 
     std::vector<double> segmentSigmas;
-
+    double fallbackSigma = std::numeric_limits<double>::quiet_NaN();
     if (d->weightFitCheckBox->isChecked())
     {
       segmentSigmas.reserve(statsVec.size());
-
       for (size_t i = 0; i < statsVec.size(); ++i)
       {
         segmentSigmas.push_back(
             d->tissueSigmaForWeighting(
-                segmentName,
-                i,
-                currentSelectedStatID,
-                statsVec[i]));
+                segmentName, i, currentSelectedStatID, statsVec[i]));
       }
+      fallbackSigma = medianValidSigma(segmentSigmas);
     }
-
-    const double fallbackSigma =
-        d->weightFitCheckBox->isChecked()
-        ? medianValidSigma(segmentSigmas)
-        : std::numeric_limits<double>::quiet_NaN();
 
     for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
@@ -18857,9 +19920,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.mean;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18868,9 +19930,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.median;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18879,9 +19940,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.peak;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18890,9 +19950,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         value = vs.max;
         if (d->weightFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -18938,6 +19997,48 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         tr("Input Function"),
         inputFunctionError);
     return;
+  }
+
+  if (!ifResult.inputCoversFromInjection)
+  {
+    QMessageBox::warning(
+        this,
+        tr("TCM input support"),
+        tr("Compartment modeling requires an input function that covers injection onward. "
+           "Provide a full external input function or enable a PBIF template that reconstructs the missing early input."));
+    return;
+  }
+
+  if (d->acquisitionTiming.delayedAcquisition)
+  {
+    const QMessageBox::StandardButton choice = QMessageBox::warning(
+        this,
+        tr("Delayed tissue acquisition"),
+        tr("This PET acquisition starts after injection, so the early tissue kinetics were not observed.\n\n"
+           "Because a complete input function from injection is available, the compartment model can be propagated "
+           "through the unobserved pre-scan interval and compared with the acquired late tissue frames. However, "
+           "individual kinetic rate constants may be weakly identifiable or unstable without the early tissue response.\n\n"
+           "Continue with TCM fitting?"),
+        QMessageBox::Yes | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (choice != QMessageBox::Yes)
+    {
+      return;
+    }
+  }
+
+  const double acquisitionStartSec =
+      d->acquisitionTiming.delayedAcquisition
+      ? d->frameStartForInputSec(0)
+      : 0.0;
+
+  if (d->acquisitionTiming.delayedAcquisition)
+  {
+    d->logToPythonConsole(
+        tr("[SlicerDynamicPET timing] Tissue acquisition starts %1 s after injection. "
+           "A complete input function is available, so TCM propagation begins at injection; "
+           "late-only tissue sampling may reduce microparameter identifiability.")
+            .arg(acquisitionStartSec, 0, 'g', 8));
   }
 
   const size_t requestedTCMEndCount =
@@ -19061,7 +20162,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -19092,7 +20194,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TdCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -19123,7 +20226,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TiCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -19154,7 +20258,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TidCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -19185,7 +20290,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -19216,7 +20322,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TdCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -19247,7 +20354,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TiCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -19278,7 +20386,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                            ? nullptr : &ifResult.parentFractionTimesSec,
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
-                       ifResult.plasmaIsParent
+                       ifResult.plasmaIsParent,
+                       acquisitionStartSec
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TidCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -19364,7 +20473,8 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                 : &ifResult.nativeWholeBloodTimesSec,
             ifResult.nativeWholeBloodValues.empty()
                 ? nullptr
-                : &ifResult.nativeWholeBloodValues);
+                : &ifResult.nativeWholeBloodValues,
+            acquisitionStartSec);
       }
       else
       {
@@ -19639,6 +20749,47 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       return;
   }
 
+  if (!ifResult.inputCoversFromInjection)
+  {
+      QMessageBox::warning(
+          this,
+          tr("TCM input support"),
+          tr("Voxelwise compartment modeling requires an input function that covers injection onward. "
+             "Provide a full external input function or a PBIF that reconstructs the missing early input."));
+      return;
+  }
+
+  if (d->acquisitionTiming.delayedAcquisition)
+  {
+    const QMessageBox::StandardButton choice = QMessageBox::warning(
+        this,
+        tr("Delayed tissue acquisition"),
+        tr("This PET acquisition starts after injection, so the early tissue kinetics were not observed.\n\n"
+           "A complete input function allows voxelwise compartment propagation from injection, but the missing early "
+           "tissue response can make individual kinetic rate constants weakly identifiable or unstable.\n\n"
+           "Continue with voxelwise TCM fitting?"),
+        QMessageBox::Yes | QMessageBox::Cancel,
+        QMessageBox::Cancel);
+    if (choice != QMessageBox::Yes)
+    {
+      return;
+    }
+  }
+
+  const double acquisitionStartSec =
+      d->acquisitionTiming.delayedAcquisition
+      ? d->frameStartForInputSec(0)
+      : 0.0;
+
+  if (d->acquisitionTiming.delayedAcquisition)
+  {
+    d->logToPythonConsole(
+        tr("[SlicerDynamicPET timing] Tissue acquisition starts %1 s after injection. "
+           "A complete input function is available, so TCM propagation begins at injection; "
+           "late-only tissue sampling may reduce microparameter identifiability.")
+            .arg(acquisitionStartSec, 0, 'g', 8));
+  }
+
   const size_t requestedTCMEndCount =
       std::clamp<size_t>(
           static_cast<size_t>(d->TCMEndSliderImg->value()),
@@ -19771,6 +20922,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
         // Common TCM settings
         appendDouble(key, dk);
         appendDouble(key, timestep);
+        appendDouble(key, acquisitionStartSec);
         key += "|fitFrameCount=" + QString::number(fitFrameCount);
 
         key += "|" + QString::number(maxiter);
@@ -19951,7 +21103,8 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
         ? nullptr : &ifResult.parentFractionTimesSec,
     ifResult.parentFractionValues.empty()
         ? nullptr : &ifResult.parentFractionValues,
-    ifResult.plasmaIsParent
+    ifResult.plasmaIsParent,
+    acquisitionStartSec
   );
   this->ProgressBar->setMinimum(0);
   this->ProgressBar->setMaximum(100);
@@ -20171,26 +21324,18 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     tac[segmentName].reserve(Nframe);
 
     std::vector<double> segmentSigmas;
-
+    double fallbackSigma = std::numeric_limits<double>::quiet_NaN();
     if (d->weightedFitCheckBox->isChecked())
     {
       segmentSigmas.reserve(statsVec.size());
-
       for (size_t i = 0; i < statsVec.size(); ++i)
       {
         segmentSigmas.push_back(
             d->tissueSigmaForWeighting(
-                segmentName,
-                i,
-                currentSelectedStatID,
-                statsVec[i]));
+                segmentName, i, currentSelectedStatID, statsVec[i]));
       }
+      fallbackSigma = medianValidSigma(segmentSigmas);
     }
-
-    const double fallbackSigma =
-        d->weightedFitCheckBox->isChecked()
-        ? medianValidSigma(segmentSigmas)
-        : std::numeric_limits<double>::quiet_NaN();
 
     for (int ivs=0; ivs<statsVec.size(); ++ivs)
     {
@@ -20200,9 +21345,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.mean;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -20211,9 +21355,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.median;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -20222,9 +21365,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.peak;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -20233,9 +21375,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         value = vs.max;
         if (d->weightedFitCheckBox->isChecked()) {
           wgtVec[segmentName].push_back(
-            inverseVarianceWeightFromSigma(
-                segmentSigmas[static_cast<size_t>(ivs)],
-                fallbackSigma));
+              inverseVarianceWeightFromSigma(
+                  segmentSigmas[static_cast<size_t>(ivs)], fallbackSigma));
         } else {
           wgtVec[segmentName].push_back(1.);
         }
@@ -20258,20 +21399,12 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     }
   }
 
-  // const double timeOffset =  d->timeOffsetEdit->text().toDouble();
   const double framingNorm = d->framingNormEdit->text().toDouble();
-  const size_t startFrameIndex =
-      static_cast<size_t>(d->timeOffsetSlider->value() - 1);
-  const double timeOffset =
-      (this->timePoints[startFrameIndex]
-       - 0.5 * this->durations[startFrameIndex])
-      / framingNorm;
   const bool robust = d->robustFitCheckBox->isChecked();
   const bool std = d->standardizationCheckBox->isChecked();
   const double huber_tune = d->huberTuneEdit->text().toDouble();
   const double tol = d->tolEdit->text().toDouble();
   const int max_iter = d->maxIterEdit->text().toInt();
-
 
   InputFunctionResult ifResult;
   QString inputFunctionError;
@@ -20286,6 +21419,47 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         tr("Input Function"),
         inputFunctionError);
     return;
+  }
+
+  const size_t startFrameIndex =
+      static_cast<size_t>(d->timeOffsetSlider->value() - 1);
+  const size_t firstUsableIndex =
+      std::min(ifResult.supportFrameStartIndex, static_cast<size_t>(Nframe));
+
+  // MTGA kernels work on elapsed acquisition time, not the absolute
+  // post-injection clock used for display. The selected frame defines the
+  // start of the regression (and, for Relative RE, the integral origin).
+  double timeOffset = 0.0;
+  for (size_t i = 0; i < startFrameIndex && i < durations.size(); ++i)
+  {
+      timeOffset += durations[i] / framingNorm;
+  }
+  if (startFrameIndex < durations.size())
+  {
+      timeOffset += 0.5 * durations[startFrameIndex] / framingNorm;
+  }
+
+  double initialPlasmaIntegralNormalized = 0.0;
+  const bool standardPatlakSelected =
+      std::find(this->modelsMTGAID.begin(), this->modelsMTGAID.end(), "Patlak")
+      != this->modelsMTGAID.end();
+  if (standardPatlakSelected &&
+      d->acquisitionTiming.delayedAcquisition &&
+      ifResult.inputCoversFromInjection)
+  {
+      const double acquisitionStartSec = d->frameStartForInputSec(0);
+      const double integralSec =
+          d->initialModelPlasmaIntegralSec(ifResult, acquisitionStartSec);
+      if (!std::isfinite(integralSec))
+      {
+          QMessageBox::warning(
+              this,
+              tr("Patlak input support"),
+              tr("The complete pre-scan model plasma integral could not be reconstructed. "
+                 "Standard Patlak is unavailable for this delayed acquisition."));
+          return;
+      }
+      initialPlasmaIntegralNormalized = integralSec / framingNorm;
   }
 
   const size_t requestedMTGAEndCount =
@@ -20326,10 +21500,17 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         }
 
         const auto& stats = statsIt->second;
+        const size_t supportStart =
+            std::min(firstUsableIndex, values.size());
+        if (supportStart >= values.size())
+        {
+          return false;
+        }
+
         const bool hasRemoved =
             std::any_of(
-                stats.begin(),
-                stats.begin() + values.size(),
+                stats.begin() + static_cast<std::ptrdiff_t>(supportStart),
+                stats.begin() + static_cast<std::ptrdiff_t>(values.size()),
                 [](const VoxelStatistics& vs)
                 {
                   return !vs.keep;
@@ -20340,12 +21521,12 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
           return true;
         }
 
-        if (values.size() < 2 || !stats.front().keep)
+        if (values.size() - supportStart < 2 || !stats[supportStart].keep)
         {
           QMessageBox::warning(
               this,
               tr("MTGA point exclusion"),
-              tr("The first tissue TAC observation must remain available. "
+              tr("The first tissue observation inside the usable IF/tissue interval must remain available. "
                  "A removed terminal observation is handled as a shorter acquisition."));
           return false;
         }
@@ -20353,7 +21534,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         std::vector<double> retainedTimes;
         std::vector<double> retainedValues;
 
-        for (size_t i = 0; i < values.size(); ++i)
+        for (size_t i = supportStart; i < values.size(); ++i)
         {
           if (!stats[i].keep)
           {
@@ -20374,7 +21555,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
           return false;
         }
 
-        for (size_t i = 0; i < values.size(); ++i)
+        for (size_t i = supportStart; i < values.size(); ++i)
         {
           if (stats[i].keep)
           {
@@ -20420,6 +21601,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         std::min(maximumFitCount, tissueSupportCount);
 
     if (fitFrameCount < 2 ||
+        startFrameIndex < firstUsableIndex ||
         startFrameIndex >= fitFrameCount ||
         fitFrameCount - startFrameIndex < 2)
     {
@@ -20466,8 +21648,24 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                       std,
                       huber_tune,
                       tol,
-                      max_iter
+                      max_iter,
+                      initialPlasmaIntegralNormalized
                       );
+      }
+      else if (modelID == "Relative Patlak") {
+        logic->RelativePatlak(tac_flatten,
+                              cpFit,
+                              framingFit,
+                              this->segmentMTGA[segmentID]["Relative Patlak"],
+                              wgt,
+                              timeOffset,
+                              framingNorm,
+                              robust,
+                              std,
+                              huber_tune,
+                              tol,
+                              max_iter,
+                              firstUsableIndex);
       }
       else if (modelID == "Logan") {
         logic->Logan(tac_flatten,
@@ -20498,6 +21696,21 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                   tol,
                   max_iter
                  );
+      }
+      else if (modelID == "Relative RE") {
+        logic->RelativeRE(tac_flatten,
+                          cpFit,
+                          framingFit,
+                          this->segmentMTGA[segmentID]["Relative RE"],
+                          wgt,
+                          timeOffset,
+                          framingNorm,
+                          robust,
+                          std,
+                          huber_tune,
+                          tol,
+                          max_iter,
+                          firstUsableIndex);
       } else {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;
@@ -20665,10 +21878,13 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   const size_t fitFrameCount =
       std::min(requestedMTGAEndCount, ifSupportCount);
 
+  const size_t firstUsableIndex =
+      std::min(ifResult.supportFrameStartIndex, static_cast<size_t>(Nframe));
   const size_t startFrameIndex =
       static_cast<size_t>(d->timeOffsetSliderImg->value() - 1);
 
   if (fitFrameCount < 2 ||
+      startFrameIndex < firstUsableIndex ||
       startFrameIndex >= fitFrameCount ||
       fitFrameCount - startFrameIndex < 2)
   {
@@ -20705,10 +21921,39 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   const std::vector<double>* wgt =
       &inputWeights;
   const double framingNorm = d->framingNormEditImg->text().toDouble();
-  const double timeOffset =
-      (this->timePoints[startFrameIndex]
-       - 0.5 * this->durations[startFrameIndex])
-      / framingNorm;
+  double timeOffset = 0.0;
+  for (size_t i = 0; i < startFrameIndex && i < durations.size(); ++i)
+  {
+      timeOffset += durations[i] / framingNorm;
+  }
+  if (startFrameIndex < durations.size())
+  {
+      timeOffset += 0.5 * durations[startFrameIndex] / framingNorm;
+  }
+
+  double initialPlasmaIntegralNormalized = 0.0;
+  const bool standardPatlakSelected =
+      std::find(this->modelsMTGAImgID.begin(), this->modelsMTGAImgID.end(), "Patlak")
+      != this->modelsMTGAImgID.end();
+  if (standardPatlakSelected &&
+      d->acquisitionTiming.delayedAcquisition &&
+      ifResult.inputCoversFromInjection)
+  {
+      const double acquisitionStartSec = d->frameStartForInputSec(0);
+      const double integralSec =
+          d->initialModelPlasmaIntegralSec(ifResult, acquisitionStartSec);
+      if (!std::isfinite(integralSec))
+      {
+          QMessageBox::warning(
+              this,
+              tr("Patlak input support"),
+              tr("The complete pre-scan model plasma integral could not be reconstructed. "
+                 "Standard Patlak is unavailable for this delayed acquisition."));
+          return;
+      }
+      initialPlasmaIntegralNormalized = integralSec / framingNorm;
+  }
+
   const bool robust = d->robustFitCheckBoxImg->isChecked();
   const bool std = false;  // MTGA parametric imaging intentionally uses physical graphical variables.
   const double huber_tune = d->huberTuneEditImg->text().toDouble();
@@ -20767,6 +22012,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 
         appendDouble(key, framingNorm);
         appendDouble(key, timeOffset);
+        appendDouble(key, initialPlasmaIntegralNormalized);
+        key += "|dataStartIndex=" + QString::number(static_cast<qulonglong>(firstUsableIndex));
         key += "|fitFrameCount=" + QString::number(fitFrameCount);
 
         if (robust)
@@ -20879,7 +22126,9 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           tol,
           max_iter,
           this->stopRequested,
-          numThreads);
+          numThreads,
+          initialPlasmaIntegralNormalized,
+          firstUsableIndex);
 
   QObject::connect(
       worker,
@@ -21048,148 +22297,124 @@ void qSlicerDynamicPETModuleWidget::onModelsAllbutton()
   Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContents->blockSignals(true);
-  std :: vector < std :: string > previouslySelectedModels;
+  int enabledCount = 0;
+  int enabledCheckedCount = 0;
   for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
   {
-    QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
-    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
-    {
-      previouslySelectedModels.push_back(checkbox->text().toStdString());
-    }
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayout->itemAt(i)->widget());
+    if (!checkbox || !checkbox->isEnabled()) continue;
+    ++enabledCount;
+    if (checkbox->isChecked()) ++enabledCheckedCount;
   }
 
-  if (previouslySelectedModels.size()==(d->ModelsCheckLayout->count())) {
-    this->modelsID.clear();
-    for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
+  const bool clearEnabled = enabledCount > 0 && enabledCheckedCount == enabledCount;
+  this->modelsID.clear();
+  for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
+  {
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayout->itemAt(i)->widget());
+    if (!checkbox) continue;
+    checkbox->blockSignals(true);
+    if (checkbox->isEnabled())
     {
-      QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
+      checkbox->setChecked(!clearEnabled);
+      if (!clearEnabled)
       {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(false);
-        checkbox->blockSignals(false);
-      }
-    }
-  } else {
-    this->modelsID.clear();
-    for (int i = 0; i < d->ModelsCheckLayout->count(); ++i)
-    {
-      QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
-      {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(true);
-        checkbox->blockSignals(false);
         this->modelsID.push_back(checkbox->text().toStdString());
       }
     }
+    else
+    {
+      checkbox->setChecked(false);
+    }
+    checkbox->blockSignals(false);
   }
   d->ModelsCheckContents->blockSignals(false);
   d->updateLiverParameterUI();
   this->enableFITbutton();
-
 }
+
 
 void qSlicerDynamicPETModuleWidget::onModelsMTGAAllbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsMTGACheckContents->blockSignals(true);
-  std :: vector < std :: string > previouslySelectedModels;
+  int enabledCount = 0;
+  int enabledCheckedCount = 0;
   for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
   {
-    QLayoutItem* item = d->ModelsMTGACheckLayout->itemAt(i);
-    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
-    {
-      previouslySelectedModels.push_back(checkbox->text().toStdString());
-    }
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsMTGACheckLayout->itemAt(i)->widget());
+    if (!checkbox || !checkbox->isEnabled()) continue;
+    ++enabledCount;
+    if (checkbox->isChecked()) ++enabledCheckedCount;
   }
 
-  if (previouslySelectedModels.size()==(d->ModelsMTGACheckLayout->count())) {
-    this->modelsMTGAID.clear();
-    for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
+  const bool clearEnabled = enabledCount > 0 && enabledCheckedCount == enabledCount;
+  this->modelsMTGAID.clear();
+  for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
+  {
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsMTGACheckLayout->itemAt(i)->widget());
+    if (!checkbox) continue;
+    checkbox->blockSignals(true);
+    if (checkbox->isEnabled())
     {
-      QLayoutItem* item = d->ModelsMTGACheckLayout->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
+      checkbox->setChecked(!clearEnabled);
+      if (!clearEnabled)
       {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(false);
-        checkbox->blockSignals(false);
-      }
-    }
-  } else {
-    this->modelsMTGAID.clear();
-    for (int i = 0; i < d->ModelsMTGACheckLayout->count(); ++i)
-    {
-      QLayoutItem* item = d->ModelsMTGACheckLayout->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
-      {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(true);
-        checkbox->blockSignals(false);
         this->modelsMTGAID.push_back(checkbox->text().toStdString());
       }
     }
+    else
+    {
+      checkbox->setChecked(false);
+    }
+    checkbox->blockSignals(false);
   }
   d->ModelsMTGACheckContents->blockSignals(false);
   this->enableFITMTGAbutton();
-
 }
+
 
 void qSlicerDynamicPETModuleWidget::onModelsSelectAllMTGAImgbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContentsMTGAImg->blockSignals(true);
-  std :: vector < std :: string > previouslySelectedModels;
+  int enabledCount = 0;
+  int enabledCheckedCount = 0;
   for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
   {
-    QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
-    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
-    {
-      previouslySelectedModels.push_back(checkbox->text().toStdString());
-    }
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayoutMTGAImg->itemAt(i)->widget());
+    if (!checkbox || !checkbox->isEnabled()) continue;
+    ++enabledCount;
+    if (checkbox->isChecked()) ++enabledCheckedCount;
   }
 
-  if (previouslySelectedModels.size()==(d->ModelsCheckLayoutMTGAImg->count())) {
-    this->modelsMTGAImgID.clear();
-    for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+  const bool clearEnabled = enabledCount > 0 && enabledCheckedCount == enabledCount;
+  this->modelsMTGAImgID.clear();
+  for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
+  {
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayoutMTGAImg->itemAt(i)->widget());
+    if (!checkbox) continue;
+    checkbox->blockSignals(true);
+    if (checkbox->isEnabled())
     {
-      QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
+      checkbox->setChecked(!clearEnabled);
+      if (!clearEnabled)
       {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(false);
-        checkbox->blockSignals(false);
-      }
-    }
-  } else {
-    this->modelsMTGAImgID.clear();
-    for (int i = 0; i < d->ModelsCheckLayoutMTGAImg->count(); ++i)
-    {
-      QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
-      {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(true);
-        checkbox->blockSignals(false);
         this->modelsMTGAImgID.push_back(checkbox->text().toStdString());
       }
     }
+    else
+    {
+      checkbox->setChecked(false);
+    }
+    checkbox->blockSignals(false);
   }
   d->ModelsCheckContentsMTGAImg->blockSignals(false);
   this->enableFITMTGAImgbutton();
-
 }
+
 
 void qSlicerDynamicPETModuleWidget::onModelsChanged()
 {
@@ -21200,7 +22425,7 @@ void qSlicerDynamicPETModuleWidget::onModelsChanged()
   {
     QLayoutItem* item = d->ModelsCheckLayout->itemAt(i);
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
+    if (checkbox && checkbox->isEnabled() && checkbox->isChecked())
     {
       this->modelsID.push_back(checkbox->text().toStdString());
     }
@@ -21219,7 +22444,7 @@ void qSlicerDynamicPETModuleWidget::onModelsTCMImgChanged()
   {
     QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
+    if (checkbox && checkbox->isEnabled() && checkbox->isChecked())
     {
       this->modelsTCMImgID.push_back(checkbox->text().toStdString());
     }
@@ -21237,7 +22462,7 @@ void qSlicerDynamicPETModuleWidget::onModelsMTGAChanged()
   {
     QLayoutItem* item = d->ModelsMTGACheckLayout->itemAt(i);
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
+    if (checkbox && checkbox->isEnabled() && checkbox->isChecked())
     {
       this->modelsMTGAID.push_back(checkbox->text().toStdString());
     }
@@ -21255,7 +22480,7 @@ void qSlicerDynamicPETModuleWidget::onModelsMTGAImgChanged()
   {
     QLayoutItem* item = d->ModelsCheckLayoutMTGAImg->itemAt(i);
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
+    if (checkbox && checkbox->isEnabled() && checkbox->isChecked())
     {
       this->modelsMTGAImgID.push_back(checkbox->text().toStdString());
     }
@@ -21313,48 +22538,39 @@ void qSlicerDynamicPETModuleWidget::onModelsSelectAllTCMImgbutton()
   Q_D(qSlicerDynamicPETModuleWidget);
 
   d->ModelsCheckContentsTCMImg->blockSignals(true);
-  std :: vector < std :: string > previouslySelectedModels;
+  int enabledCount = 0;
+  int enabledCheckedCount = 0;
   for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
   {
-    QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
-    QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-    if (checkbox && checkbox->isChecked())
-    {
-      previouslySelectedModels.push_back(checkbox->text().toStdString());
-    }
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayoutTCMImg->itemAt(i)->widget());
+    if (!checkbox || !checkbox->isEnabled()) continue;
+    ++enabledCount;
+    if (checkbox->isChecked()) ++enabledCheckedCount;
   }
 
-  if (previouslySelectedModels.size()==(d->ModelsCheckLayoutTCMImg->count())) {
-    this->modelsTCMImgID.clear();
-    for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+  const bool clearEnabled = enabledCount > 0 && enabledCheckedCount == enabledCount;
+  this->modelsTCMImgID.clear();
+  for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
+  {
+    QCheckBox* checkbox = qobject_cast<QCheckBox*>(d->ModelsCheckLayoutTCMImg->itemAt(i)->widget());
+    if (!checkbox) continue;
+    checkbox->blockSignals(true);
+    if (checkbox->isEnabled())
     {
-      QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
+      checkbox->setChecked(!clearEnabled);
+      if (!clearEnabled)
       {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(false);
-        checkbox->blockSignals(false);
-      }
-    }
-  } else {
-    this->modelsTCMImgID.clear();
-    for (int i = 0; i < d->ModelsCheckLayoutTCMImg->count(); ++i)
-    {
-      QLayoutItem* item = d->ModelsCheckLayoutTCMImg->itemAt(i);
-      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
-      if (checkbox)
-      {
-        checkbox->blockSignals(true);
-        checkbox->setChecked(true);
-        checkbox->blockSignals(false);
         this->modelsTCMImgID.push_back(checkbox->text().toStdString());
       }
     }
+    else
+    {
+      checkbox->setChecked(false);
+    }
+    checkbox->blockSignals(false);
   }
   d->ModelsCheckContentsTCMImg->blockSignals(false);
   this->enableFITTCMImgbutton();
-
 }
 
 

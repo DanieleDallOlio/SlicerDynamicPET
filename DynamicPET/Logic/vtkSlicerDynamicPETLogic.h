@@ -267,7 +267,8 @@ public:
      const std::vector<double>* nativeWholeBloodValues = nullptr,
      const std::vector<double>* parentFractionTimesSec = nullptr,
      const std::vector<double>* parentFractionValues = nullptr,
-     bool plasmaIsParent = false);
+     bool plasmaIsParent = false,
+     double acquisitionStartSec = 0.0);
 
   // ROI-only optimization-derived liver dual-blood-input model.
   // The supplied arterial input is total whole blood. The model internally
@@ -289,7 +290,8 @@ public:
      const std::vector<double>* wgt,
      const std::string& interpolationType = "linear",
      const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
-     const std::vector<double>* nativeWholeBloodValues = nullptr);
+     const std::vector<double>* nativeWholeBloodValues = nullptr,
+     double acquisitionStartSec = 0.0);
 
   // void getFittedTCM(double *& fitted_curve,
   //                   std :: vector< std :: vector<double> > Cp,
@@ -353,7 +355,23 @@ public:
        bool std = true,
        double huber_tune = 1.345,
        double tol = 1e-6,
-       int max_iter = 50
+       int max_iter = 50,
+       double initialPlasmaIntegral = 0.0
+       );
+  void RelativePatlak(
+       const std::vector<double>& tac,
+       const std::vector<double>& Cp,
+       const std::vector<double>& framing,
+       MTGAParameters & params,
+       const std::vector<double>* wgt = nullptr,
+       const double timeOffset = 0.,
+       const double framingNorm = 60.,
+       bool robust = false,
+       bool std = true,
+       double huber_tune = 1.345,
+       double tol = 1e-6,
+       int max_iter = 50,
+       size_t dataStartIndex = 0
        );
   void Logan(
        const std::vector<double>& tac,
@@ -382,6 +400,21 @@ public:
        double huber_tune = 1.345,
        double tol = 1e-6,
        int max_iter = 50
+       );
+  void RelativeRE(
+       const std::vector<double>& tac,
+       const std::vector<double>& Cp,
+       const std::vector<double>& framing,
+       MTGAParameters & params,
+       const std::vector<double>* wgt = nullptr,
+       const double timeOffset = 0.,
+       const double framingNorm = 60.,
+       bool robust = false,
+       bool std = true,
+       double huber_tune = 1.345,
+       double tol = 1e-6,
+       int max_iter = 50,
+       size_t dataStartIndex = 0
        );
   void Image2Flatten(
        vtkIdType petID,
@@ -446,7 +479,27 @@ public:
       const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       int numThreads,
-      std::function<void(int)> progressCallback);
+      std::function<void(int)> progressCallback,
+      double initialPlasmaIntegral = 0.0,
+      size_t dataStartIndex = 0);
+  void RelativePatlak4Img(
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<double>* wgt_global,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huber_tune,
+      double tol,
+      int max_iter,
+      std::vector<MTGAParameters>& outputParams,
+      const std::vector<int>& fitVoxelIndices,
+      std::atomic<bool>& stopRequested,
+      int numThreads,
+      std::function<void(int)> progressCallback,
+      size_t dataStartIndex = 0);
   void Logan4Img(
       const std::vector<std::vector<double>>& voxels,
       const std::vector<double>& Cp,
@@ -480,7 +533,26 @@ public:
       const std::vector<int>& fitVoxelIndices,
       std::atomic<bool>& stopRequested,
       int numThreads,
-      std::function<void(int)> progressCallback);
+      std::function<void(int)> progressCallback,
+      size_t integralStartIndex = 0);
+  void RelativeRE4Img(
+      const std::vector<std::vector<double>>& voxels,
+      const std::vector<double>& Cp,
+      const std::vector<double>& framing,
+      const std::vector<double>* wgt_global,
+      double timeOffset,
+      double framingNorm,
+      bool robust,
+      bool standardize,
+      double huber_tune,
+      double tol,
+      int max_iter,
+      std::vector<MTGAParameters>& outputParams,
+      const std::vector<int>& fitVoxelIndices,
+      std::atomic<bool>& stopRequested,
+      int numThreads,
+      std::function<void(int)> progressCallback,
+      size_t dataStartIndex = 0);
   std::vector<double> ExtractParameter(
       const std::vector<MTGAParameters>& outputParams,
       const std::string& field);
@@ -521,7 +593,8 @@ public:
       const std::vector<double>* nativeWholeBloodValues = nullptr,
       const std::vector<double>* parentFractionTimesSec = nullptr,
       const std::vector<double>* parentFractionValues = nullptr,
-      bool plasmaIsParent = false
+      bool plasmaIsParent = false,
+      double acquisitionStartSec = 0.0
       );
   std::vector<double> ExtractParameter(
       const std::vector<TCMParameters>& outputParams,

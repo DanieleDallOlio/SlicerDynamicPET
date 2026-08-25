@@ -28,7 +28,9 @@ public:
       double tol,
       int maxIter,
       std::atomic<bool>& stopRequested,
-      int numThreads)
+      int numThreads,
+      double initialPlasmaIntegral = 0.0,
+      size_t dataStartIndex = 0)
     : logic(logic)
     , voxels(voxels)
     , Cp(Cp)
@@ -44,6 +46,8 @@ public:
     , maxIter(maxIter)
     , stopRequested(stopRequested)
     , numThreads(numThreads)
+    , initialPlasmaIntegral(initialPlasmaIntegral)
+    , dataStartIndex(dataStartIndex)
   {
     if (wgtGlobal)
     {
@@ -108,7 +112,30 @@ protected:
             this->fitVoxelIndices,
             this->stopRequested,
             this->numThreads,
-            progressCallback);
+            progressCallback,
+            this->initialPlasmaIntegral,
+            0);
+      }
+      else if (modelID == "Relative Patlak")
+      {
+        this->logic->RelativePatlak4Img(
+            this->voxels,
+            this->Cp,
+            this->framing,
+            wgt,
+            this->timeOffset,
+            this->framingNorm,
+            this->robust,
+            this->standardize,
+            this->huberTune,
+            this->tol,
+            this->maxIter,
+            localOutput,
+            this->fitVoxelIndices,
+            this->stopRequested,
+            this->numThreads,
+            progressCallback,
+            this->dataStartIndex);
       }
       else if (modelID == "Logan")
       {
@@ -149,6 +176,27 @@ protected:
             this->stopRequested,
             this->numThreads,
             progressCallback);
+      }
+      else if (modelID == "Relative RE")
+      {
+        this->logic->RelativeRE4Img(
+            this->voxels,
+            this->Cp,
+            this->framing,
+            wgt,
+            this->timeOffset,
+            this->framingNorm,
+            this->robust,
+            this->standardize,
+            this->huberTune,
+            this->tol,
+            this->maxIter,
+            localOutput,
+            this->fitVoxelIndices,
+            this->stopRequested,
+            this->numThreads,
+            progressCallback,
+            this->dataStartIndex);
       }
       else
       {
@@ -199,6 +247,8 @@ private:
   double huberTune{1.345};
   double tol{1e-8};
   int maxIter{100};
+  double initialPlasmaIntegral{0.0};
+  size_t dataStartIndex{0};
 
   std::atomic<bool>& stopRequested;
   int numThreads{1};
@@ -234,7 +284,8 @@ public:
               const std::vector<double>* nativeWholeBloodValues = nullptr,
               const std::vector<double>* parentFractionTimesSec = nullptr,
               const std::vector<double>* parentFractionValues = nullptr,
-              bool plasmaIsParent = false)
+              bool plasmaIsParent = false,
+              double acquisitionStartSec = 0.0)
         : logic(logic),
           voxels(voxels),
           Cp(Cp),
@@ -248,7 +299,8 @@ public:
           stopRequested(stopRequested),
           numThreads(numThreads),
           interpolationType(interpolationType),
-          plasmaIsParent(plasmaIsParent)
+          plasmaIsParent(plasmaIsParent),
+          acquisitionStartSec(acquisitionStartSec)
     {
       if (wgt_global) wgt_copy = *wgt_global;
       // copy init/lb/ub arrays
@@ -324,6 +376,7 @@ protected:
     bool hasNativeWholeBlood{false};
     bool hasParentFraction{false};
     bool plasmaIsParent{false};
+    double acquisitionStartSec{0.0};
     void run() override
     {
         for (size_t i = 0; i < modelIDs.size(); ++i) {
@@ -387,7 +440,8 @@ protected:
               this->hasParentFraction
                   ? &this->parentFractionValues
                   : nullptr,
-              this->plasmaIsParent);
+              this->plasmaIsParent,
+              this->acquisitionStartSec);
             if (stopRequested) {
                 emit canceled(QString::fromStdString(modelID));
                 break;

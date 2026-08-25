@@ -2751,7 +2751,8 @@ void vtkSlicerDynamicPETLogic::callTCM(
     const std::vector<double>* nativeWholeBloodValues,
     const std::vector<double>* parentFractionTimesSec,
     const std::vector<double>* parentFractionValues,
-    bool plasmaIsParent)
+    bool plasmaIsParent,
+    double acquisitionStartSec)
 {
   const int nth = 1;
 
@@ -2804,14 +2805,16 @@ void vtkSlicerDynamicPETLogic::callTCM(
   {
       scant[i] = new double[2];
       scant[i][0] =
-          (i == 0)
-          ? 0.0
-          : cumsum[i - 1];
-      scant[i][1] = cumsum[i];
+          acquisitionStartSec +
+          ((i == 0)
+           ? 0.0
+           : cumsum[i - 1]);
+      scant[i][1] =
+          acquisitionStartSec + cumsum[i];
   }
 
   const double scanEndSec =
-      cumsum[Nframe - 1];
+      acquisitionStartSec + cumsum[Nframe - 1];
 
   long int N_cp = 0;
   long int N_wb = 0;
@@ -3091,7 +3094,8 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
     const std::vector<double>* wgt,
     const std::string& interpolationType,
     const std::vector<double>* nativeWholeBloodTimesSec,
-    const std::vector<double>* nativeWholeBloodValues)
+    const std::vector<double>* nativeWholeBloodValues,
+    double acquisitionStartSec)
 {
     constexpr double EPS = 1e-16;
     constexpr int numberOfParameters = 8;
@@ -3172,16 +3176,18 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
         scant[i] = new double[2];
 
         scant[i][0] =
-            (i == 0)
-            ? 0.0
-            : cumulative[static_cast<size_t>(i - 1)];
+            acquisitionStartSec +
+            ((i == 0)
+             ? 0.0
+             : cumulative[static_cast<size_t>(i - 1)]);
 
         scant[i][1] =
+            acquisitionStartSec +
             cumulative[static_cast<size_t>(i)];
     }
 
     const double scanEndSec =
-        cumulative.back();
+        acquisitionStartSec + cumulative.back();
 
     long int numberOfFineSamples = 0;
     double* arterialInputFine = nullptr;
@@ -3900,7 +3906,8 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
                                 bool std,
                                 double huber_tune,
                                 double tol,
-                                int max_iter
+                                int max_iter,
+                                double initialPlasmaIntegral
                               )
 {
   size_t N = tac.size();
@@ -3918,7 +3925,7 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
   std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
   double elapsed = 0.0;
-  double accumulatedCp = 0.0;
+  double accumulatedCp = initialPlasmaIntegral;
   for (size_t i = 0; i < N; ++i)
   {
       timeAlong[i] = elapsed + 0.5 * frameScaled[i];
@@ -4115,6 +4122,82 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
       robust
       ? finalFitWeights
       : baseFitWeights;
+}
+
+void vtkSlicerDynamicPETLogic::RelativePatlak(
+    const std::vector<double>& tac,
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    MTGAParameters& params,
+    const std::vector<double>* wgt,
+    const double timeOffset,
+    const double framingNorm,
+    bool robust,
+    bool std,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    size_t dataStartIndex)
+{
+    const size_t N = tac.size();
+    if (Cp.size() != N || framing.size() != N || dataStartIndex >= N)
+    {
+        throw std::invalid_argument("Invalid Relative Patlak input dimensions.");
+    }
+
+    // Relative Patlak (Zuo, Qi & Wang, PMB 2018) restarts the plasma
+    // integral at t*.  Here t* is the selected MTGA start frame, constrained
+    // to be no earlier than the first jointly available tissue/input frame.
+    size_t relativeStartIndex = N;
+    double frameStart = 0.0;
+    for (size_t i = 0; i < N; ++i)
+    {
+        const double frameMid =
+            frameStart + 0.5 * framing[i] / framingNorm;
+        if (i >= dataStartIndex && frameMid + 1e-12 >= timeOffset)
+        {
+            relativeStartIndex = i;
+            break;
+        }
+        frameStart += framing[i] / framingNorm;
+    }
+
+    if (relativeStartIndex >= N || N - relativeStartIndex < 2)
+    {
+        throw std::invalid_argument(
+            "Relative Patlak requires at least two frames at or after the selected start time.");
+    }
+
+    std::vector<double> tacSub(
+        tac.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), tac.end());
+    std::vector<double> cpSub(
+        Cp.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), Cp.end());
+    std::vector<double> framingSub(
+        framing.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), framing.end());
+
+    std::vector<double> weightSub;
+    const std::vector<double>* weightPtr = nullptr;
+    if (wgt)
+    {
+        if (wgt->size() != N)
+        {
+            throw std::invalid_argument("Relative Patlak weight vector size mismatch.");
+        }
+        weightSub.assign(
+            wgt->begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), wgt->end());
+        weightPtr = &weightSub;
+    }
+
+    // After subsetting, t*=0 on the relative clock and the cumulative plasma
+    // integral in Patlak() therefore implements integral_{t*}^{t} Cp(tau)dtau.
+    this->Patlak(tacSub, cpSub, framingSub, params, weightPtr,
+                 0.0, framingNorm, robust, std,
+                 huber_tune, tol, max_iter, 0.0);
+
+    for (int& frame : params.frame)
+    {
+        frame += static_cast<int>(relativeStartIndex);
+    }
 }
 
 void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
@@ -5665,6 +5748,67 @@ CombineBodySupportMasks(
     return result;
 }
 
+void vtkSlicerDynamicPETLogic::RelativeRE(
+    const std::vector<double>& tac,
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    MTGAParameters& params,
+    const std::vector<double>* wgt,
+    const double timeOffset,
+    const double framingNorm,
+    bool robust,
+    bool std,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    size_t dataStartIndex)
+{
+    const size_t N = tac.size();
+    if (Cp.size() != N || framing.size() != N || dataStartIndex >= N)
+    {
+        throw std::invalid_argument("Invalid Relative RE input dimensions.");
+    }
+
+    size_t relativeStartIndex = N;
+    double frameStart = 0.0;
+    for (size_t i = 0; i < N; ++i)
+    {
+        const double frameMid = frameStart + 0.5 * framing[i] / framingNorm;
+        if (i >= dataStartIndex && frameMid + 1e-12 >= timeOffset)
+        {
+            relativeStartIndex = i;
+            break;
+        }
+        frameStart += framing[i] / framingNorm;
+    }
+    if (relativeStartIndex >= N || N - relativeStartIndex < 2)
+    {
+        throw std::invalid_argument("Relative RE requires at least two frames at or after the selected equilibrium start.");
+    }
+
+    std::vector<double> tacSub(tac.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), tac.end());
+    std::vector<double> cpSub(Cp.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), Cp.end());
+    std::vector<double> framingSub(framing.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), framing.end());
+    std::vector<double> weightSub;
+    const std::vector<double>* weightPtr = nullptr;
+    if (wgt)
+    {
+        if (wgt->size() != N)
+        {
+            throw std::invalid_argument("Relative RE weight vector size mismatch.");
+        }
+        weightSub.assign(wgt->begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), wgt->end());
+        weightPtr = &weightSub;
+    }
+
+    this->RE(tacSub, cpSub, framingSub, params, weightPtr, 0.0, framingNorm,
+             robust, std, huber_tune, tol, max_iter);
+    for (int& frame : params.frame)
+    {
+        frame += static_cast<int>(relativeStartIndex);
+    }
+}
+
 void vtkSlicerDynamicPETLogic::Image2Flatten(
     vtkIdType petID,
     std::vector<std::vector<double>>& flatten_voxels_values,
@@ -5922,7 +6066,9 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     const std::vector<int>& fitVoxelIndices,
     std::atomic<bool>& stopRequested,
     int numThreads,
-    std::function<void(int)> progressCallback)
+    std::function<void(int)> progressCallback,
+    double initialPlasmaIntegral,
+    size_t dataStartIndex)
 {
     #ifdef HAVE_OPENMP
     int max_hw_threads = omp_get_num_procs();
@@ -5934,7 +6080,7 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
 
     const double EPS = 1e-12;
     size_t N = Cp.size();
-    if (framing.size() != N) return;
+    if (framing.size() != N || dataStartIndex >= N) return;
     size_t nVoxels = voxels.size();
     if (nVoxels == 0) return;
 
@@ -5945,11 +6091,16 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     // PET observations are frame averages and are associated with frame
     // midpoints. Preserve prior full-frame areas, then add half of the
     // current frame to evaluate the cumulative integral at its midpoint.
+    if (dataStartIndex >= N) return;
     std::vector<double> timeAlong(N, 0.0);
-    std::vector<double> intCp(N, 0.0);
+    std::vector<double> intCp(N, std::numeric_limits<double>::quiet_NaN());
     double elapsed = 0.0;
-    double accumulatedCp = 0.0;
-    for (size_t i = 0; i < N; ++i)
+    for (size_t i = 0; i < dataStartIndex; ++i)
+    {
+        elapsed += frameScaled[i];
+    }
+    double accumulatedCp = initialPlasmaIntegral;
+    for (size_t i = dataStartIndex; i < N; ++i)
     {
         timeAlong[i] = elapsed + 0.5 * frameScaled[i];
         intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
@@ -5963,7 +6114,7 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
     // ---------- 2) Filter frames >= timeOffset ----------
     std::vector<double> X_all;
     std::vector<int> keepIndex;
-    for (size_t i = 0; i < N; ++i)
+    for (size_t i = dataStartIndex; i < N; ++i)
     {
         if (timeAlong[i] >= timeOffset &&
             (!wgt_global || (*wgt_global)[i] > 0.0))
@@ -6203,6 +6354,40 @@ void vtkSlicerDynamicPETLogic::Patlak4Img(
 
         }
     }
+}
+
+void vtkSlicerDynamicPETLogic::RelativePatlak4Img(
+    const std::vector<std::vector<double>>& voxels,
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    const std::vector<double>* wgt_global,
+    double timeOffset,
+    double framingNorm,
+    bool robust,
+    bool standardize,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    std::vector<MTGAParameters>& outputParams,
+    const std::vector<int>& fitVoxelIndices,
+    std::atomic<bool>& stopRequested,
+    int numThreads,
+    std::function<void(int)> progressCallback,
+    size_t dataStartIndex)
+{
+    if (Cp.empty() || framing.size() != Cp.size() || dataStartIndex >= Cp.size())
+    {
+        return;
+    }
+
+    // Relative Patlak restarts only the plasma integral at the first
+    // jointly available late-time frame. The regression itself may begin
+    // later according to the user-selected MTGA start.
+    this->Patlak4Img(
+        voxels, Cp, framing, wgt_global, timeOffset, framingNorm,
+        robust, standardize, huber_tune, tol, max_iter, outputParams,
+        fitVoxelIndices, stopRequested, numThreads, progressCallback,
+        0.0, dataStartIndex);
 }
 
 void vtkSlicerDynamicPETLogic::Logan4Img(
@@ -6490,7 +6675,8 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     const std::vector<int>& fitVoxelIndices,
     std::atomic<bool>& stopRequested,
     int numThreads,
-    std::function<void(int)> progressCallback)
+    std::function<void(int)> progressCallback,
+    size_t integralStartIndex)
 {
     #ifdef HAVE_OPENMP
     int max_hw_threads = omp_get_num_procs();
@@ -6502,7 +6688,7 @@ void vtkSlicerDynamicPETLogic::RE4Img(
 
     const double EPS = 1e-12;
     size_t N = Cp.size();
-    if (framing.size() != N) return;
+    if (framing.size() != N || integralStartIndex >= N) return;
     size_t nVoxels = voxels.size();
     if (nVoxels == 0) return;
 
@@ -6514,10 +6700,15 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     // midpoints. Preserve prior full-frame areas, then add half of the
     // current frame to evaluate the cumulative integral at its midpoint.
     std::vector<double> timeAlong(N, 0.0);
-    std::vector<double> intCp(N, 0.0);
+    std::vector<double> intCp(N, std::numeric_limits<double>::quiet_NaN());
     double elapsed = 0.0;
+    for (size_t i = 0; i < integralStartIndex; ++i)
+    {
+        timeAlong[i] = elapsed + 0.5 * frameScaled[i];
+        elapsed += frameScaled[i];
+    }
     double accumulatedCp = 0.0;
-    for (size_t i = 0; i < N; ++i)
+    for (size_t i = integralStartIndex; i < N; ++i)
     {
         timeAlong[i] = elapsed + 0.5 * frameScaled[i];
         intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
@@ -6531,7 +6722,7 @@ void vtkSlicerDynamicPETLogic::RE4Img(
     // ---------- 2) Determine frames >= timeOffset ----------
     std::vector<double> X_all;
     std::vector<int> keepIndex;
-    for (size_t i = 0; i < N; ++i)
+    for (size_t i = integralStartIndex; i < N; ++i)
     {
       if (timeAlong[i] >= timeOffset &&
           (!wgt_global || (*wgt_global)[i] > 0.0))
@@ -6609,9 +6800,9 @@ void vtkSlicerDynamicPETLogic::RE4Img(
             const std::vector<double>& tac = voxels[v];
 
             // ---------- Compute intCt (voxel-dependent) ----------
-            std::vector<double> intCt(N, 0.0);
+            std::vector<double> intCt(N, std::numeric_limits<double>::quiet_NaN());
             double accumulatedCt = 0.0;
-            for (size_t i = 0; i < N; ++i)
+            for (size_t i = integralStartIndex; i < N; ++i)
             {
                 intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
                 accumulatedCt += tac[i] * frameScaled[i];
@@ -6764,6 +6955,52 @@ void vtkSlicerDynamicPETLogic::RE4Img(
 }
 
 
+void vtkSlicerDynamicPETLogic::RelativeRE4Img(
+    const std::vector<std::vector<double>>& voxels,
+    const std::vector<double>& Cp,
+    const std::vector<double>& framing,
+    const std::vector<double>* wgt_global,
+    double timeOffset,
+    double framingNorm,
+    bool robust,
+    bool standardize,
+    double huber_tune,
+    double tol,
+    int max_iter,
+    std::vector<MTGAParameters>& outputParams,
+    const std::vector<int>& fitVoxelIndices,
+    std::atomic<bool>& stopRequested,
+    int numThreads,
+    std::function<void(int)> progressCallback,
+    size_t dataStartIndex)
+{
+    const size_t N = Cp.size();
+    if (N == 0 || framing.size() != N || dataStartIndex >= N) return;
+
+    size_t relativeStartIndex = N;
+    double frameStart = 0.0;
+    for (size_t i = 0; i < N; ++i)
+    {
+        const double frameMid = frameStart + 0.5 * framing[i] / framingNorm;
+        if (i >= dataStartIndex && frameMid + 1e-12 >= timeOffset)
+        {
+            relativeStartIndex = i;
+            break;
+        }
+        frameStart += framing[i] / framingNorm;
+    }
+    if (relativeStartIndex >= N || N - relativeStartIndex < 2) return;
+
+    // Relative RE is the published RE transform with both cumulative
+    // integrals restarted at the selected reversible-equilibrium frame.
+    // Reuse the same voxelwise kernel without copying the voxel matrix.
+    this->RE4Img(
+        voxels, Cp, framing, wgt_global, timeOffset, framingNorm,
+        robust, standardize, huber_tune, tol, max_iter, outputParams,
+        fitVoxelIndices, stopRequested, numThreads, progressCallback,
+        relativeStartIndex);
+}
+
 std::vector<double> vtkSlicerDynamicPETLogic::ExtractParameter(
     const std::vector<MTGAParameters>& outputParams,
     const std::string& field)
@@ -6773,8 +7010,8 @@ std::vector<double> vtkSlicerDynamicPETLogic::ExtractParameter(
 
   for (const auto& param : outputParams)
   {
-    if (field == "Ki") values.push_back(param.Ki);
-    else if (field == "DV") values.push_back(param.DV);
+    if (field == "Ki" || field == "KiPrime") values.push_back(param.Ki);
+    else if (field == "DV" || field == "DVPrime") values.push_back(param.DV);
     else if (field == "Intercept") values.push_back(param.Intercept);
     else if (field == "AIC") values.push_back(param.AIC);
     else if (field == "MASE") values.push_back(param.MASE);
@@ -6963,7 +7200,8 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     const std::vector<double>* nativeWholeBloodValues,
     const std::vector<double>* parentFractionTimesSec,
     const std::vector<double>* parentFractionValues,
-    bool plasmaIsParent
+    bool plasmaIsParent,
+    double acquisitionStartSec
     )
 {
     constexpr double EPS = 1e-16;
@@ -7017,8 +7255,8 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     for (int i = 0; i < Nframe; ++i)
     {
         scant[i] = new double[2];
-        scant[i][0] = (i == 0) ? 0.0 : cumsum[i - 1];
-        scant[i][1] = cumsum[i];
+        scant[i][0] = acquisitionStartSec + ((i == 0) ? 0.0 : cumsum[i - 1]);
+        scant[i][1] = acquisitionStartSec + cumsum[i];
     }
 
     // ---------- 4) Fine-sample plasma and whole blood independently ----------
@@ -7041,7 +7279,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             FineSampleExplicitInputFunction(
                 *nativePlasmaTimesSec,
                 *nativePlasmaValues,
-                cumsum.back(),
+                acquisitionStartSec + cumsum.back(),
                 timestep,
                 interpolationType,
                 N_cp);
@@ -7052,7 +7290,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         {
             std::vector<double> times, values;
             BuildFrameRepresentativeCurve(scant.data(), Cp, times, values);
-            Cp_new = FineSampleExplicitInputFunction(times, values, cumsum.back(), timestep, "pchip", N_cp);
+            Cp_new = FineSampleExplicitInputFunction(times, values, acquisitionStartSec + cumsum.back(), timestep, "pchip", N_cp);
         }
         else
         {
@@ -7073,7 +7311,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             FineSampleExplicitInputFunction(
                 *nativeWholeBloodTimesSec,
                 *nativeWholeBloodValues,
-                cumsum.back(),
+                acquisitionStartSec + cumsum.back(),
                 timestep,
                 interpolationType,
                 N_wb);
@@ -7084,7 +7322,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         {
             std::vector<double> times, values;
             BuildFrameRepresentativeCurve(scant.data(), Cwb, times, values);
-            cwb_new = FineSampleExplicitInputFunction(times, values, cumsum.back(), timestep, "pchip", N_wb);
+            cwb_new = FineSampleExplicitInputFunction(times, values, acquisitionStartSec + cumsum.back(), timestep, "pchip", N_wb);
         }
         else
         {
@@ -7117,7 +7355,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             FineSampleExplicitInputFunction(
                 *parentFractionTimesSec,
                 *parentFractionValues,
-                cumsum.back(),
+                acquisitionStartSec + cumsum.back(),
                 timestep,
                 "linear",
                 N_parent);

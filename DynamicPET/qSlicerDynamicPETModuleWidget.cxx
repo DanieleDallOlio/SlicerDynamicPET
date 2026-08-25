@@ -6260,105 +6260,107 @@ def DPE_export_parametric_map(
   // remains in the scripted dRTImporter/dRTExporter helpers; C++ only passes
   // MRML node IDs and displays the result.
   mainContext.evalScript(R"PYTHON(
+import importlib
+import importlib.util
+import os
 import traceback
 import slicer
 
-
-def DPE_adopt_dynamic_rtstruct(
-        segmentation_node_id,
-        pet_sequence_node_id,
-        pet_browser_node_id):
+def _DPE_load_dynamic_rt_module(module_name, file_name):
+    errors = []
     try:
-        from dRTImporterLib.dRTImporterPlugin import (
-            adopt_dynamic_rtstruct_to_pet
-        )
-
-        return adopt_dynamic_rtstruct_to_pet(
-            segmentation_node_id,
-            pet_sequence_node_id,
-            pet_browser_node_id
-        )
-
+        return importlib.import_module(module_name)
     except Exception as exc:
-        return {
-            'ok': False,
-            'error': str(exc) + '\n\n' + traceback.format_exc()
-        }
+        errors.append(str(exc))
 
+    candidates = []
 
-def DPE_export_dynamic_rtstruct(
-        segmentation_sequence_node_id,
-        pet_sequence_node_id,
-        reference_volume_node_id,
-        output_path,
-        overwrite=False):
+    # dRTExporter.py is installed next to dRTImporterPlugin.py.  Resolve the
+    # helper from that already-importable plugin first; this is more reliable
+    # than depending on the scripted module widget having been instantiated.
     try:
-        from dRTImporterLib.dRTExporter import (
-            export_dynamic_rtstruct_from_node_ids
-        )
+        importer_plugin = importlib.import_module('dRTImporterPlugin')
+        importer_plugin_path = getattr(importer_plugin, '__file__', '')
+        if importer_plugin_path:
+            candidates.append(
+                os.path.join(os.path.dirname(importer_plugin_path), file_name))
+    except Exception as exc:
+        errors.append(str(exc))
 
-        path = export_dynamic_rtstruct_from_node_ids(
+    # Fallback for installations where the scripted module is known to Slicer
+    # but its Python directory is not currently on sys.path.
+    try:
+        module_path = slicer.util.modulePath('dRTImporter')
+        if module_path:
+            candidates.append(os.path.join(os.path.dirname(module_path), file_name))
+    except Exception as exc:
+        errors.append(str(exc))
+
+    module_object = getattr(slicer.modules, 'drtimporter', None)
+    module_path = getattr(module_object, 'path', '') if module_object else ''
+    if module_path:
+        candidates.append(os.path.join(os.path.dirname(module_path), file_name))
+
+    seen = set()
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if not os.path.isfile(candidate):
+            continue
+        spec = importlib.util.spec_from_file_location(module_name, candidate)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    raise ImportError(
+        f"Could not locate {file_name}. Ensure it is installed beside "
+        "dRTImporterPlugin.py (add dRTExporter.py to MODULE_PYTHON_SCRIPTS "
+        "in dRTImporter/CMakeLists.txt, then rebuild/reinstall dRTImporter). "
+        + ("Previous import errors: " + " | ".join(errors) if errors else ""))
+
+def DPE_adopt_dynamic_rtstruct(segmentation_node_id, pet_sequence_node_id, pet_browser_node_id):
+    try:
+        module = _DPE_load_dynamic_rt_module('dRTImporterPlugin', 'dRTImporterPlugin.py')
+        return module.adopt_dynamic_rtstruct_to_pet(
+            segmentation_node_id, pet_sequence_node_id, pet_browser_node_id)
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc) + '\n\n' + traceback.format_exc()}
+
+def DPE_export_dynamic_rtstruct(segmentation_sequence_node_id, pet_sequence_node_id, reference_volume_node_id, output_path, overwrite=False):
+    try:
+        module = _DPE_load_dynamic_rt_module('dRTExporter', 'dRTExporter.py')
+        path = module.export_dynamic_rtstruct_from_node_ids(
             segmentation_sequence_node_id,
             pet_sequence_node_id,
             reference_volume_node_id,
             output_path,
             overwrite=bool(overwrite),
-            show_progress=True
-        )
-
-        return {
-            'ok': True,
-            'path': path
-        }
-
+            show_progress=True)
+        return {'ok': True, 'path': path}
     except Exception as exc:
-        return {
-            'ok': False,
-            'error': str(exc) + '\n\n' + traceback.format_exc()
-        }
+        return {'ok': False, 'error': str(exc) + '\n\n' + traceback.format_exc()}
 
-
-def DPE_open_segment_editor(
-        segmentation_node_id,
-        source_volume_node_id=''):
+def DPE_open_segment_editor(segmentation_node_id, source_volume_node_id=''):
     try:
-        segmentation_node = slicer.mrmlScene.GetNodeByID(
-            segmentation_node_id
-        )
+        segmentation_node = slicer.mrmlScene.GetNodeByID(segmentation_node_id)
         if segmentation_node is None:
-            raise ValueError(
-                'Selected segmentation node is no longer available.'
-            )
-
+            raise ValueError('Selected segmentation node is no longer available.')
         source_volume = (
             slicer.mrmlScene.GetNodeByID(source_volume_node_id)
-            if source_volume_node_id
-            else None
-        )
-
+            if source_volume_node_id else None)
         slicer.util.selectModule('SegmentEditor')
-
-        module_widget = (
-            slicer.modules.segmenteditor.widgetRepresentation()
-        )
+        module_widget = slicer.modules.segmenteditor.widgetRepresentation()
         if module_widget is None:
-            raise RuntimeError(
-                'Segment Editor module widget is unavailable.'
-            )
-
+            raise RuntimeError('Segment Editor module widget is unavailable.')
         editor = module_widget.self().editor
         editor.setSegmentationNode(segmentation_node)
-
         if source_volume is not None:
             editor.setSourceVolumeNode(source_volume)
-
         return {'ok': True}
-
     except Exception as exc:
-        return {
-            'ok': False,
-            'error': str(exc) + '\n\n' + traceback.format_exc()
-        }
+        return {'ok': False, 'error': str(exc) + '\n\n' + traceback.format_exc()}
 )PYTHON");
 
   for (const QString& name : q->ModelsNamesMTGA)
@@ -7104,33 +7106,82 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
                 requiredModality ==
                     modalityAttr;
 
+            std::string displayName =
+                shNode->GetItemName(itemID);
+
             if (requiredModality == "PT")
             {
-                std::vector<std::string>
-                    pt_attributes =
-                        dataNode->
-                            GetAttributeNames();
+                // A dynamic PET entry is the proxy of a dPET master sequence.
+                // Do not use Sequences.BaseName or the proxy name as a
+                // discovery criterion: both are naming/UI details and depend
+                // on the Sequence Browser Rename option.
+                bool isDynamicPETProxy = false;
 
-                auto hasseq =
-                    std::find(
-                        pt_attributes.begin(),
-                        pt_attributes.end(),
-                        "Sequences.BaseName");
+                for (int browserIndex = 0;
+                     browserIndex < scene->GetNumberOfNodesByClass(
+                         "vtkMRMLSequenceBrowserNode");
+                     ++browserIndex)
+                {
+                    vtkMRMLSequenceBrowserNode* browser =
+                        vtkMRMLSequenceBrowserNode::SafeDownCast(
+                            scene->GetNthNodeByClass(
+                                browserIndex,
+                                "vtkMRMLSequenceBrowserNode"));
+
+                    if (!browser)
+                        continue;
+
+                    vtkMRMLSequenceNode* masterSequence =
+                        browser->GetMasterSequenceNode();
+                    if (!masterSequence)
+                        continue;
+
+                    vtkMRMLNode* proxyNode =
+                        browser->GetProxyNode(masterSequence);
+                    if (proxyNode != dataNode)
+                        continue;
+
+                    const char* proxyLoadedBy =
+                        dataNode->GetAttribute(
+                            "dPETImporter.LoadedBy");
+                    const char* sequenceLoadedBy =
+                        masterSequence->GetAttribute(
+                            "dPETImporter.LoadedBy");
+
+                    const bool loadedByDPET =
+                        (proxyLoadedBy &&
+                         std::string(proxyLoadedBy) ==
+                             "dPETImporterPlugin") ||
+                        (sequenceLoadedBy &&
+                         std::string(sequenceLoadedBy) ==
+                             "dPETImporterPlugin");
+
+                    if (!loadedByDPET)
+                        continue;
+
+                    isDynamicPETProxy = true;
+
+                    // Keep the selector label stable across frame changes.
+                    // The sequence name represents the dynamic study; the
+                    // proxy name may intentionally stay fixed when Rename is
+                    // disabled.
+                    if (masterSequence->GetName() &&
+                        std::string(masterSequence->GetName()).size() > 0)
+                    {
+                        displayName = masterSequence->GetName();
+                    }
+                    break;
+                }
 
                 modalityMatches =
                     modalityMatches &&
-                    hasseq !=
-                        pt_attributes.end();
+                    isDynamicPETProxy;
             }
 
             if (modalityMatches)
             {
-                std::string name =
-                    shNode->GetItemName(
-                        itemID);
-
                 comboBox->addItem(
-                    QString::fromStdString(name),
+                    QString::fromStdString(displayName),
                     QVariant::fromValue(itemID));
 
                 if (itemID ==
@@ -17338,30 +17389,37 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
     if (!browser)
       continue;
 
-    vtkMRMLSequenceNode* seqNode = browser->GetSequenceNode(petNode);
-    if (seqNode)
+    // Resolve the selected PET from the actual master-sequence/proxy
+    // relationship. This is independent of the Sequence Browser Rename
+    // option and of the current proxy node name.
+    vtkMRMLSequenceNode* seqNode = browser->GetMasterSequenceNode();
+    if (!seqNode)
+      continue;
+
+    vtkMRMLNode* proxyNode = browser->GetProxyNode(seqNode);
+    if (proxyNode != petNode)
+      continue;
+
+    foundSeqNode = seqNode;
+    foundBrowser = browser;
+
+    // If proxy was not valid, check sequence provenance.
+    if (!proxyIsValid)
     {
-      foundSeqNode = seqNode;
-      foundBrowser = browser;
+      const char* seqLoadedBy =
+        seqNode->GetAttribute("dPETImporter.LoadedBy");
 
-      // If proxy was not valid, check sequence
-      if (!proxyIsValid)
+      if (!(seqLoadedBy && std::string(seqLoadedBy) == "dPETImporterPlugin"))
       {
-        const char* seqLoadedBy =
-          seqNode->GetAttribute("dPETImporter.LoadedBy");
-
-        if (!(seqLoadedBy && std::string(seqLoadedBy) == "dPETImporterPlugin"))
-        {
-          QMessageBox::warning(nullptr,
-                               tr("Invalid PET"),
-                               tr("Selected PET was not loaded using dPETImporter."));
-          this->resetPETSelection();
-          return;
-        }
+        QMessageBox::warning(nullptr,
+                             tr("Invalid PET"),
+                             tr("Selected PET was not loaded using dPETImporter."));
+        this->resetPETSelection();
+        return;
       }
-
-      break;
     }
+
+    break;
   }
 
   // If no sequence found → invalid
@@ -17682,62 +17740,21 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 
   if (!seqNode)
   {
+    const std::string stableSegmentationName =
+        shNode->GetItemName(segID);
+
+    // Preserve the original, known-good Sequence Browser setup order.
+    // Attach the existing segmentation proxy before populating the temporal
+    // sequence.  This lets Sequence Browser establish its proxy bookkeeping
+    // without forcing index/name updates on the already-loaded PET proxy.
     vtkSmartPointer<vtkMRMLSequenceNode> newSeqNode =
       vtkSmartPointer<vtkMRMLSequenceNode>::New();
 
     newSeqNode->SetName(
-      shNode->GetItemName(segID).c_str());
+      stableSegmentationName.c_str());
 
     scene->AddNode(newSeqNode);
 
-    std::cout
-        << "[DynamicPET] About to synchronize segmentation sequence\n"
-        << "  PET index name = '" << this->sequencePETNode->GetIndexName() << "'\n"
-        << "  PET index unit = '" << this->sequencePETNode->GetIndexUnit() << "'\n"
-        << "  PET index type = " << this->sequencePETNode->GetIndexType() << "\n"
-        << "  SEG index name = '" << newSeqNode->GetIndexName() << "'\n"
-        << "  SEG index unit = '" << newSeqNode->GetIndexUnit() << "'\n"
-        << "  SEG index type = " << newSeqNode->GetIndexType()
-        << std::endl;
-
-    newSeqNode->CopySequenceIndex(
-        this->sequencePETNode);
-
-    std::string indexValue;
-
-    for (int i = 0; i < this->numberOfTimepoints; ++i)
-    {
-      indexValue =
-        this->sequencePETNode->GetNthIndexValue(i);
-
-      if (!newSeqNode->GetDataNodeAtValue(indexValue))
-      {
-        newSeqNode->SetDataNodeAtValue(
-          segNode,
-          indexValue);
-      }
-
-      // Remaining 20% belongs to sequence creation.
-      const int progress =
-        80 +
-        static_cast<int>(
-          20.0 *
-          static_cast<double>(i + 1) /
-          static_cast<double>(this->numberOfTimepoints));
-
-      this->ProgressBar->setValue(progress);
-
-      this->ProgressBar->setFormat(
-        QString("Preparing segmentation frames %1/%2 (%p%)")
-          .arg(i + 1)
-          .arg(this->numberOfTimepoints));
-
-      // Sequence creation consists of many individual operations,
-      // so here the progress bar can genuinely update.
-      qApp->processEvents();
-    }
-
-    // Add the proxy only after the sequence has a data-node class.
     this->sequenceBrowserPETNode->AddProxyNode(
       segNode,
       newSeqNode,
@@ -17747,8 +17764,41 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
       newSeqNode,
       true);
 
-    this->SegWatcher->ObserveSegmentationNode(segNode);
+    std::string indexValue;
+    for (int i = 0; i < this->numberOfTimepoints; ++i)
+    {
+      indexValue = this->sequencePETNode->GetNthIndexValue(i);
 
+      if (!newSeqNode->GetDataNodeAtValue(indexValue))
+      {
+        newSeqNode->SetDataNodeAtValue(segNode, indexValue);
+      }
+
+      const int progress =
+        80 +
+        static_cast<int>(
+          20.0 *
+          static_cast<double>(i + 1) /
+          static_cast<double>(this->numberOfTimepoints));
+
+      this->ProgressBar->setValue(progress);
+      this->ProgressBar->setFormat(
+        QString("Preparing segmentation frames %1/%2 (%p%)")
+          .arg(i + 1)
+          .arg(this->numberOfTimepoints));
+      qApp->processEvents();
+    }
+
+    // The synchronized segmentation proxy is now fully established and the
+    // temporal sequence has been populated. Disable automatic proxy renaming
+    // only now, so browsing changes content but not the user-visible name.
+    this->sequenceBrowserPETNode->SetOverwriteProxyName(
+      newSeqNode,
+      false);
+    segNode->SetName(stableSegmentationName.c_str());
+    shNode->SetItemName(segID, stableSegmentationName);
+
+    this->SegWatcher->ObserveSegmentationNode(segNode);
     seqNode = newSeqNode;
   }
 

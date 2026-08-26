@@ -38,6 +38,7 @@
 #include <QGroupBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QBoxLayout>
 #include <QLineEdit>
 #include <QLabel>
 #include <QSlider>
@@ -66,6 +67,8 @@
 #include <array>
 #include <chrono>
 #include <map>
+#include <set>
+#include <tuple>
 #include <exception>
 
 #ifdef _WIN32
@@ -273,6 +276,16 @@ struct PreparedMultiTimepointObservation
   QDateTime end;
   double durationSec{std::numeric_limits<double>::quiet_NaN()};
   std::map<std::string, std::string> segmentIDsByName;
+};
+
+struct PendingMultiSegStructureChange
+{
+  int acquisitionIndex{-1};
+  int frameIndex{-1};
+  vtkWeakPointer<vtkMRMLSegmentationNode> sourceNode;
+  std::string segmentID;
+  SegmentationChangeWatcher::StructureChangeType changeType{
+      SegmentationChangeWatcher::StructureChangeType::Added};
 };
 
 struct TACStatisticOption
@@ -1401,12 +1414,39 @@ public:
       const std::string& statistic,
       const VoxelStatistics& stats) const;
   bool plotDistributionSelected() const;
+  bool plotStatisticSelected(const QString& statisticID) const;
+  void updatePlotDispersionAvailability();
   void enforceDistributionSelection();
   void updateDistributionFrameUI(bool resetRange = false);
   void updateDistributionFrameInfo();
   void refreshDistributionPlotIfActive();
   bool plotROIDistribution(
       const std::string& segmentID,
+      QString* errorMessage = nullptr);
+  void updateSegmentationFrameUI(bool resetRange = false);
+  void updateSegmentationFrameInfo();
+  void displaySelectedSegmentationFrame();
+
+  void clearMultiTimepointSegmentationWatchers();
+  void setupMultiTimepointSegmentationWatchers();
+  void queueMultiTimepointSegmentEdit(
+      int acquisitionIndex,
+      int frameIndex,
+      const std::string& segmentID);
+  void processQueuedMultiTimepointSegmentEdits();
+  void queueMultiTimepointStructureChange(
+      int acquisitionIndex,
+      int frameIndex,
+      vtkMRMLSegmentationNode* sourceNode,
+      const std::string& segmentID,
+      SegmentationChangeWatcher::StructureChangeType changeType);
+  void processQueuedMultiTimepointStructureChanges();
+  int preparedObservationIndexForAcquisitionFrame(
+      int acquisitionIndex,
+      int frameIndex) const;
+  bool recomputePreparedMultiTimepointSegmentObservation(
+      int observationIndex,
+      const std::string& commonSegmentName,
       QString* errorMessage = nullptr);
 
   void invalidateInputFunctionResults();
@@ -1556,7 +1596,19 @@ public:
   QWidget* distributionFrameWidget{nullptr};
   QSlider* distributionFrameSlider{nullptr};
   QLineEdit* distributionFrameInfoEdit{nullptr};
+  QLabel* segmentationFrameLabel{nullptr};
+  QWidget* segmentationFrameWidget{nullptr};
+  QSlider* segmentationFrameSlider{nullptr};
+  QLineEdit* segmentationFrameInfoEdit{nullptr};
+  bool updatingSegmentationFrameSlider{false};
   bool syncingVOICheckSelection{false};
+
+  std::vector<vtkSmartPointer<SegmentationChangeWatcher>> multiSegWatchers;
+  QTimer* multiSegEditTimer{nullptr};
+  std::set<std::tuple<int, int, std::string>> multiDirtySegEdits;
+  std::vector<PendingMultiSegStructureChange> pendingMultiSegStructureChanges;
+  bool multiSegStructureUpdateQueued{false};
+  bool processingMultiSegmentationChanges{false};
 
   QString externalIFPath;
   std::vector<double> externalIFTimesSec;
@@ -3722,6 +3774,7 @@ invalidateMultiTimepointDerivedState()
     q->PET_flatten_values.clear();
     q->MTGAImgOutcomes.clear();
     q->TCMImgOutcomes.clear();
+    this->clearMultiTimepointSegmentationWatchers();
     this->multiTimepointSelectionValidated = false;
     this->multiTimepointPreparationValid = false;
     this->preparedMultiTimepointAcquisitions.clear();
@@ -3771,6 +3824,10 @@ setMultiTimepointMode(bool enabled)
     q->segSequenceNode = nullptr;
     if (q->SegWatcher)
     {
+        // Do not leave the legacy Single watcher attached while Multi owns
+        // segmentation editing. Stale observers were able to receive edits
+        // from the old Single context and later survive the return to Single.
+        q->SegWatcher->Clear();
         q->SegWatcher->browser = nullptr;
     }
     q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
@@ -3863,6 +3920,49 @@ setMultiTimepointMode(bool enabled)
     this->updateParametricImagingAvailability();
     q->enableTACbutton();
     this->multiTimepointModeTransitionRunning = false;
+
+    if (!enabled)
+    {
+        // The selectors above restore their visible values while signals are
+        // blocked. Re-run the Single acquisition callbacks after the mode
+        // transition so the PET browser, segmentation sequence, display state,
+        // and legacy watcher are rebuilt without forcing a patient reload.
+        QTimer::singleShot(0, q, [this, q]()
+        {
+            if (this->multiTimepointMode || this->tableBasedMode)
+            {
+                return;
+            }
+
+            const int ctIndex = this->CTSelector ? this->CTSelector->currentIndex() : -1;
+            if (ctIndex >= 0 &&
+                this->CTSelector->itemData(ctIndex).value<vtkIdType>() !=
+                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+            {
+                q->onCTChanged(ctIndex);
+            }
+
+            const int petIndex = this->PETSelector ? this->PETSelector->currentIndex() : -1;
+            if (petIndex >= 0 &&
+                this->PETSelector->itemData(petIndex).value<vtkIdType>() !=
+                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+            {
+                q->onPETChanged(petIndex);
+            }
+
+            const int segIndex = this->SegSelector ? this->SegSelector->currentIndex() : -1;
+            if (segIndex >= 0 &&
+                this->SegSelector->itemData(segIndex).value<vtkIdType>() !=
+                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+            {
+                q->onSegChanged(segIndex);
+            }
+            else
+            {
+                this->updateSegmentationAdvancedUI();
+            }
+        });
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -5271,6 +5371,7 @@ prepareMultiTimepointAcquisitions(QString* errorMessage)
         return false;
     }
 
+    this->clearMultiTimepointSegmentationWatchers();
     this->multiTimepointPreparationValid = false;
     this->preparedMultiTimepointAcquisitions.clear();
     this->preparedMultiTimepointObservations.clear();
@@ -5492,6 +5593,11 @@ prepareMultiTimepointAcquisitions(QString* errorMessage)
         !this->preparedMultiTimepointAcquisitions.empty() &&
         !this->preparedMultiTimepointObservations.empty();
 
+    if (this->multiTimepointPreparationValid)
+    {
+        this->setupMultiTimepointSegmentationWatchers();
+    }
+
     const double totalMs = std::chrono::duration<double, std::milli>(
         Clock::now() - totalStart).count();
 
@@ -5504,6 +5610,8 @@ prepareMultiTimepointAcquisitions(QString* errorMessage)
                 .arg(static_cast<int>(this->preparedMultiTimepointObservations.size())));
     }
     q->enableTACbutton();
+    this->updateSegmentationAdvancedUI();
+    this->updateSegmentationFrameUI(true);
 
     this->logToPythonConsole(QObject::tr(
         "[SlicerDynamicPET PERF][MULTI PREP] SUMMARY: total=%1 ms; acquisitions=%2; observations=%3. "
@@ -6332,6 +6440,7 @@ rebuildTACStatisticUI()
                     }
                     if (!checked)
                     {
+                        this->updatePlotDispersionAvailability();
                         return;
                     }
                     for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
@@ -6346,12 +6455,14 @@ rebuildTACStatisticUI()
                     }
                     this->enforceDistributionSelection();
                     this->updateDistributionFrameUI(false);
+                    this->updatePlotDispersionAvailability();
                     this->refreshDistributionPlotIfActive();
                     return;
                 }
 
                 if (!checked)
                 {
+                    this->updatePlotDispersionAvailability();
                     return;
                 }
 
@@ -6374,6 +6485,7 @@ rebuildTACStatisticUI()
                 {
                     this->distributionFrameWidget->setVisible(false);
                 }
+                this->updatePlotDispersionAvailability();
             });
 
         this->PlotStatsCheckLayout->addWidget(cb);
@@ -6389,6 +6501,7 @@ rebuildTACStatisticUI()
     {
         this->distributionFrameWidget->setVisible(showDistributionFrame);
     }
+    this->updatePlotDispersionAvailability();
     this->updateTableWeightingAvailability();
     q->clearFITdata();
     q->clearFITMTGAdata();
@@ -6410,6 +6523,44 @@ plotDistributionSelected() const
         }
     }
     return false;
+}
+
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+plotStatisticSelected(const QString& statisticID) const
+{
+    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+    {
+        QCheckBox* cb = qobject_cast<QCheckBox*>(
+            this->PlotStatsCheckLayout->itemAt(i)->widget());
+        if (cb && cb->isChecked() &&
+            cb->property("StatID").toString() == statisticID)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updatePlotDispersionAvailability()
+{
+    const bool incompatible =
+        this->plotStatisticSelected(QStringLiteral("VolumePET")) ||
+        this->plotStatisticSelected(QStringLiteral("Distribution"));
+
+    if (incompatible && this->PlotErrorCheckbox->isChecked())
+    {
+        QSignalBlocker blocker(this->PlotErrorCheckbox);
+        this->PlotErrorCheckbox->setChecked(false);
+    }
+    this->PlotErrorCheckbox->setEnabled(!incompatible);
+    this->PlotErrorCheckbox->setToolTip(
+        incompatible
+            ? QObject::tr("Dispersion is not defined for PET volume or voxel-distribution plots.")
+            : QObject::tr("Show vertical ROI-dispersion bars when available."));
 }
 
 //-----------------------------------------------------------------------------
@@ -6490,33 +6641,11 @@ updateDistributionFrameInfo()
 
     const double endSec = this->frameEndForInputSec(
         static_cast<size_t>(observationIndex));
-
-    QString text;
-    if (this->multiTimepointMode &&
-        observationIndex < static_cast<int>(this->preparedMultiTimepointObservations.size()))
-    {
-        const PreparedMultiTimepointObservation& observation =
-            this->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
-        text = observation.dynamic
-            ? QObject::tr("Obs %1 | frame %2 | end %3 s (%4 min)")
-                .arg(observationIndex + 1)
-                .arg(observation.frameIndex + 1)
-                .arg(endSec, 0, 'f', 2)
-                .arg(endSec / 60.0, 0, 'f', 2)
-            : QObject::tr("Obs %1 | static | end %2 s (%3 min)")
-                .arg(observationIndex + 1)
-                .arg(endSec, 0, 'f', 2)
-                .arg(endSec / 60.0, 0, 'f', 2);
-    }
-    else
-    {
-        text = QObject::tr("Frame %1 | end %2 s (%3 min)")
+    this->distributionFrameInfoEdit->setText(
+        QObject::tr("Frame %1 | end %2 s (%3 min)")
             .arg(observationIndex + 1)
             .arg(endSec, 0, 'f', 2)
-            .arg(endSec / 60.0, 0, 'f', 2);
-    }
-
-    this->distributionFrameInfoEdit->setText(text);
+            .arg(endSec / 60.0, 0, 'f', 2));
 }
 
 //-----------------------------------------------------------------------------
@@ -7622,6 +7751,64 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 
   this->PlotErrorCheckbox->setText(QObject::tr("Dispersion"));
 
+  // Keep the segmentation tools adjacent to the image/TAC visualization they
+  // operate on. Move Advanced [Segmentation] directly below Plot without
+  // depending on Designer item ordering.
+  if (this->SegmentationAdvancedCollapsibleButton && this->TACCollapsibleButton)
+  {
+      QBoxLayout* parentBox = qobject_cast<QBoxLayout*>(
+          this->TACCollapsibleButton->parentWidget()
+              ? this->TACCollapsibleButton->parentWidget()->layout()
+              : nullptr);
+      if (parentBox)
+      {
+          const int plotIndex = parentBox->indexOf(this->TACCollapsibleButton);
+          if (plotIndex >= 0)
+          {
+              parentBox->removeWidget(this->SegmentationAdvancedCollapsibleButton);
+              parentBox->insertWidget(plotIndex + 1, this->SegmentationAdvancedCollapsibleButton);
+          }
+      }
+  }
+
+  // Frame/observation navigator used only to change what PET/segmentation is
+  // displayed for inspection. Editing detection is independent and comes from
+  // acquisition-specific segmentation watchers. In Multi this traverses
+  // prepared provenance observations, including late static acquisitions,
+  // without creating a synthetic combined image sequence.
+  this->segmentationFrameLabel = new QLabel(
+      QObject::tr("Displayed frame:"), this->SegmentationAdvancedCollapsibleButton);
+  this->segmentationFrameWidget = new QWidget(this->SegmentationAdvancedCollapsibleButton);
+  QHBoxLayout* segmentationFrameLayout = new QHBoxLayout(this->segmentationFrameWidget);
+  segmentationFrameLayout->setContentsMargins(0, 0, 0, 0);
+  this->segmentationFrameSlider = new QSlider(Qt::Horizontal, this->segmentationFrameWidget);
+  this->segmentationFrameSlider->setMinimum(1);
+  this->segmentationFrameSlider->setMaximum(1);
+  this->segmentationFrameSlider->setValue(1);
+  this->segmentationFrameSlider->setToolTip(QObject::tr(
+      "Select the PET/segmentation frame displayed for inspection. Segment Editor changes are detected independently by acquisition-specific watchers."));
+  this->segmentationFrameInfoEdit = new QLineEdit(this->segmentationFrameWidget);
+  this->segmentationFrameInfoEdit->setReadOnly(true);
+  this->segmentationFrameInfoEdit->setMinimumWidth(215);
+  segmentationFrameLayout->addWidget(this->segmentationFrameSlider, 1);
+  segmentationFrameLayout->addWidget(this->segmentationFrameInfoEdit);
+  if (this->SegmentationAdvancedLayout)
+  {
+      this->SegmentationAdvancedLayout->insertRow(
+          0, this->segmentationFrameLabel, this->segmentationFrameWidget);
+  }
+  QObject::connect(
+      this->segmentationFrameSlider, &QSlider::valueChanged, q,
+      [this](int)
+      {
+          if (this->updatingSegmentationFrameSlider)
+          {
+              return;
+          }
+          this->updateSegmentationFrameInfo();
+          this->displaySelectedSegmentationFrame();
+      });
+
   // qSlicerDynamicPETModuleWidget.ui contains this checkbox in current
   // sources.  Resolve it by object name instead of relying on the generated
   // Ui_* class member so incremental builds using an older uic header still
@@ -7660,7 +7847,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 
   this->PlotLiveSegEdit->setToolTip(
       QObject::tr(
-          "Single Image mode only. Track Segment Editor changes and refresh the active image-derived TAC after segmentation corrections. Multi-timepoint uses multiple prepared acquisition-specific segmentations, so live correction tracking is intentionally disabled there."));
+          "Track Segment Editor corrections and refresh image-derived TAC/plots. In Multi-timepoint mode each prepared PET acquisition has its own segmentation watcher; the displayed-frame slider is visualization-only."));
   this->OpenSegmentEditorButton->setEnabled(false);
   this->SaveDynamicRTStructButton->setEnabled(false);
   this->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
@@ -12652,6 +12839,7 @@ updateSegmentationAdvancedUI()
     const bool imageMode = !this->tableBasedMode;
     vtkMRMLSegmentationNode* segmentationNode = nullptr;
     if (imageMode
+        && !this->multiTimepointMode
         && q->mrmlScene()
         && q->segID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
     {
@@ -12664,17 +12852,24 @@ updateSegmentationAdvancedUI()
         }
     }
 
-    const bool hasSegmentation = segmentationNode != nullptr;
+    const bool singleHasSegmentation = segmentationNode != nullptr;
+    const bool multiHasPreparedSegmentation =
+        imageMode
+        && this->multiTimepointMode
+        && this->multiTimepointPreparationValid
+        && !this->preparedMultiTimepointObservations.empty();
     const bool hasDynamicSegmentation =
-        hasSegmentation
+        singleHasSegmentation
         && q->segSequenceNode
         && q->segSequenceNode->GetNumberOfDataNodes() > 0
         && q->sequencePETNode
         && q->sequenceBrowserPETNode;
 
     this->SegmentationAdvancedCollapsibleButton->setVisible(imageMode);
-    this->PlotLiveSegEdit->setEnabled(hasSegmentation);
-    this->OpenSegmentEditorButton->setEnabled(hasSegmentation);
+    const bool editableSegmentationAvailable =
+        singleHasSegmentation || multiHasPreparedSegmentation;
+    this->PlotLiveSegEdit->setEnabled(editableSegmentationAvailable);
+    this->OpenSegmentEditorButton->setEnabled(editableSegmentationAvailable);
     this->DynamicRTStructDirectory->setEnabled(hasDynamicSegmentation);
     this->DynamicRTStructFilename->setEnabled(hasDynamicSegmentation);
     const bool hasOutputPath =
@@ -12682,6 +12877,756 @@ updateSegmentationAdvancedUI()
         && !this->DynamicRTStructFilename->text().trimmed().isEmpty();
     this->SaveDynamicRTStructButton->setEnabled(
         hasDynamicSegmentation && hasOutputPath);
+
+    if (this->segmentationFrameLabel)
+    {
+        this->segmentationFrameLabel->setVisible(imageMode);
+    }
+    if (this->segmentationFrameWidget)
+    {
+        this->segmentationFrameWidget->setVisible(imageMode);
+    }
+    this->updateSegmentationFrameUI(false);
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateSegmentationFrameUI(bool resetRange)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!this->segmentationFrameSlider || !this->segmentationFrameInfoEdit)
+    {
+        return;
+    }
+
+    int count = 0;
+    int desired = 1;
+    if (this->multiTimepointMode)
+    {
+        count = static_cast<int>(this->preparedMultiTimepointObservations.size());
+    }
+    else if (q->sequencePETNode && q->sequenceBrowserPETNode)
+    {
+        count = q->sequencePETNode->GetNumberOfDataNodes();
+        const int selected = q->sequenceBrowserPETNode->GetSelectedItemNumber();
+        if (selected >= 0)
+        {
+            desired = selected + 1;
+        }
+    }
+
+    this->updatingSegmentationFrameSlider = true;
+    this->segmentationFrameSlider->setEnabled(count > 0);
+    this->segmentationFrameSlider->setMinimum(1);
+    this->segmentationFrameSlider->setMaximum(std::max(1, count));
+    if (count <= 0)
+    {
+        this->segmentationFrameSlider->setValue(1);
+        this->segmentationFrameInfoEdit->clear();
+    }
+    else
+    {
+        if (!resetRange)
+        {
+            desired = std::max(1, std::min(this->segmentationFrameSlider->value(), count));
+        }
+        else
+        {
+            desired = std::max(1, std::min(desired, count));
+        }
+        this->segmentationFrameSlider->setValue(desired);
+    }
+    this->updatingSegmentationFrameSlider = false;
+    this->updateSegmentationFrameInfo();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateSegmentationFrameInfo()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!this->segmentationFrameSlider || !this->segmentationFrameInfoEdit)
+    {
+        return;
+    }
+
+    const int index = this->segmentationFrameSlider->value() - 1;
+    if (index < 0)
+    {
+        this->segmentationFrameInfoEdit->clear();
+        return;
+    }
+
+    double endSec = std::numeric_limits<double>::quiet_NaN();
+    if (this->multiTimepointMode &&
+        index < static_cast<int>(this->preparedMultiTimepointObservations.size()) &&
+        !this->preparedMultiTimepointAcquisitions.empty() &&
+        this->preparedMultiTimepointAcquisitions.front().start.isValid())
+    {
+        endSec = this->preparedMultiTimepointAcquisitions.front().start.msecsTo(
+            this->preparedMultiTimepointObservations[static_cast<size_t>(index)].end) / 1000.0;
+    }
+    else if (index < static_cast<int>(q->timePoints.size()))
+    {
+        endSec = this->frameEndForInputSec(static_cast<size_t>(index));
+    }
+
+    if (std::isfinite(endSec))
+    {
+        this->segmentationFrameInfoEdit->setText(
+            QObject::tr("Frame %1 | end %2 s (%3 min)")
+                .arg(index + 1)
+                .arg(endSec, 0, 'f', 2)
+                .arg(endSec / 60.0, 0, 'f', 2));
+    }
+    else
+    {
+        this->segmentationFrameInfoEdit->setText(
+            QObject::tr("Frame %1").arg(index + 1));
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+displaySelectedSegmentationFrame()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!q->mrmlScene() || !this->segmentationFrameSlider)
+    {
+        return;
+    }
+
+    vtkMRMLScalarVolumeNode* displayedPET = nullptr;
+
+    if (!this->multiTimepointMode)
+    {
+        if (!q->sequenceBrowserPETNode || !q->sequencePETNode)
+        {
+            return;
+        }
+        const int frameIndex = this->segmentationFrameSlider->value() - 1;
+        if (frameIndex < 0 || frameIndex >= q->sequencePETNode->GetNumberOfDataNodes())
+        {
+            return;
+        }
+        q->sequenceBrowserPETNode->SetSelectedItemNumber(frameIndex);
+        displayedPET = vtkMRMLScalarVolumeNode::SafeDownCast(
+            q->sequenceBrowserPETNode->GetProxyNode(q->sequencePETNode));
+    }
+    else
+    {
+        const int observationIndex = this->segmentationFrameSlider->value() - 1;
+        if (observationIndex < 0 ||
+            observationIndex >= static_cast<int>(this->preparedMultiTimepointObservations.size()))
+        {
+            return;
+        }
+
+        const PreparedMultiTimepointObservation& observation =
+            this->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
+        if (observation.dynamic)
+        {
+            if (observation.acquisitionIndex < 0 ||
+                observation.acquisitionIndex >= static_cast<int>(this->preparedMultiTimepointAcquisitions.size()))
+            {
+                return;
+            }
+            vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(
+                q->mrmlScene()->GetNodeByID(
+                    this->preparedMultiTimepointAcquisitions[
+                        static_cast<size_t>(observation.acquisitionIndex)].petBrowserNodeID.toUtf8().constData()));
+            vtkMRMLSequenceNode* petSequence = vtkMRMLSequenceNode::SafeDownCast(
+                q->mrmlScene()->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()));
+            if (browser && petSequence && observation.frameIndex >= 0)
+            {
+                browser->SetSelectedItemNumber(observation.frameIndex);
+                displayedPET = vtkMRMLScalarVolumeNode::SafeDownCast(
+                    browser->GetProxyNode(petSequence));
+            }
+        }
+        else
+        {
+            displayedPET = vtkMRMLScalarVolumeNode::SafeDownCast(
+                q->mrmlScene()->GetNodeByID(observation.petNodeID.toUtf8().constData()));
+        }
+    }
+
+    if (!displayedPET)
+    {
+        return;
+    }
+
+    vtkSlicerApplicationLogic* appLogic = qSlicerApplication::application()->applicationLogic();
+    if (!appLogic || !appLogic->GetMRMLScene())
+    {
+        return;
+    }
+    for (int i = 0;
+         i < appLogic->GetMRMLScene()->GetNumberOfNodesByClass("vtkMRMLSliceCompositeNode");
+         ++i)
+    {
+        vtkMRMLSliceCompositeNode* compositeNode = vtkMRMLSliceCompositeNode::SafeDownCast(
+            appLogic->GetMRMLScene()->GetNthNodeByClass(i, "vtkMRMLSliceCompositeNode"));
+        if (compositeNode)
+        {
+            compositeNode->SetBackgroundVolumeID(displayedPET->GetID());
+        }
+    }
+}
+
+
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+clearMultiTimepointSegmentationWatchers()
+{
+    for (auto& watcher : this->multiSegWatchers)
+    {
+        if (watcher)
+        {
+            watcher->Clear();
+        }
+    }
+    this->multiSegWatchers.clear();
+    this->multiDirtySegEdits.clear();
+    this->pendingMultiSegStructureChanges.clear();
+    this->multiSegStructureUpdateQueued = false;
+    this->processingMultiSegmentationChanges = false;
+    if (this->multiSegEditTimer)
+    {
+        this->multiSegEditTimer->stop();
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+setupMultiTimepointSegmentationWatchers()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    this->clearMultiTimepointSegmentationWatchers();
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    if (!scene || !this->multiTimepointMode || !this->multiTimepointPreparationValid)
+    {
+        return;
+    }
+
+    if (!this->multiSegEditTimer)
+    {
+        this->multiSegEditTimer = new QTimer(q);
+        this->multiSegEditTimer->setSingleShot(true);
+        this->multiSegEditTimer->setInterval(120);
+        QObject::connect(
+            this->multiSegEditTimer, &QTimer::timeout, q,
+            [this]() { this->processQueuedMultiTimepointSegmentEdits(); });
+    }
+
+    this->multiSegWatchers.reserve(this->preparedMultiTimepointAcquisitions.size());
+    for (size_t acquisitionIndex = 0;
+         acquisitionIndex < this->preparedMultiTimepointAcquisitions.size();
+         ++acquisitionIndex)
+    {
+        const PreparedMultiTimepointAcquisition& acquisition =
+            this->preparedMultiTimepointAcquisitions[acquisitionIndex];
+        vtkSmartPointer<SegmentationChangeWatcher> watcher =
+            vtkSmartPointer<SegmentationChangeWatcher>::New();
+        watcher->ContextIndex = static_cast<int>(acquisitionIndex);
+        watcher->DetectionOnly = true;
+        watcher->GetLogic = [q]()
+        {
+            return vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+        };
+        watcher->OnSegmentContentChanged =
+            [this](int contextIndex, int frameIndex, const std::string& segmentID)
+            {
+                this->queueMultiTimepointSegmentEdit(
+                    contextIndex, frameIndex, segmentID);
+            };
+        watcher->OnSegmentStructureChangedDetailed =
+            [this](int contextIndex,
+                   int frameIndex,
+                   vtkMRMLSegmentationNode* sourceNode,
+                   const std::string& segmentID,
+                   SegmentationChangeWatcher::StructureChangeType changeType)
+            {
+                this->queueMultiTimepointStructureChange(
+                    contextIndex, frameIndex, sourceNode, segmentID, changeType);
+            };
+
+        vtkMRMLSegmentationNode* proxySegmentation =
+            vtkMRMLSegmentationNode::SafeDownCast(
+                scene->GetNodeByID(acquisition.segmentationNodeID.toUtf8().constData()));
+
+        if (acquisition.dynamic)
+        {
+            watcher->Mode = SegmentationChangeWatcher::AcquisitionMode::Dynamic;
+            watcher->browser = vtkMRMLSequenceBrowserNode::SafeDownCast(
+                scene->GetNodeByID(acquisition.petBrowserNodeID.toUtf8().constData()));
+            vtkMRMLSequenceNode* segmentationSequence = vtkMRMLSequenceNode::SafeDownCast(
+                scene->GetNodeByID(acquisition.segmentationSequenceNodeID.toUtf8().constData()));
+            watcher->SegmentationSequence = segmentationSequence;
+            if (proxySegmentation)
+            {
+                watcher->ObserveSegmentationNode(
+                    proxySegmentation,
+                    SegmentationChangeWatcher::UseBrowserFrameIndex);
+            }
+            if (segmentationSequence)
+            {
+                const int frameCount = segmentationSequence->GetNumberOfDataNodes();
+                for (int frame = 0; frame < frameCount; ++frame)
+                {
+                    vtkMRMLSegmentationNode* frameNode = vtkMRMLSegmentationNode::SafeDownCast(
+                        segmentationSequence->GetNthDataNode(frame));
+                    if (frameNode)
+                    {
+                        watcher->ObserveSegmentationNode(frameNode, frame);
+                    }
+                }
+            }
+        }
+        else
+        {
+            watcher->Mode = SegmentationChangeWatcher::AcquisitionMode::Static;
+            watcher->browser = nullptr;
+            if (proxySegmentation)
+            {
+                watcher->ObserveSegmentationNode(
+                    proxySegmentation,
+                    SegmentationChangeWatcher::StaticFrameIndex);
+            }
+        }
+
+        this->multiSegWatchers.push_back(watcher);
+    }
+
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET Segment tracking] Prepared %1 acquisition-specific watcher(s): dynamic acquisitions observe their proxy + temporal segmentation frames; static acquisitions observe one segmentation node.")
+        .arg(static_cast<int>(this->multiSegWatchers.size())));
+}
+
+//-----------------------------------------------------------------------------
+int
+qSlicerDynamicPETModuleWidgetPrivate::
+preparedObservationIndexForAcquisitionFrame(
+    int acquisitionIndex,
+    int frameIndex) const
+{
+    for (size_t i = 0; i < this->preparedMultiTimepointObservations.size(); ++i)
+    {
+        const PreparedMultiTimepointObservation& observation =
+            this->preparedMultiTimepointObservations[i];
+        if (observation.acquisitionIndex != acquisitionIndex)
+        {
+            continue;
+        }
+        if (observation.dynamic)
+        {
+            if (observation.frameIndex == frameIndex)
+            {
+                return static_cast<int>(i);
+            }
+        }
+        else if (frameIndex == SegmentationChangeWatcher::StaticFrameIndex)
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+queueMultiTimepointSegmentEdit(
+    int acquisitionIndex,
+    int frameIndex,
+    const std::string& segmentID)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!this->multiTimepointMode || !this->multiTimepointPreparationValid ||
+        this->multiTimepointPreparationRunning || this->multiTimepointExtractionRunning ||
+        this->processingMultiSegmentationChanges || segmentID.empty())
+    {
+        return;
+    }
+
+    this->multiDirtySegEdits.insert(
+        std::make_tuple(acquisitionIndex, frameIndex, segmentID));
+
+    // Coalesce an event burst from one brush stroke into one live refresh.
+    // Do not restart an active timer: continuous painting therefore refreshes
+    // at most about every 120 ms instead of once per VTK modification event.
+    if (this->multiSegEditTimer && !this->multiSegEditTimer->isActive())
+    {
+        this->multiSegEditTimer->start();
+    }
+    else if (!this->multiSegEditTimer)
+    {
+        QTimer::singleShot(0, q, [this]()
+        {
+            this->processQueuedMultiTimepointSegmentEdits();
+        });
+    }
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+recomputePreparedMultiTimepointSegmentObservation(
+    int observationIndex,
+    const std::string& commonSegmentName,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!q->mrmlScene() ||
+        observationIndex < 0 ||
+        observationIndex >= static_cast<int>(this->preparedMultiTimepointObservations.size()))
+    {
+        if (errorMessage) *errorMessage = QObject::tr("Prepared observation is unavailable.");
+        return false;
+    }
+
+    const PreparedMultiTimepointObservation& observation =
+        this->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
+    if (observation.acquisitionIndex < 0 ||
+        observation.acquisitionIndex >= static_cast<int>(this->preparedMultiTimepointAcquisitions.size()))
+    {
+        if (errorMessage) *errorMessage = QObject::tr("Prepared acquisition provenance is invalid.");
+        return false;
+    }
+
+    const auto localIt = observation.segmentIDsByName.find(commonSegmentName);
+    if (localIt == observation.segmentIDsByName.end() || localIt->second.empty())
+    {
+        if (errorMessage) *errorMessage = QObject::tr("The edited segment is no longer mapped at this observation.");
+        return false;
+    }
+
+    auto tacIt = q->segmentTACs.find(commonSegmentName);
+    if (tacIt == q->segmentTACs.end() ||
+        observationIndex >= static_cast<int>(tacIt->second.size()))
+    {
+        // No computed TAC exists yet; the watcher stays active but there is
+        // nothing quantitative to refresh until the user computes TAC.
+        return true;
+    }
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkMRMLScalarVolumeNode* petVolume = nullptr;
+    vtkMRMLSegmentationNode* segmentationNode = nullptr;
+    if (observation.dynamic)
+    {
+        vtkMRMLSequenceNode* petSequence = vtkMRMLSequenceNode::SafeDownCast(
+            scene->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()));
+        vtkMRMLSequenceNode* segmentationSequence = vtkMRMLSequenceNode::SafeDownCast(
+            scene->GetNodeByID(observation.segmentationSequenceNodeID.toUtf8().constData()));
+        if (petSequence && segmentationSequence)
+        {
+            const std::string indexValue = observation.sequenceIndex.toStdString();
+            petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+                petSequence->GetDataNodeAtValue(indexValue));
+            segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+                segmentationSequence->GetDataNodeAtValue(indexValue));
+        }
+    }
+    else
+    {
+        petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+            scene->GetNodeByID(observation.petNodeID.toUtf8().constData()));
+        segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+            scene->GetNodeByID(observation.segmentationNodeID.toUtf8().constData()));
+    }
+
+    vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+    if (!petVolume || !segmentationNode || !segmentationNode->GetSegmentation() || !logic)
+    {
+        if (errorMessage) *errorMessage = QObject::tr("The edited PET/segmentation observation is unavailable.");
+        return false;
+    }
+
+    vtkNew<vtkStringArray> segmentArray;
+    segmentArray->InsertNextValue(localIt->second);
+    vtkSmartPointer<vtkOrientedImageData> labelmap =
+        vtkSmartPointer<vtkOrientedImageData>::New();
+    vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(
+        segmentationNode,
+        petVolume,
+        segmentArray,
+        vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
+        labelmap);
+
+    VoxelStatistics stats;
+    vtkDataArray* labelScalars = labelmap && labelmap->GetPointData()
+        ? labelmap->GetPointData()->GetScalars() : nullptr;
+    vtkImageData* petImage = petVolume->GetImageData();
+    vtkDataArray* petScalars = petImage && petImage->GetPointData()
+        ? petImage->GetPointData()->GetScalars() : nullptr;
+    if (!labelScalars || !petScalars ||
+        labelScalars->GetNumberOfTuples() != petScalars->GetNumberOfTuples())
+    {
+        stats.keep = false;
+        stats.empty = true;
+    }
+    else
+    {
+        stats = logic->ComputeVoxelStatistics(petVolume, labelmap, 1);
+        if (!stats.empty)
+        {
+            const PreparedMultiTimepointAcquisition& acquisition =
+                this->preparedMultiTimepointAcquisitions[
+                    static_cast<size_t>(observation.acquisitionIndex)];
+            if (acquisition.valueType.trimmed().toUpper() == QStringLiteral("BQML"))
+            {
+                scaleVoxelStatistics(stats, acquisition.sourceSUVbwFactor);
+            }
+        }
+    }
+
+    const VoxelStatistics previousStats =
+        tacIt->second[static_cast<size_t>(observationIndex)];
+    stats.keep = stats.empty
+        ? false
+        : (previousStats.empty ? true : previousStats.keep);
+    tacIt->second[static_cast<size_t>(observationIndex)] = stats;
+    if (errorMessage) errorMessage->clear();
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+processQueuedMultiTimepointSegmentEdits()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (this->multiDirtySegEdits.empty())
+    {
+        return;
+    }
+
+    const auto dirty = this->multiDirtySegEdits;
+    this->multiDirtySegEdits.clear();
+
+    if (!this->multiTimepointMode || !this->multiTimepointPreparationValid ||
+        this->multiTimepointPreparationRunning || this->multiTimepointExtractionRunning ||
+        this->processingMultiSegmentationChanges)
+    {
+        return;
+    }
+
+    this->processingMultiSegmentationChanges = true;
+    bool anyTACChanged = false;
+    bool inputSegmentChanged = false;
+    QSet<int> changedObservationIndices;
+    QStringList warnings;
+
+    for (const auto& key : dirty)
+    {
+        const int acquisitionIndex = std::get<0>(key);
+        const int frameIndex = std::get<1>(key);
+        const std::string localSegmentID = std::get<2>(key);
+        const int observationIndex = this->preparedObservationIndexForAcquisitionFrame(
+            acquisitionIndex, frameIndex);
+        if (observationIndex < 0)
+        {
+            continue;
+        }
+
+        const PreparedMultiTimepointObservation& observation =
+            this->preparedMultiTimepointObservations[
+                static_cast<size_t>(observationIndex)];
+        std::string commonName;
+        for (const auto& nameAndID : observation.segmentIDsByName)
+        {
+            if (nameAndID.second == localSegmentID)
+            {
+                commonName = nameAndID.first;
+                break;
+            }
+        }
+        if (commonName.empty())
+        {
+            continue;
+        }
+
+        QString error;
+        if (!this->recomputePreparedMultiTimepointSegmentObservation(
+                observationIndex, commonName, &error))
+        {
+            if (!error.isEmpty()) warnings << error;
+            continue;
+        }
+
+        auto tacIt = q->segmentTACs.find(commonName);
+        if (tacIt != q->segmentTACs.end() &&
+            observationIndex < static_cast<int>(tacIt->second.size()))
+        {
+            anyTACChanged = true;
+            changedObservationIndices.insert(observationIndex);
+            if (commonName == q->IFID)
+            {
+                inputSegmentChanged = true;
+            }
+        }
+    }
+
+    if (anyTACChanged)
+    {
+        q->clearFITdata();
+        q->clearFITMTGAdata();
+        if (inputSegmentChanged)
+        {
+            this->invalidateInputFunctionResults();
+            this->updateInputFunctionStatus();
+        }
+        else
+        {
+            q->enableFITbutton();
+            q->enableFITMTGAbutton();
+        }
+
+        if (this->PlotLiveSegEdit && this->PlotLiveSegEdit->isChecked())
+        {
+            if (this->plotDistributionSelected())
+            {
+                const int displayedObservation = this->distributionFrameSlider
+                    ? this->distributionFrameSlider->value() - 1 : -1;
+                if (changedObservationIndices.contains(displayedObservation))
+                {
+                    this->refreshDistributionPlotIfActive();
+                }
+            }
+            else
+            {
+                q->onPlotbutton();
+            }
+        }
+    }
+
+    for (const QString& warning : warnings)
+    {
+        this->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET Segment tracking] %1").arg(warning));
+    }
+    this->processingMultiSegmentationChanges = false;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+queueMultiTimepointStructureChange(
+    int acquisitionIndex,
+    int frameIndex,
+    vtkMRMLSegmentationNode* sourceNode,
+    const std::string& segmentID,
+    SegmentationChangeWatcher::StructureChangeType changeType)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!this->multiTimepointMode || !this->multiTimepointPreparationValid ||
+        this->processingMultiSegmentationChanges || !sourceNode || segmentID.empty())
+    {
+        return;
+    }
+
+    PendingMultiSegStructureChange pending;
+    pending.acquisitionIndex = acquisitionIndex;
+    pending.frameIndex = frameIndex;
+    pending.sourceNode = sourceNode;
+    pending.segmentID = segmentID;
+    pending.changeType = changeType;
+    this->pendingMultiSegStructureChanges.push_back(std::move(pending));
+
+    if (!this->multiSegStructureUpdateQueued)
+    {
+        this->multiSegStructureUpdateQueued = true;
+        QTimer::singleShot(0, q, [this]()
+        {
+            this->processQueuedMultiTimepointStructureChanges();
+        });
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+processQueuedMultiTimepointStructureChanges()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    this->multiSegStructureUpdateQueued = false;
+    if (this->pendingMultiSegStructureChanges.empty())
+    {
+        return;
+    }
+
+    const std::vector<PendingMultiSegStructureChange> changes =
+        this->pendingMultiSegStructureChanges;
+    this->pendingMultiSegStructureChanges.clear();
+
+    if (!this->multiTimepointMode || !this->multiTimepointPreparationValid ||
+        this->multiTimepointPreparationRunning || this->multiTimepointExtractionRunning)
+    {
+        return;
+    }
+
+    this->processingMultiSegmentationChanges = true;
+    for (const PendingMultiSegStructureChange& change : changes)
+    {
+        if (change.acquisitionIndex < 0 ||
+            change.acquisitionIndex >= static_cast<int>(this->multiSegWatchers.size()))
+        {
+            continue;
+        }
+        vtkMRMLSegmentationNode* sourceNode = change.sourceNode.GetPointer();
+        SegmentationChangeWatcher* watcher =
+            this->multiSegWatchers[static_cast<size_t>(change.acquisitionIndex)];
+        if (watcher)
+        {
+            watcher->ApplyDeferredStructureChange(
+                sourceNode, change.segmentID, change.changeType);
+        }
+    }
+
+    // Structure changes can alter the common ROI intersection. Do not rebuild
+    // selections inside the VTK callback. Once Slicer has returned here, clear
+    // stale quantitative results, revalidate the acquisition table, and
+    // reprepare the same acquisition set. This is intentionally conservative
+    // and avoids dangling segment IDs after add/remove/rename.
+    q->clearTACdata();
+    q->timePoints.clear();
+    q->durations.clear();
+    q->suvFactors.clear();
+    q->numberOfTimepoints = 0;
+    this->multiTimepointPreparationValid = false;
+    this->processingMultiSegmentationChanges = false;
+
+    this->updateMultiTimepointSelectionStatus();
+    if (this->multiTimepointSelectionValidated)
+    {
+        QString error;
+        if (!this->prepareMultiTimepointAcquisitions(&error))
+        {
+            this->MultiTimepointStatusLabel->setText(
+                QObject::tr("Segmentation structure changed; preparation failed: %1").arg(error));
+        }
+        else
+        {
+            this->populateMultiTimepointCommonSegmentCheckboxes();
+            this->MultiTimepointStatusLabel->setText(
+                this->MultiTimepointStatusLabel->text() +
+                QObject::tr(" Segmentation structure refreshed; recompute TAC."));
+        }
+    }
+    else
+    {
+        this->populateMultiTimepointCommonSegmentCheckboxes();
+    }
+    q->enableTACbutton();
+    this->updateSegmentationAdvancedUI();
 }
 
 void
@@ -20704,6 +21649,7 @@ setPETItemID(vtkIdType newPetID)
 
   if (q->SegWatcher)
   {
+    q->SegWatcher->Clear();
     q->SegWatcher->browser = nullptr;
   }
 
@@ -20935,6 +21881,7 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->Superclass::setMRMLScene(scene);
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  d->clearMultiTimepointSegmentationWatchers();
   this->qvtkDisconnectAll();
 
   this->SubjectHierarchyNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
@@ -20994,6 +21941,34 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
       this->enableFITbutton();
       this->enableFITMTGAbutton();
     }
+  };
+  this->SegWatcher->OnSegmentContentChanged =
+      [this, d](int, int frameIndex, const std::string& segmentID)
+  {
+    // Segment Editor undo/redo may still be restoring its segmentation history
+    // while vtkSegmentation emits the content event. Never rasterize/recompute
+    // TAC from that VTK callback. Let Slicer finish the restoration first, then
+    // update the exact frame that generated the event on the Qt event loop.
+    const std::string deferredSegmentID = segmentID;
+    QTimer::singleShot(0, this, [this, d, frameIndex, deferredSegmentID]()
+    {
+      if (d->isTableBasedMode() || d->isMultiTimepointMode() ||
+          !this->SegWatcher || !this->SubjectHierarchyNode ||
+          this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+      {
+        return;
+      }
+
+      vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(
+          this->SubjectHierarchyNode->GetItemDataNode(this->segID));
+      if (!segNode)
+      {
+        return;
+      }
+
+      this->SegWatcher->ApplyDeferredLegacyContentChange(
+          segNode, deferredSegmentID, frameIndex);
+    });
   };
 
 }
@@ -21096,7 +22071,11 @@ void qSlicerDynamicPETModuleWidget::resetPETSelection()
   d->resetInputFunctionData(true);
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
-  this->SegWatcher->browser = nullptr;
+  if (this->SegWatcher)
+  {
+    this->SegWatcher->Clear();
+    this->SegWatcher->browser = nullptr;
+  }
 
   this->durations.clear();
   this->timePoints.clear();
@@ -21156,7 +22135,11 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
 
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
-  this->SegWatcher->browser = nullptr;
+  if (this->SegWatcher)
+  {
+    this->SegWatcher->Clear();
+    this->SegWatcher->browser = nullptr;
+  }
 
   vtkMRMLScene* scene = this->mrmlScene();
   if (scene==nullptr) {
@@ -21404,6 +22387,15 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  // A new Single segmentation context must start with exactly one observer
+  // set. Clear any previous segmentation/proxy observations before rebuilding
+  // the selected segmentation sequence below.
+  if (this->SegWatcher)
+  {
+    this->SegWatcher->Clear();
+    this->SegWatcher->browser = this->sequenceBrowserPETNode;
+  }
+
   // A segment-derived IDIF belongs to the current
   // segmentation/TAC set. An external CSV does not.
   if (d->IFSourceSelector->currentIndex() == 0)
@@ -21612,6 +22604,7 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
   d->populateSegmentCheckboxes(this->segID);
   this->enableTACbutton();
   d->updateSegmentationAdvancedUI();
+  d->updateSegmentationFrameUI(true);
 
   // Finished
   this->ProgressBar->setValue(100);
@@ -21656,12 +22649,77 @@ void qSlicerDynamicPETModuleWidget::onOpenSegmentEditor()
   Q_D(qSlicerDynamicPETModuleWidget);
 
   vtkMRMLScene* scene = this->mrmlScene();
-  vtkMRMLSubjectHierarchyNode* shNode =
-      scene ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene) : nullptr;
-  vtkMRMLSegmentationNode* segNode =
-      (shNode && this->segID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-      ? vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(this->segID))
-      : nullptr;
+  vtkMRMLSegmentationNode* segNode = nullptr;
+  vtkMRMLScalarVolumeNode* sourceVolume = nullptr;
+
+  if (d->isMultiTimepointMode())
+  {
+    if (!scene || !d->multiTimepointPreparationValid ||
+        d->preparedMultiTimepointObservations.empty())
+    {
+      QMessageBox::warning(
+          this, tr("Segment Editor"),
+          tr("Prepare the Multi-timepoint acquisitions first."));
+      return;
+    }
+
+    const int observationIndex = d->segmentationFrameSlider
+        ? d->segmentationFrameSlider->value() - 1 : 0;
+    if (observationIndex < 0 ||
+        observationIndex >= static_cast<int>(d->preparedMultiTimepointObservations.size()))
+    {
+      QMessageBox::warning(this, tr("Segment Editor"), tr("No displayed observation is available."));
+      return;
+    }
+
+    // The slider only selects what is displayed/opened. Once Segment Editor is
+    // active, acquisition-specific watchers detect edits independently of this
+    // slider and resolve the actual changed acquisition/frame.
+    const PreparedMultiTimepointObservation& observation =
+        d->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
+    const PreparedMultiTimepointAcquisition& acquisition =
+        d->preparedMultiTimepointAcquisitions[
+            static_cast<size_t>(observation.acquisitionIndex)];
+
+    if (observation.dynamic)
+    {
+      vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(
+          scene->GetNodeByID(acquisition.petBrowserNodeID.toUtf8().constData()));
+      vtkMRMLSequenceNode* petSequence = vtkMRMLSequenceNode::SafeDownCast(
+          scene->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()));
+      segNode = vtkMRMLSegmentationNode::SafeDownCast(
+          scene->GetNodeByID(acquisition.segmentationNodeID.toUtf8().constData()));
+      if (browser && observation.frameIndex >= 0)
+      {
+        browser->SetSelectedItemNumber(observation.frameIndex);
+      }
+      if (browser && petSequence)
+      {
+        sourceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+            browser->GetProxyNode(petSequence));
+      }
+    }
+    else
+    {
+      segNode = vtkMRMLSegmentationNode::SafeDownCast(
+          scene->GetNodeByID(observation.segmentationNodeID.toUtf8().constData()));
+      sourceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+          scene->GetNodeByID(observation.petNodeID.toUtf8().constData()));
+    }
+  }
+  else
+  {
+    vtkMRMLSubjectHierarchyNode* shNode = scene
+        ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene) : nullptr;
+    segNode = (shNode && this->segID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        ? vtkMRMLSegmentationNode::SafeDownCast(shNode->GetItemDataNode(this->segID))
+        : nullptr;
+    if (this->sequenceBrowserPETNode && this->sequencePETNode)
+    {
+      sourceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+          this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+    }
+  }
 
   if (!segNode)
   {
@@ -21671,11 +22729,33 @@ void qSlicerDynamicPETModuleWidget::onOpenSegmentEditor()
     return;
   }
 
-  vtkMRMLScalarVolumeNode* sourceVolume = nullptr;
-  if (this->sequenceBrowserPETNode && this->sequencePETNode)
+  // Segment Editor can modify only Binary labelmap source representations.
+  // Multi preparation intentionally keeps Planar contour/other source data
+  // untouched for read-only TAC extraction. Convert only when the user
+  // explicitly opens Segment Editor, so editing never triggers Slicer's
+  // confirmation dialog while non-editing workflows preserve the original
+  // source representation for as long as possible.
+  vtkSegmentation* segmentation = segNode->GetSegmentation();
+  const std::string binaryRep =
+      vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+  if (segmentation && segmentation->GetSourceRepresentationName() != binaryRep)
   {
-    sourceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
-        this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+    if (sourceVolume)
+    {
+      segNode->SetReferenceImageGeometryParameterFromVolumeNode(sourceVolume);
+    }
+    if (!segNode->SetSourceRepresentationToBinaryLabelmap())
+    {
+      QMessageBox::warning(
+          this,
+          tr("Segment Editor"),
+          tr("Could not convert '%1' to an editable Binary labelmap source representation.")
+              .arg(segNode->GetName() ? QString::fromUtf8(segNode->GetName()) : tr("Segmentation")));
+      return;
+    }
+    d->logToPythonConsole(
+        tr("[SlicerDynamicPET Segment tracking] Converted '%1' to Binary labelmap source representation for editing.")
+            .arg(segNode->GetName() ? QString::fromUtf8(segNode->GetName()) : tr("Segmentation")));
   }
 
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();

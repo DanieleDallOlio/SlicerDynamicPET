@@ -100,6 +100,13 @@ struct MTGAParameters
   std::vector<double> x, y, fitted, weights, r;
   std::vector<int> frame;
   std::vector<bool> keep;
+
+  // Plot-only vectors cover the full model-supported observation window,
+  // including observations intentionally excluded by the selected regression
+  // start/end range. Regression diagnostics above remain fit-only.
+  std::vector<double> plotX, plotY, plotFitted;
+  std::vector<int> plotFrame;
+  std::vector<bool> plotIncluded;
 };
 
 
@@ -211,6 +218,10 @@ public:
   void computeTAC(vtkIdType ctNode, vtkIdType petNode, vtkIdType segNode, std::vector<QString> segments, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar, QPushButton* stopButton, std::atomic<bool>& stopRequested);
   void setupSeg(vtkMRMLSegmentationNode* segNode);
   VoxelStatistics ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue = 1);
+  VoxelStatistics ComputeSegmentStatistics(
+      vtkMRMLScalarVolumeNode* PETVolume,
+      vtkMRMLSegmentationNode* segmentationNode,
+      const std::string& segmentID);
   void TAC(vtkMRMLSequenceNode* sequencePETNode, vtkMRMLSequenceNode* segSequenceNode, std::vector<QString> segmentsID, std::map<std::string, std::vector<VoxelStatistics>>& segmentTACs, std::map<std::string, std::string>& segmentTACsnames, QProgressBar* ProgressBar, QPushButton* stopButton, std::atomic<bool>& stopRequested);
   double computeLogLik(const std::vector<double>& y,
                        const std::vector<double>& fitted,
@@ -268,7 +279,9 @@ public:
      const std::vector<double>* parentFractionTimesSec = nullptr,
      const std::vector<double>* parentFractionValues = nullptr,
      bool plasmaIsParent = false,
-     double acquisitionStartSec = 0.0);
+     double acquisitionStartSec = 0.0,
+     const std::vector<double>* frameStartTimesSec = nullptr,
+     const std::vector<double>* frameEndTimesSec = nullptr);
 
   // ROI-only optimization-derived liver dual-blood-input model.
   // The supplied arterial input is total whole blood. The model internally
@@ -291,7 +304,49 @@ public:
      const std::string& interpolationType = "linear",
      const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
      const std::vector<double>* nativeWholeBloodValues = nullptr,
-     double acquisitionStartSec = 0.0);
+     double acquisitionStartSec = 0.0,
+     const std::vector<double>* frameStartTimesSec = nullptr,
+     const std::vector<double>* frameEndTimesSec = nullptr);
+
+  // Evaluate already-fitted ROI TCM parameters on a larger IF-supported
+  // observation schedule. No parameter estimation or fit diagnostic is
+  // performed here; this is exclusively forward prediction for display.
+  bool PredictTCM(
+     const std::vector<std::vector<double>>& Cp,
+     const std::vector<std::vector<double>>& Cwb,
+     const std::vector<std::vector<double>>& framing,
+     const TCMParameters& params,
+     int n_tc,
+     double dk,
+     double timestep,
+     std::vector<double>& predictedCurve,
+     const std::string& interpolationType = "linear",
+     const std::vector<double>* nativePlasmaTimesSec = nullptr,
+     const std::vector<double>* nativePlasmaValues = nullptr,
+     const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+     const std::vector<double>* nativeWholeBloodValues = nullptr,
+     const std::vector<double>* parentFractionTimesSec = nullptr,
+     const std::vector<double>* parentFractionValues = nullptr,
+     bool plasmaIsParent = false,
+     double acquisitionStartSec = 0.0,
+     const std::vector<double>* frameStartTimesSec = nullptr,
+     const std::vector<double>* frameEndTimesSec = nullptr,
+     std::string* errorMessage = nullptr);
+
+  bool PredictLiverTCM(
+     const std::vector<std::vector<double>>& Cwb,
+     const std::vector<std::vector<double>>& framing,
+     const TCMParameters& params,
+     double dk,
+     double timestep,
+     std::vector<double>& predictedCurve,
+     const std::string& interpolationType = "linear",
+     const std::vector<double>* nativeWholeBloodTimesSec = nullptr,
+     const std::vector<double>* nativeWholeBloodValues = nullptr,
+     double acquisitionStartSec = 0.0,
+     const std::vector<double>* frameStartTimesSec = nullptr,
+     const std::vector<double>* frameEndTimesSec = nullptr,
+     std::string* errorMessage = nullptr);
 
   // void getFittedTCM(double *& fitted_curve,
   //                   std :: vector< std :: vector<double> > Cp,
@@ -356,7 +411,10 @@ public:
        double huber_tune = 1.345,
        double tol = 1e-6,
        int max_iter = 50,
-       double initialPlasmaIntegral = 0.0
+       double initialPlasmaIntegral = 0.0,
+       const std::vector<double>* frameStartTimesSec = nullptr,
+       const std::vector<double>* frameEndTimesSec = nullptr,
+       const std::vector<double>* plasmaIntegralAtMidSec = nullptr
        );
   void RelativePatlak(
        const std::vector<double>& tac,
@@ -371,7 +429,10 @@ public:
        double huber_tune = 1.345,
        double tol = 1e-6,
        int max_iter = 50,
-       size_t dataStartIndex = 0
+       size_t dataStartIndex = 0,
+       const std::vector<double>* frameStartTimesSec = nullptr,
+       const std::vector<double>* frameEndTimesSec = nullptr,
+       const std::vector<double>* plasmaIntegralAtMidSec = nullptr
        );
   void Logan(
        const std::vector<double>& tac,
@@ -385,7 +446,10 @@ public:
        bool std = true,
        double huber_tune = 1.345,
        double tol = 1e-6,
-       int max_iter = 50
+       int max_iter = 50,
+       const std::vector<double>* frameStartTimesSec = nullptr,
+       const std::vector<double>* frameEndTimesSec = nullptr,
+       const std::vector<double>* plasmaIntegralAtMidSec = nullptr
        );
   void RE(
        const std::vector<double>& tac,
@@ -399,7 +463,10 @@ public:
        bool std = true,
        double huber_tune = 1.345,
        double tol = 1e-6,
-       int max_iter = 50
+       int max_iter = 50,
+       const std::vector<double>* frameStartTimesSec = nullptr,
+       const std::vector<double>* frameEndTimesSec = nullptr,
+       const std::vector<double>* plasmaIntegralAtMidSec = nullptr
        );
   void RelativeRE(
        const std::vector<double>& tac,
@@ -414,7 +481,10 @@ public:
        double huber_tune = 1.345,
        double tol = 1e-6,
        int max_iter = 50,
-       size_t dataStartIndex = 0
+       size_t dataStartIndex = 0,
+       const std::vector<double>* frameStartTimesSec = nullptr,
+       const std::vector<double>* frameEndTimesSec = nullptr,
+       const std::vector<double>* plasmaIntegralAtMidSec = nullptr
        );
   void Image2Flatten(
        vtkIdType petID,

@@ -35,6 +35,15 @@
                <property name="rightMargin"><number>0</number></property>
                <property name="bottomMargin"><number>0</number></property>
                <item>
+                <widget class="QCheckBox" name="MultiTimepointAnalysisCheckBox">
+                 <property name="toolTip">
+                  <string>Switch Image Mode between the standard single-acquisition workflow and ROI-only Multi-timepoint analysis. In Multi-timepoint mode, select a patient and then choose PET acquisitions and their segmentations from a dedicated dialog spanning all studies for that patient.</string>
+                 </property>
+                 <property name="text"><string>Multi-timepoint</string></property>
+                 <property name="checked"><bool>false</bool></property>
+                </widget>
+               </item>
+               <item>
                 <spacer name="AnalysisModeSpacer">
                  <property name="orientation"><enum>Qt::Horizontal</enum></property>
                  <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
@@ -153,126 +162,70 @@
                  <property name="wordWrap"><bool>true</bool></property>
                 </widget>
                </item>
+               <item row="5" column="0" colspan="2">
+                <widget class="QLabel" name="TableMultiTimepointInfoLabel">
+                 <property name="toolTip"><string>Table mode does not need a separate multi-timepoint selector. Multiple acquisitions are represented by one workbook containing every acquired observation on its real time axis.</string></property>
+                 <property name="text"><string>Multiple acquisitions: include all observations in the same workbook using their actual acquisition times and durations. When temporal gaps are present, provide FrameStart_s/FrameEnd_s or representative time plus Duration_s so gaps can be preserved.</string></property>
+                 <property name="wordWrap"><bool>true</bool></property>
+                </widget>
+               </item>
               </layout>
              </widget>
             </item>
             <item>
-              <layout class="QFormLayout" name="formLayout_1">
-                <item row="0" column="0">
-                 <widget class="QLabel" name="label1">
-                  <property name="text">
-                   <string>Patient:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="0" column="1">
-                 <widget class="QComboBox" name="PatSelector">
-                   <property name="toolTip">
-                    <string>Choose Patient.</string>
-                   </property>
-                 </widget>
-                </item>
-                <item row="1" column="0">
-                 <widget class="QLabel" name="label2">
-                  <property name="text">
-                   <string>Study:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="1" column="1">
-                 <widget class="QComboBox" name="StuSelector">
-                   <property name="toolTip">
-                    <string>Choose Study.</string>
-                   </property>
-                 </widget>
-                </item>
-                <item row="2" column="0">
-                 <widget class="QLabel" name="label3">
-                  <property name="text">
-                   <string>CT:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="2" column="1">
-                 <widget class="QComboBox" name="CTSelector">
-                  <property name="toolTip">
-                   <string>Choose CT.</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="3" column="0">
-                 <widget class="QLabel" name="label4">
-                  <property name="text">
-                   <string>PET:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="3" column="1">
-                 <widget class="QComboBox" name="PETSelector">
-                  <property name="toolTip">
-                   <string>Choose PET.</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="4" column="1">
-                 <widget class="QLabel" name="AcquisitionTimingStatusLabel">
-                  <property name="visible"><bool>false</bool></property>
-                  <property name="sizePolicy">
-                   <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
-                    <horstretch>0</horstretch><verstretch>0</verstretch>
-                   </sizepolicy>
-                  </property>
-                  <property name="toolTip">
-                   <string>Timing interpretation for the selected PET. For a delayed DICOM study, the displayed delay is injection-to-START-of-first-frame, not midpoint/end. Early-time means acquisition begins near t=0.</string>
-                  </property>
-                  <property name="text"><string>Acquisition timing: —</string></property>
-                 </widget>
-                </item>
-                <item row="5" column="0">
-                 <widget class="QLabel" name="labseg">
-                  <property name="text">
-                   <string>Segmentation:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="5" column="1">
-                 <widget class="QComboBox" name="SegSelector">
-                   <property name="toolTip">
-                    <string>Choose Segmentation.</string>
-                   </property>
-                 </widget>
-                </item>
-                <item row="6" column="0">
-                 <widget class="QLabel" name="labsegments">
-                  <property name="text">
-                   <string>Segments:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item row="6" column="1">  <!-- Put it just above the scroll area -->
-                  <widget class="QPushButton" name="segmentSelectAll">
-                    <property name="text">
-                      <string>Select/Deselect All</string>
-                    </property>
-                  </widget>
-                </item>
-                <item row="7" column="1">
-                  <widget class="QScrollArea" name="SegmentCheckScrollArea">
-                   <property name="widgetResizable">
-                    <bool>true</bool>
-                   </property>
-                   <property name="maximumHeight">
-                     <number>120</number>  <!-- ~5 checkboxes depending on style/font -->
-                   </property>
-                   <widget class="QWidget" name="SegmentCheckContents">
-                     <property name="styleSheet">
-                       <string notr="true">background-color: white;</string>
-                     </property>
-                    <layout class="QVBoxLayout" name="segmentCheckLayout"/>
-                   </widget>
-                  </widget>
-                </item>
+             <widget class="QWidget" name="ImageSelectionContainer" native="true">
+              <layout class="QVBoxLayout" name="ImageSelectionLayout">
+               <property name="leftMargin"><number>0</number></property>
+               <property name="topMargin"><number>0</number></property>
+               <property name="rightMargin"><number>0</number></property>
+               <property name="bottomMargin"><number>0</number></property>
+               <property name="spacing"><number>2</number></property>
+               <item>
+                <widget class="QWidget" name="ImagePatientSelectionWidget" native="true">
+                 <layout class="QFormLayout" name="ImagePatientSelectionLayout">
+                  <property name="verticalSpacing"><number>2</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="label1"><property name="text"><string>Patient:</string></property></widget></item>
+                  <item row="0" column="1"><widget class="QComboBox" name="PatSelector"><property name="toolTip"><string>Choose Patient.</string></property></widget></item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <widget class="QWidget" name="SingleAcquisitionSelectionWidget" native="true">
+                 <layout class="QFormLayout" name="SingleAcquisitionSelectionLayout">
+                  <property name="verticalSpacing"><number>2</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="label2"><property name="text"><string>Study:</string></property></widget></item>
+                  <item row="0" column="1"><widget class="QComboBox" name="StuSelector"><property name="toolTip"><string>Choose Study.</string></property></widget></item>
+                  <item row="1" column="0"><widget class="QLabel" name="label3"><property name="text"><string>CT:</string></property></widget></item>
+                  <item row="1" column="1"><widget class="QComboBox" name="CTSelector"><property name="toolTip"><string>Choose CT.</string></property></widget></item>
+                  <item row="2" column="0"><widget class="QLabel" name="label4"><property name="text"><string>PET:</string></property></widget></item>
+                  <item row="2" column="1"><widget class="QComboBox" name="PETSelector"><property name="toolTip"><string>Choose PET.</string></property></widget></item>
+                  <item row="3" column="1"><widget class="QLabel" name="AcquisitionTimingStatusLabel"><property name="visible"><bool>false</bool></property><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="toolTip"><string>Timing interpretation for the selected PET. For a delayed DICOM study, the displayed delay is injection-to-START-of-first-frame, not midpoint/end. Early-time means acquisition begins near t=0.</string></property><property name="text"><string>Acquisition timing: —</string></property></widget></item>
+                  <item row="4" column="0"><widget class="QLabel" name="labseg"><property name="text"><string>Segmentation:</string></property></widget></item>
+                  <item row="4" column="1"><widget class="QComboBox" name="SegSelector"><property name="toolTip"><string>Choose Segmentation.</string></property></widget></item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <widget class="QWidget" name="MultiTimepointMainSelectionWidget" native="true">
+                 <layout class="QFormLayout" name="MultiTimepointMainSelectionLayout">
+                  <property name="verticalSpacing"><number>2</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="MultiTimepointSelectionLabel"><property name="text"><string>Acquisitions:</string></property></widget></item>
+                  <item row="0" column="1"><widget class="QWidget" name="MultiTimepointSelectionRow" native="true"><layout class="QHBoxLayout" name="MultiTimepointSelectionRowLayout"><property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property><property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property><property name="spacing"><number>4</number></property><item><widget class="QPushButton" name="MultiTimepointSelectionButton"><property name="toolTip"><string>Choose PET acquisitions across all studies for the selected patient and assign one segmentation to each selected PET.</string></property><property name="text"><string>Select acquisitions...</string></property></widget></item><item><widget class="QLabel" name="MultiTimepointSelectionSummaryLabel"><property name="text"><string>None selected</string></property><property name="wordWrap"><bool>true</bool></property></widget></item></layout></widget></item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <widget class="QWidget" name="SegmentSelectionWidget" native="true">
+                 <layout class="QFormLayout" name="SegmentSelectionLayout">
+                  <property name="verticalSpacing"><number>2</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="labsegments"><property name="text"><string>Segments:</string></property></widget></item>
+                  <item row="0" column="1"><widget class="QPushButton" name="segmentSelectAll"><property name="text"><string>Select/Deselect All</string></property></widget></item>
+                  <item row="1" column="1"><widget class="QScrollArea" name="SegmentCheckScrollArea"><property name="widgetResizable"><bool>true</bool></property><property name="maximumHeight"><number>120</number></property><widget class="QWidget" name="SegmentCheckContents"><property name="styleSheet"><string notr="true">background-color: white;</string></property><layout class="QVBoxLayout" name="segmentCheckLayout"/></widget></widget></item>
+                 </layout>
+                </widget>
+               </item>
               </layout>
+             </widget>
             </item>
             <item>
              <widget class="QPushButton" name="TACbutton">
@@ -303,17 +256,19 @@
                   <string>Display units:</string>
                  </property>
                  <property name="toolTip">
-                  <string>General display/export choice for quantitative activity curves. Kinetic fitting remains in the PET sequence native quantitative scale, so switching display units cannot change fitted parameters.</string>
+                  <string>Display/export choice for quantitative activity curves. In Multi-timepoint mode ROI observations are canonicalized to SUVbw without modifying PET voxels; Bq-family units use the reference dynamic acquisition factor. Switching display units does not change fitted parameters.</string>
                  </property>
                 </widget>
                </item>
                <item>
                 <widget class="QComboBox" name="QuantitativeDisplayUnitSelector">
                  <property name="toolTip">
-                  <string>Display quantitative activity curves as SUVbw or Bq/mL when a validated SUVbw conversion factor is available. This does not change the fitting scale.</string>
+                  <string>Display quantitative activity curves as SUVbw, Bq/mL, kBq/mL, or MBq/mL when a validated SUVbw conversion factor is available. This does not change the fitting scale.</string>
                  </property>
                  <item><property name="text"><string>SUVbw</string></property></item>
                  <item><property name="text"><string>Bq/mL</string></property></item>
+                 <item><property name="text"><string>kBq/mL</string></property></item>
+                 <item><property name="text"><string>MBq/mL</string></property></item>
                 </widget>
                </item>
                <item>
@@ -323,6 +278,47 @@
                   <size><width>40</width><height>20</height></size>
                  </property>
                 </spacer>
+               </item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <widget class="QGroupBox" name="MultiTimepointGroupBox">
+              <property name="title"><string>Multi-timepoint acquisition selection (dialog contents)</string></property>
+              <property name="toolTip"><string>This group is defined here so the complete selection dialog remains editable in Qt Designer. At runtime it is reparented into a modal acquisition-selection dialog.</string></property>
+              <layout class="QVBoxLayout" name="MultiTimepointLayout">
+               <item>
+                <widget class="QLabel" name="MultiTimepointInfoLabel">
+                 <property name="text"><string>Choose PET acquisitions loaded with dPETImporter across all studies for the selected patient. Select at least two acquisitions, assign one segmentation to every selected PET, and keep the earliest selected acquisition dynamic. Multi-timepoint analysis merges scalar ROI observations only; it does not create a combined PET image sequence or register acquisitions.</string></property>
+                 <property name="wordWrap"><bool>true</bool></property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QTableWidget" name="MultiTimepointAcquisitionTable">
+                 <property name="minimumHeight"><number>220</number></property>
+                 <property name="alternatingRowColors"><bool>true</bool></property>
+                 <property name="selectionMode"><enum>QAbstractItemView::NoSelection</enum></property>
+                 <property name="editTriggers"><set>QAbstractItemView::NoEditTriggers</set></property>
+                 <property name="rowCount"><number>0</number></property>
+                 <property name="columnCount"><number>6</number></property>
+                 <column><property name="text"><string>Use</string></property></column>
+                 <column><property name="text"><string>Study</string></property></column>
+                 <column><property name="text"><string>PET</string></property></column>
+                 <column><property name="text"><string>Segmentation</string></property></column>
+                 <column><property name="text"><string>Type</string></property></column>
+                 <column><property name="text"><string>Timing</string></property></column>
+                </widget>
+               </item>
+               <item>
+                <widget class="QLabel" name="MultiTimepointStatusLabel">
+                 <property name="text"><string>No acquisitions selected.</string></property>
+                 <property name="wordWrap"><bool>true</bool></property>
+                </widget>
+               </item>
+               <item>
+                <widget class="QDialogButtonBox" name="MultiTimepointDialogButtonBox">
+                 <property name="standardButtons"><set>QDialogButtonBox::Close</set></property>
+                </widget>
                </item>
               </layout>
              </widget>
@@ -632,8 +628,17 @@
                           </widget>
                         </item>
 
+                        <!-- Explicit Feng tail extrapolation -->
+                        <item row="3" column="0" colspan="4">
+                          <widget class="QCheckBox" name="IFFengExtrapolationCheckBox">
+                            <property name="text"><string>Allow Feng extrapolation to PET support</string></property>
+                            <property name="toolTip"><string>When Feng modeling is selected, extend the fitted analytic input function beyond the last measured blood sample only as far as required by the available PET observations. Off by default. Interpolation/smoothing and PBIF templates are never extrapolated. Disabled while PBIF calibration is active so modeled tail values cannot enter PBIF AUC calibration.</string></property>
+                            <property name="checked"><bool>false</bool></property>
+                          </widget>
+                        </item>
+
                         <!-- Fine time step -->
-                        <item row="3" column="0">
+                        <item row="4" column="0">
                           <widget class="QLabel" name="timeStepLabel">
                             <property name="text"><string>TCM integration time step</string></property>
                             <property name="toolTip">
@@ -641,19 +646,19 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="3" column="1">
+                        <item row="4" column="1">
                           <widget class="QLineEdit" name="timeStepEdit">
                             <property name="text"><string>1.0</string></property>
                           </widget>
                         </item>
-                        <item row="3" column="2">
+                        <item row="4" column="2">
                           <widget class="QLabel" name="timeStepUnitLabel">
                             <property name="text"><string>s</string></property>
                           </widget>
                         </item>
 
                         <!-- Plasma / whole-blood -->
-                        <item row="4" column="0">
+                        <item row="5" column="0">
                           <widget class="QLabel" name="pbrpLabel">
                             <property name="text"><string>Plasma / whole-blood ratio</string></property>
                             <property name="toolTip">
@@ -661,19 +666,19 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="4" column="1">
+                        <item row="5" column="1">
                           <widget class="QLineEdit" name="pbrp1Edit">
                             <property name="text"><string>1.0</string></property>
                             <property name="toolTip"><string>p1</string></property>
                           </widget>
                         </item>
-                        <item row="4" column="2">
+                        <item row="5" column="2">
                           <widget class="QLineEdit" name="pbrp2Edit">
                             <property name="text"><string>0.0</string></property>
                             <property name="toolTip"><string>p2</string></property>
                           </widget>
                         </item>
-                        <item row="4" column="3">
+                        <item row="5" column="3">
                           <widget class="QLineEdit" name="pbrp3Edit">
                             <property name="text"><string>0.0</string></property>
                             <property name="toolTip"><string>p3</string></property>
@@ -681,7 +686,7 @@
                         </item>
 
                         <!-- PBIF calibration -->
-                        <item row="5" column="0" colspan="4">
+                        <item row="6" column="0" colspan="4">
                           <widget class="QCheckBox" name="PBIFOptionCheckBox">
                             <property name="text"><string>Use PBIF calibration</string></property>
                             <property name="toolTip">
@@ -689,46 +694,46 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="6" column="0">
+                        <item row="7" column="0">
                           <widget class="QLabel" name="PBIFFileLabel">
                             <property name="text"><string>PBIF template CSV</string></property>
                             <property name="toolTip"><string>Format: time_s,template_value.</string></property>
                           </widget>
                         </item>
-                        <item row="6" column="1" colspan="3">
+                        <item row="7" column="1" colspan="3">
                           <layout class="QHBoxLayout" name="PBIFFileLayout">
                             <item><widget class="QLineEdit" name="PBIFPathEdit"><property name="readOnly"><bool>true</bool></property><property name="placeholderText"><string>No PBIF selected</string></property></widget></item>
                             <item><widget class="QPushButton" name="PBIFBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
                             <item><widget class="QPushButton" name="PBIFPreviewButton"><property name="text"><string>Preview</string></property></widget></item>
                           </layout>
                         </item>
-                        <item row="7" column="0">
+                        <item row="8" column="0">
                           <widget class="QLabel" name="PBIFDomainLabel">
                             <property name="text"><string>PBIF template represents</string></property>
                             <property name="toolTip"><string>Select the biological domain of the supplied PBIF template. The patient calibration curve is converted to the same domain before AUC scaling.</string></property>
                           </widget>
                         </item>
-                        <item row="7" column="1" colspan="3">
+                        <item row="8" column="1" colspan="3">
                           <widget class="QComboBox" name="PBIFDomainSelector">
                             <property name="toolTip"><string>Domain represented by the PBIF template itself. Choose Whole blood or Total plasma; DynamicPET converts the patient calibration curve to the matching domain before scaling.</string></property>
                             <item><property name="text"><string>Whole blood</string></property></item>
                             <item><property name="text"><string>Total plasma</string></property></item>
                           </widget>
                         </item>
-                        <item row="8" column="0">
+                        <item row="9" column="0">
                           <widget class="QLabel" name="PBIFCalibrationIntervalLabel"><property name="text"><string>AUC calibration interval</string></property></widget>
                         </item>
-                        <item row="8" column="1">
+                        <item row="9" column="1">
                           <widget class="QDoubleSpinBox" name="PBIFCalibrationStartSpinBox">
                             <property name="decimals"><number>3</number></property>
                             <property name="maximum"><double>1000000.000000000000000</double></property>
                             <property name="suffix"><string> s</string></property>
                           </widget>
                         </item>
-                        <item row="8" column="2">
+                        <item row="9" column="2">
                           <widget class="QLabel" name="PBIFCalibrationToLabel"><property name="text"><string>to</string></property></widget>
                         </item>
-                        <item row="8" column="3">
+                        <item row="9" column="3">
                           <widget class="QDoubleSpinBox" name="PBIFCalibrationEndSpinBox">
                             <property name="decimals"><number>3</number></property>
                             <property name="maximum"><double>1000000.000000000000000</double></property>
@@ -737,7 +742,7 @@
                         </item>
 
                         <!-- Metabolite / parent-fraction correction -->
-                        <item row="9" column="0" colspan="4">
+                        <item row="10" column="0" colspan="4">
                           <widget class="QCheckBox" name="MetaboliteCorrectionCheckBox">
                             <property name="text"><string>Apply parent-fraction correction</string></property>
                             <property name="toolTip">
@@ -745,23 +750,23 @@
                             </property>
                           </widget>
                         </item>
-                        <item row="10" column="0">
+                        <item row="11" column="0">
                           <widget class="QLabel" name="ParentFractionFileLabel">
                             <property name="text"><string>Parent-fraction CSV</string></property>
                             <property name="toolTip"><string>Format: time_s,parent_fraction with values between 0 and 1.</string></property>
                           </widget>
                         </item>
-                        <item row="10" column="1" colspan="3">
+                        <item row="11" column="1" colspan="3">
                           <layout class="QHBoxLayout" name="ParentFractionFileLayout">
                             <item><widget class="QLineEdit" name="ParentFractionPathEdit"><property name="readOnly"><bool>true</bool></property><property name="placeholderText"><string>No parent-fraction CSV selected</string></property></widget></item>
                             <item><widget class="QPushButton" name="ParentFractionBrowseButton"><property name="text"><string>Browse...</string></property></widget></item>
                             <item><widget class="QPushButton" name="ParentFractionPreviewButton"><property name="text"><string>Preview</string></property></widget></item>
                           </layout>
                         </item>
-                        <item row="11" column="0">
+                        <item row="12" column="0">
                           <widget class="QLabel" name="ParentFractionProcessingLabel"><property name="text"><string>Parent-fraction processing</string></property><property name="toolTip"><string>Linear uses the supplied measurements directly. Hill and exponential models start at parent fraction 1. Extended Hill also estimates an initial plateau and delay. Parametric fits may extrapolate beyond the last metabolite sample; linear interpolation does not.</string></property></widget>
                         </item>
-                        <item row="11" column="1" colspan="3">
+                        <item row="12" column="1" colspan="3">
                           <widget class="QComboBox" name="ParentFractionProcessingSelector">
                             <item><property name="text"><string>Linear interpolation</string></property></item>
                             <item><property name="text"><string>Hill</string></property></item>
@@ -923,7 +928,7 @@
                           <string>Show vertical bars when available. In image mode these are ROI dispersion measures (SD for Mean, IQR/1.349 for Median, local SUVpeak-region SD for Peak), not automatically the uncertainty of the ROI estimator. In Table mode imported one-sigma uncertainty is used. Max has no automatic image-derived uncertainty.</string>
                          </property>
                          <property name="text">
-                          <string>Show error / dispersion bars</string>
+                          <string>Dispersion</string>
                          </property>
                          <property name="checked">
                           <bool>false</bool>

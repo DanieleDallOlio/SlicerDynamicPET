@@ -40,6 +40,8 @@
 #include <vtkMatrix4x4.h>
 #include <vtkMRMLSegmentationDisplayNode.h>
 #include <vtkMRMLTransformNode.h>
+#include <vtkGeneralTransform.h>
+#include <vtkDataObject.h>
 #include <vtkAlgorithmOutput.h>
 
 #include <vtkImageOpenClose3D.h>
@@ -50,6 +52,10 @@
 #include <cmath>
 #include <numeric>
 #include <limits>
+#include <set>
+#include <sstream>
+#include <iomanip>
+#include <exception>
 
 // define M_PI in case of Win
 #ifdef _WIN32
@@ -61,6 +67,101 @@
 
 namespace
 {
+
+  using DynamicPETDiagnosticClock = std::chrono::steady_clock;
+
+  double DynamicPETElapsedMs(
+      const DynamicPETDiagnosticClock::time_point& start,
+      const DynamicPETDiagnosticClock::time_point& end)
+  {
+      return std::chrono::duration<double, std::milli>(end - start).count();
+  }
+
+  std::string DynamicPETDescribeLabelImage(
+      vtkImageData* image,
+      int exactLabelValue = std::numeric_limits<int>::min())
+  {
+      std::ostringstream out;
+      if (!image || !image->GetPointData() ||
+          !image->GetPointData()->GetScalars())
+      {
+          out << "<no scalar image>";
+          return out.str();
+      }
+
+      int extent[6] = {0, -1, 0, -1, 0, -1};
+      double range[2] = {0.0, 0.0};
+      image->GetExtent(extent);
+      image->GetScalarRange(range);
+      vtkDataArray* scalars = image->GetPointData()->GetScalars();
+      const vtkIdType tuples = scalars->GetNumberOfTuples();
+      vtkIdType nonZero = 0;
+      vtkIdType exact = 0;
+      std::set<int> uniqueValues;
+
+      for (vtkIdType i = 0; i < tuples; ++i)
+      {
+          const double value = scalars->GetComponent(i, 0);
+          const int rounded = static_cast<int>(std::llround(value));
+          if (std::abs(value) > 0.5)
+          {
+              ++nonZero;
+          }
+          if (exactLabelValue != std::numeric_limits<int>::min() &&
+              rounded == exactLabelValue)
+          {
+              ++exact;
+          }
+          if (uniqueValues.size() < 12)
+          {
+              uniqueValues.insert(rounded);
+          }
+      }
+
+      out << "extent=["
+          << extent[0] << "," << extent[1] << ";"
+          << extent[2] << "," << extent[3] << ";"
+          << extent[4] << "," << extent[5] << "]"
+          << " tuples=" << tuples
+          << " range=[" << range[0] << "," << range[1] << "]"
+          << " nonZero=" << nonZero;
+      if (exactLabelValue != std::numeric_limits<int>::min())
+      {
+          out << " exactLabel(" << exactLabelValue << ")=" << exact;
+      }
+      out << " unique(first<=12)={";
+      bool first = true;
+      for (int value : uniqueValues)
+      {
+          if (!first) out << ",";
+          out << value;
+          first = false;
+      }
+      out << "}";
+      return out.str();
+  }
+
+  std::string DynamicPETMatrixString(vtkMatrix4x4* matrix)
+  {
+      if (!matrix)
+      {
+          return "<null>";
+      }
+      std::ostringstream out;
+      out << std::fixed << std::setprecision(4);
+      for (int r = 0; r < 4; ++r)
+      {
+          if (r > 0) out << " | ";
+          out << "[";
+          for (int c = 0; c < 4; ++c)
+          {
+              if (c > 0) out << ",";
+              out << matrix->GetElement(r, c);
+          }
+          out << "]";
+      }
+      return out.str();
+  }
 
   bool ComputePchipSlopes(
       const std::vector<double>& x,
@@ -1205,6 +1306,105 @@ static void parentFractionJacobianInternal(
     }
 }
 
+
+bool BuildMTGAObservationSchedule(
+    const std::vector<double>& framingSec,
+    double framingNorm,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec,
+    std::vector<double>& frameStart,
+    std::vector<double>& frameEnd,
+    std::vector<double>& frameMid)
+{
+    const size_t n = framingSec.size();
+    if (n == 0 || !(framingNorm > 0.0))
+    {
+        return false;
+    }
+
+    const bool anyExplicit = frameStartTimesSec || frameEndTimesSec;
+    const bool useExplicit =
+        frameStartTimesSec && frameEndTimesSec &&
+        frameStartTimesSec->size() == n &&
+        frameEndTimesSec->size() == n;
+
+    if (anyExplicit && !useExplicit)
+    {
+        return false;
+    }
+
+    frameStart.assign(n, 0.0);
+    frameEnd.assign(n, 0.0);
+    frameMid.assign(n, 0.0);
+
+    double cumulativeSec = 0.0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double durationSec = framingSec[i];
+        if (!std::isfinite(durationSec) || !(durationSec > 0.0))
+        {
+            return false;
+        }
+
+        double startSec = cumulativeSec;
+        double endSec = cumulativeSec + durationSec;
+
+        if (useExplicit)
+        {
+            startSec = (*frameStartTimesSec)[i];
+            endSec = (*frameEndTimesSec)[i];
+
+            if (!std::isfinite(startSec) || !std::isfinite(endSec) ||
+                !(endSec > startSec) ||
+                std::abs((endSec - startSec) - durationSec) >
+                    std::max(1e-6, 1e-6 * durationSec) ||
+                (i > 0 && startSec < (*frameEndTimesSec)[i - 1] - 1e-6))
+            {
+                return false;
+            }
+        }
+
+        frameStart[i] = startSec / framingNorm;
+        frameEnd[i] = endSec / framingNorm;
+        frameMid[i] = 0.5 * (frameStart[i] + frameEnd[i]);
+        cumulativeSec = endSec;
+    }
+
+    return true;
+}
+
+void BuildGapAwareFrameAverageIntegralAtMid(
+    const std::vector<double>& values,
+    const std::vector<double>& frameStart,
+    const std::vector<double>& frameEnd,
+    double initialIntegral,
+    std::vector<double>& integralAtMid)
+{
+    const size_t n = values.size();
+    integralAtMid.assign(n, initialIntegral);
+    double accumulated = initialIntegral;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        if (i > 0)
+        {
+            const double gap = frameStart[i] - frameEnd[i - 1];
+            if (gap > 0.0)
+            {
+                // Explicit methodological assumption for genuinely unobserved
+                // intervals: linearly interpolate between the neighbouring
+                // frame-average observations and integrate that bridge.
+                accumulated += 0.5 * (values[i - 1] + values[i]) * gap;
+            }
+        }
+
+        const double duration = frameEnd[i] - frameStart[i];
+        integralAtMid[i] = accumulated + 0.5 * values[i] * duration;
+        accumulated += values[i] * duration;
+    }
+}
+
+
 } // end anonymous namespace
 
 static double DynamicPETBinaryLabelmapVolumeMm3(
@@ -2217,8 +2417,16 @@ void vtkSlicerDynamicPETLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
 
 VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVolumeNode* PETVolume, vtkImageData* labelmap, int labelValue)
 {
-  vtkImageData* petImage = PETVolume->GetImageData();
   VoxelStatistics stats;
+  if (!PETVolume || !PETVolume->GetImageData() || !labelmap)
+  {
+    stats.keep = false;
+    stats.empty = true;
+    stats.mean = std::numeric_limits<double>::quiet_NaN();
+    return stats;
+  }
+
+  vtkImageData* petImage = PETVolume->GetImageData();
   std::vector<double> values;
 
   int dims[3];
@@ -2229,7 +2437,23 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
   double voxelVolume = spacing[0] * spacing[1] * spacing[2];
 
   vtkDataArray* petArray = petImage->GetPointData()->GetScalars();
-  vtkDataArray* labelArray = labelmap->GetPointData()->GetScalars();
+  vtkDataArray* labelArray = labelmap && labelmap->GetPointData()
+      ? labelmap->GetPointData()->GetScalars() : nullptr;
+
+  int petExtent[6] = {0, -1, 0, -1, 0, -1};
+  int labelExtent[6] = {0, -1, 0, -1, 0, -1};
+  petImage->GetExtent(petExtent);
+  labelmap->GetExtent(labelExtent);
+  const bool sameExtent = std::equal(petExtent, petExtent + 6, labelExtent);
+
+  if (!petArray || !labelArray || !sameExtent ||
+      petArray->GetNumberOfTuples() != labelArray->GetNumberOfTuples())
+  {
+    stats.keep = false;
+    stats.empty = true;
+    stats.mean = std::numeric_limits<double>::quiet_NaN();
+    return stats;
+  }
 
   int max_ijk[3] = {0,0,0};
 
@@ -2242,7 +2466,7 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
         int ijk[3] = { x, y, z };
         vtkIdType idx = petImage->ComputePointId(ijk);
         int label = static_cast<int>(labelArray->GetComponent(idx, 0));
-        if (label == labelValue)
+        if ((labelValue < 0 && label != 0) || label == labelValue)
         {
           double val = petArray->GetComponent(idx, 0);
           stats.count++;
@@ -2343,7 +2567,7 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
     vtkIdType idx = petImage->ComputePointId(ijk);
 
     int label = static_cast<int>(labelArray->GetComponent(idx, 0));
-    if (label != labelValue)
+    if (!((labelValue < 0 && label != 0) || label == labelValue))
       continue;
 
     double val = petArray->GetComponent(idx, 0);
@@ -2538,6 +2762,16 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
     return;
   }
 
+  const auto tacPerfStart = DynamicPETDiagnosticClock::now();
+  double tacBinaryPreparationMs = 0.0;
+  double tacMergedLabelmapMs = 0.0;
+  double tacVoxelStatisticsMs = 0.0;
+  size_t tacBinaryPreparationCalls = 0;
+  size_t tacMergedLabelmapCalls = 0;
+  size_t tacVoxelStatisticsCalls = 0;
+  std::ostringstream representativeFramePerf;
+  representativeFramePerf << "[SlicerDynamicPET PERF][SINGLE] Representative frames:";
+
   std::string index0 = sequencePETNode->GetNthIndexValue(0);
   vtkMRMLSegmentationNode* segmentationAt0 = vtkMRMLSegmentationNode::SafeDownCast(segSequenceNode->GetDataNodeAtValue(index0));
   if (!segmentationAt0)
@@ -2612,6 +2846,11 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
 
   for (int i = 0; i < numberOfTimepoints; ++i)
   {
+    const auto framePerfStart = DynamicPETDiagnosticClock::now();
+    double frameBinaryPreparationMs = 0.0;
+    double frameMergedLabelmapMs = 0.0;
+    double frameVoxelStatisticsMs = 0.0;
+
     std::string indexValue = sequencePETNode->GetNthIndexValue(i);
     auto* PETVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
       sequencePETNode->GetDataNodeAtValue(indexValue));
@@ -2642,7 +2881,14 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       }
 
       segmentationNode->SetReferenceImageGeometryParameterFromVolumeNode(PETVolume);
-      if (!frameSegmentation->CreateRepresentation(binaryLabelmapRep))
+      const auto binaryPreparationStart = DynamicPETDiagnosticClock::now();
+      const bool binaryPreparationOK =
+          frameSegmentation->CreateRepresentation(binaryLabelmapRep);
+      frameBinaryPreparationMs += DynamicPETElapsedMs(
+          binaryPreparationStart, DynamicPETDiagnosticClock::now());
+      tacBinaryPreparationMs += frameBinaryPreparationMs;
+      ++tacBinaryPreparationCalls;
+      if (!binaryPreparationOK)
       {
         std::cerr
             << "Failed to create Binary labelmap representation at timepoint "
@@ -2692,6 +2938,7 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       vtkSmartPointer<vtkOrientedImageData> labelmap =
           vtkSmartPointer<vtkOrientedImageData>::New();
 
+      const auto mergedLabelmapStart = DynamicPETDiagnosticClock::now();
       vtkSlicerSegmentationsModuleLogic::
           GenerateMergedLabelmapInReferenceGeometry(
               segmentationNode,
@@ -2699,6 +2946,11 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
               segmentArray,
               vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
               labelmap);
+      const double mergedLabelmapElapsed = DynamicPETElapsedMs(
+          mergedLabelmapStart, DynamicPETDiagnosticClock::now());
+      frameMergedLabelmapMs += mergedLabelmapElapsed;
+      tacMergedLabelmapMs += mergedLabelmapElapsed;
+      ++tacMergedLabelmapCalls;
 
       if (!labelmap ||
           !labelmap->GetPointData() ||
@@ -2714,15 +2966,33 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       }
       else
       {
+        const auto voxelStatisticsStart = DynamicPETDiagnosticClock::now();
         stats = ComputeVoxelStatistics(
             PETVolume,
             labelmap,
             1);
+        const double voxelStatisticsElapsed = DynamicPETElapsedMs(
+            voxelStatisticsStart, DynamicPETDiagnosticClock::now());
+        frameVoxelStatisticsMs += voxelStatisticsElapsed;
+        tacVoxelStatisticsMs += voxelStatisticsElapsed;
+        ++tacVoxelStatisticsCalls;
 
       }
 
       segmentTACs[segmentID][i] = stats;
     }
+    if (i == 0 || i == numberOfTimepoints / 2 || i + 1 == numberOfTimepoints)
+    {
+      const double frameTotalMs = DynamicPETElapsedMs(
+          framePerfStart, DynamicPETDiagnosticClock::now());
+      representativeFramePerf
+          << "\n  frame " << (i + 1) << "/" << numberOfTimepoints
+          << " total=" << std::fixed << std::setprecision(3) << frameTotalMs << " ms"
+          << " binaryPrep=" << frameBinaryPreparationMs << " ms"
+          << " mergedLabelmaps=" << frameMergedLabelmapMs << " ms"
+          << " voxelStats=" << frameVoxelStatisticsMs << " ms";
+    }
+
     if (ProgressBar){
       ProgressBar->setValue(static_cast<double>(i + 1) / numberOfTimepoints*100.);
       // qApp->processEvents();
@@ -2734,11 +3004,261 @@ void vtkSlicerDynamicPETLogic::TAC(vtkMRMLSequenceNode* sequencePETNode,
       break;
     }
   }
+  const double tacTotalMs = DynamicPETElapsedMs(
+      tacPerfStart, DynamicPETDiagnosticClock::now());
+  const double tacAccountedMs =
+      tacBinaryPreparationMs + tacMergedLabelmapMs + tacVoxelStatisticsMs;
+
+  std::ostringstream tacPerfSummary;
+  tacPerfSummary
+      << "[SlicerDynamicPET PERF][SINGLE] Logic TAC SUMMARY: total="
+      << std::fixed << std::setprecision(3) << tacTotalMs << " ms"
+      << "; frames=" << numberOfTimepoints
+      << "; ROIs=" << segmentsID.size()
+      << "; Binary preparation=" << tacBinaryPreparationMs << " ms across "
+      << tacBinaryPreparationCalls << " frame conversion(s)"
+      << "; merged-labelmap generation=" << tacMergedLabelmapMs << " ms across "
+      << tacMergedLabelmapCalls << " call(s)"
+      << "; voxel statistics=" << tacVoxelStatisticsMs << " ms across "
+      << tacVoxelStatisticsCalls << " call(s)"
+      << "; other/control=" << std::max(0.0, tacTotalMs - tacAccountedMs) << " ms.";
+
+  sequencePETNode->SetAttribute(
+      "SlicerDynamicPET.TACPerfSummary",
+      tacPerfSummary.str().c_str());
+  sequencePETNode->SetAttribute(
+      "SlicerDynamicPET.TACPerfFrames",
+      representativeFramePerf.str().c_str());
+
   if (ProgressBar) {
     stopButton->setVisible(false);
     qApp->processEvents();
   }
 }
+
+VoxelStatistics vtkSlicerDynamicPETLogic::ComputeSegmentStatistics(
+    vtkMRMLScalarVolumeNode* PETVolume,
+    vtkMRMLSegmentationNode* segmentationNode,
+    const std::string& segmentID)
+{
+  VoxelStatistics stats;
+  stats.keep = false;
+  stats.empty = true;
+
+  const auto totalStart = DynamicPETDiagnosticClock::now();
+  const char* diagnosticRequestText = segmentationNode
+      ? segmentationNode->GetAttribute("SlicerDynamicPET.MultiDiagnosticRequest")
+      : nullptr;
+  const bool detailedDiagnostic =
+      diagnosticRequestText && *diagnosticRequestText;
+  std::ostringstream diagnostic;
+
+  auto publishDiagnostic = [&](const std::string& terminalStage)
+  {
+      if (!detailedDiagnostic || !segmentationNode)
+      {
+          return;
+      }
+      diagnostic
+          << "\nterminalStage=" << terminalStage
+          << "\ntotal ComputeSegmentStatistics="
+          << std::fixed << std::setprecision(3)
+          << DynamicPETElapsedMs(totalStart, DynamicPETDiagnosticClock::now())
+          << " ms"
+          << "\n====================================================";
+      segmentationNode->SetAttribute(
+          "SlicerDynamicPET.MultiDiagnosticResult",
+          diagnostic.str().c_str());
+  };
+
+  if (!PETVolume || !PETVolume->GetImageData() || !segmentationNode ||
+      !segmentationNode->GetSegmentation())
+  {
+    if (detailedDiagnostic)
+    {
+      diagnostic << "[SlicerDynamicPET DIAG][MULTI]\n"
+                 << diagnosticRequestText
+                 << "\ninvalid PET/segmentation input.";
+    }
+    publishDiagnostic("invalid-input");
+    return stats;
+  }
+
+  vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+  vtkSegment* segment = segmentation->GetSegment(segmentID);
+  if (!segment)
+  {
+    if (detailedDiagnostic)
+    {
+      diagnostic << "[SlicerDynamicPET DIAG][MULTI]\n"
+                 << diagnosticRequestText
+                 << "\nsegment not found by ID='" << segmentID << "'.";
+    }
+    publishDiagnostic("segment-not-found");
+    return stats;
+  }
+
+  const std::string binaryLabelmapRep =
+      vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+
+  if (detailedDiagnostic)
+  {
+      vtkNew<vtkMatrix4x4> petIJKToRASDiagnostic;
+      PETVolume->GetIJKToRASMatrix(petIJKToRASDiagnostic);
+      vtkOrientedImageData* storedBinary = vtkOrientedImageData::SafeDownCast(
+          segment->GetRepresentation(binaryLabelmapRep));
+
+      diagnostic
+          << "[SlicerDynamicPET DIAG][MULTI]"
+          << "\n===================================================="
+          << "\n" << diagnosticRequestText
+          << "\nPET name='" << (PETVolume->GetName() ? PETVolume->GetName() : "") << "'"
+          << " id='" << (PETVolume->GetID() ? PETVolume->GetID() : "<none>") << "'"
+          << "\nSEG name='" << (segmentationNode->GetName() ? segmentationNode->GetName() : "") << "'"
+          << " id='" << (segmentationNode->GetID() ? segmentationNode->GetID() : "<none>") << "'"
+          << "\nsegmentID='" << segmentID << "'"
+          << " segmentName='" << (segment->GetName() ? segment->GetName() : "") << "'"
+          << "\nsourceRepresentation='" << segmentation->GetSourceRepresentationName() << "'"
+          << " BinaryAvailable=" << (segmentation->ContainsRepresentation(binaryLabelmapRep) ? 1 : 0)
+          << "\nPET image: " << DynamicPETDescribeLabelImage(PETVolume->GetImageData())
+          << "\nPET IJK->RAS: " << DynamicPETMatrixString(petIJKToRASDiagnostic)
+          << "\nstored segment Binary representation: "
+          << DynamicPETDescribeLabelImage(storedBinary);
+  }
+
+  // Safety guard for legacy callers.  The prepared Multi-timepoint TAC no
+  // longer uses this helper, but other code paths may still call it.  Never
+  // request Binary->Binary conversion: if Binary is already the source then
+  // copy the stored shared layer and use the selected segment's LabelValue.
+  const bool binaryIsSource =
+      segmentation->GetSourceRepresentationName() == binaryLabelmapRep;
+  const auto representationStart = DynamicPETDiagnosticClock::now();
+  vtkSmartPointer<vtkDataObject> temporaryRepresentation;
+  vtkNew<vtkOrientedImageData> storedBinaryCopy;
+  vtkOrientedImageData* segmentLabelmap = nullptr;
+  int selectedLabelValue = -1;
+
+  if (binaryIsSource)
+  {
+      vtkOrientedImageData* storedBinary = vtkOrientedImageData::SafeDownCast(
+          segment->GetRepresentation(binaryLabelmapRep));
+      if (storedBinary && storedBinary->GetPointData() &&
+          storedBinary->GetPointData()->GetScalars())
+      {
+          storedBinaryCopy->DeepCopy(storedBinary);
+          segmentLabelmap = storedBinaryCopy;
+          selectedLabelValue = segment->GetLabelValue();
+      }
+  }
+  else
+  {
+      temporaryRepresentation = vtkSmartPointer<vtkDataObject>::Take(
+          vtkSlicerSegmentationsModuleLogic::CreateRepresentationForOneSegment(
+              segmentation, segmentID, binaryLabelmapRep));
+      segmentLabelmap = vtkOrientedImageData::SafeDownCast(temporaryRepresentation);
+      selectedLabelValue = -1; // temporary representation contains only this segment
+  }
+
+  const double representationMs = DynamicPETElapsedMs(
+      representationStart, DynamicPETDiagnosticClock::now());
+
+  if (detailedDiagnostic)
+  {
+      diagnostic
+          << "\nrepresentation path="
+          << (binaryIsSource ? "stored-Binary-copy" : "CreateRepresentationForOneSegment")
+          << " time=" << std::fixed << std::setprecision(3)
+          << representationMs << " ms"
+          << " selectedLabelValue=" << selectedLabelValue
+          << "\nselected Binary: "
+          << DynamicPETDescribeLabelImage(segmentLabelmap);
+  }
+
+  if (!segmentLabelmap || !segmentLabelmap->GetPointData() ||
+      !segmentLabelmap->GetPointData()->GetScalars())
+  {
+    publishDiagnostic("temporary-representation-empty-or-failed");
+    return stats;
+  }
+
+  const auto geometryStart = DynamicPETDiagnosticClock::now();
+
+  vtkNew<vtkOrientedImageData> petReferenceGeometry;
+  petReferenceGeometry->SetExtent(PETVolume->GetImageData()->GetExtent());
+  vtkNew<vtkMatrix4x4> petIJKToRAS;
+  PETVolume->GetIJKToRASMatrix(petIJKToRAS);
+  petReferenceGeometry->SetGeometryFromImageToWorldMatrix(petIJKToRAS);
+
+  vtkNew<vtkGeneralTransform> segmentationToPETTransform;
+  vtkMRMLTransformNode::GetTransformBetweenNodes(
+      segmentationNode->GetParentTransformNode(),
+      PETVolume->GetParentTransformNode(),
+      segmentationToPETTransform);
+
+  const double geometrySetupMs = DynamicPETElapsedMs(
+      geometryStart, DynamicPETDiagnosticClock::now());
+
+  const auto resampleStart = DynamicPETDiagnosticClock::now();
+  vtkNew<vtkOrientedImageData> labelmapInPETGeometry;
+  vtkOrientedImageDataResample::ResampleOrientedImageToReferenceOrientedImage(
+      segmentLabelmap,
+      petReferenceGeometry,
+      labelmapInPETGeometry,
+      false,
+      true,
+      segmentationToPETTransform);
+  const double resampleMs = DynamicPETElapsedMs(
+      resampleStart, DynamicPETDiagnosticClock::now());
+
+  if (detailedDiagnostic)
+  {
+      diagnostic
+          << "\ngeometry/transform setup=" << geometrySetupMs << " ms"
+          << "\nresample-to-PET=" << resampleMs << " ms"
+          << "\nresampled Binary on PET lattice: "
+          << DynamicPETDescribeLabelImage(labelmapInPETGeometry);
+  }
+
+  vtkImageData* petImage = PETVolume->GetImageData();
+  vtkDataArray* petScalars = petImage && petImage->GetPointData()
+      ? petImage->GetPointData()->GetScalars() : nullptr;
+  vtkDataArray* labelScalars = labelmapInPETGeometry->GetPointData()
+      ? labelmapInPETGeometry->GetPointData()->GetScalars() : nullptr;
+  if (!petScalars || !labelScalars ||
+      petScalars->GetNumberOfTuples() != labelScalars->GetNumberOfTuples())
+  {
+    if (detailedDiagnostic)
+    {
+      diagnostic
+          << "\nPET/label tuple mismatch: PET="
+          << (petScalars ? petScalars->GetNumberOfTuples() : -1)
+          << " label="
+          << (labelScalars ? labelScalars->GetNumberOfTuples() : -1);
+    }
+    publishDiagnostic("pet-label-lattice-mismatch");
+    return stats;
+  }
+
+  const auto statisticsStart = DynamicPETDiagnosticClock::now();
+  stats = this->ComputeVoxelStatistics(
+      PETVolume, labelmapInPETGeometry, selectedLabelValue);
+  const double statisticsMs = DynamicPETElapsedMs(
+      statisticsStart, DynamicPETDiagnosticClock::now());
+
+  if (detailedDiagnostic)
+  {
+      diagnostic
+          << "\nComputeVoxelStatistics=" << statisticsMs << " ms"
+          << "\nstats.count=" << stats.count
+          << " empty=" << (stats.empty ? 1 : 0)
+          << " keep=" << (stats.keep ? 1 : 0)
+          << " mean=" << stats.mean;
+  }
+
+  publishDiagnostic("completed");
+  return stats;
+}
+
 
 double vtkSlicerDynamicPETLogic::computeLogLik(const std::vector<double>& y,
                                          const std::vector<double>& fitted,
@@ -2797,7 +3317,9 @@ void vtkSlicerDynamicPETLogic::callTCM(
     const std::vector<double>* parentFractionTimesSec,
     const std::vector<double>* parentFractionValues,
     bool plasmaIsParent,
-    double acquisitionStartSec)
+    double acquisitionStartSec,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec)
 {
   const int nth = 1;
 
@@ -2832,34 +3354,75 @@ void vtkSlicerDynamicPETLogic::callTCM(
     params.keep[iz] = wt[iz]!=0. ? true : false;
   }
 
-  // Cumulative sum
-  double* cumsum = new double[Nframe];
-  double cum = 0.0;
+  // Build the true acquisition schedule.  For backwards compatibility,
+  // callers that do not provide explicit frame boundaries retain the previous
+  // contiguous-duration behavior.  ROI multi-timepoint/Table workflows pass
+  // explicit starts/ends, so unobserved temporal gaps remain real gaps.
+  const bool anyExplicitSchedule = frameStartTimesSec || frameEndTimesSec;
+  const bool useExplicitSchedule =
+      frameStartTimesSec && frameEndTimesSec &&
+      frameStartTimesSec->size() == static_cast<size_t>(Nframe) &&
+      frameEndTimesSec->size() == static_cast<size_t>(Nframe);
+  if (anyExplicitSchedule && !useExplicitSchedule)
+  {
+      delete[] wt;
+      throw std::invalid_argument(
+          "Explicit TCM frame starts/ends must both match Nframe.");
+  }
+
+  double** scant = new double*[Nframe];
+  double cumulativeEndSec = acquisitionStartSec;
+  bool hasTemporalGaps = false;
+
   for (long int i = 0; i < Nframe; ++i)
   {
-    cum += framing[i][0];
-    cumsum[i] = cum;
-  }
+      if (framing[static_cast<size_t>(i)].empty() ||
+          !(framing[static_cast<size_t>(i)][0] > 0.0))
+      {
+          for (long int j = 0; j < i; ++j) delete[] scant[j];
+          delete[] scant;
+          delete[] wt;
+          throw std::invalid_argument("TCM frame durations must be positive.");
+      }
 
-  double** scant =
-      new double*[Nframe];
-
-  for (long int i = 0;
-       i < Nframe;
-       ++i)
-  {
       scant[i] = new double[2];
-      scant[i][0] =
-          acquisitionStartSec +
-          ((i == 0)
-           ? 0.0
-           : cumsum[i - 1]);
-      scant[i][1] =
-          acquisitionStartSec + cumsum[i];
+
+      if (useExplicitSchedule)
+      {
+          const double startSec = (*frameStartTimesSec)[static_cast<size_t>(i)];
+          const double endSec = (*frameEndTimesSec)[static_cast<size_t>(i)];
+          const double durationSec = framing[static_cast<size_t>(i)][0];
+
+          if (!std::isfinite(startSec) || !std::isfinite(endSec) ||
+              !(endSec > startSec) ||
+              std::abs((endSec - startSec) - durationSec) >
+                  std::max(1e-6, 1e-6 * durationSec) ||
+              (i > 0 && startSec < scant[i - 1][1] - 1e-6))
+          {
+              for (long int j = 0; j <= i; ++j) delete[] scant[j];
+              delete[] scant;
+              delete[] wt;
+              throw std::invalid_argument(
+                  "Invalid explicit TCM frame schedule (overlap, duration mismatch, or non-finite time).");
+          }
+
+          if (i > 0 && startSec > scant[i - 1][1] + 1e-6)
+          {
+              hasTemporalGaps = true;
+          }
+
+          scant[i][0] = startSec;
+          scant[i][1] = endSec;
+      }
+      else
+      {
+          scant[i][0] = cumulativeEndSec;
+          cumulativeEndSec += framing[static_cast<size_t>(i)][0];
+          scant[i][1] = cumulativeEndSec;
+      }
   }
 
-  const double scanEndSec =
-      acquisitionStartSec + cumsum[Nframe - 1];
+  const double scanEndSec = scant[Nframe - 1][1];
 
   long int N_cp = 0;
   long int N_wb = 0;
@@ -2887,13 +3450,14 @@ void vtkSlicerDynamicPETLogic::callTCM(
   }
   else
   {
-      if (interpolationType == "pchip")
+      if (interpolationType == "pchip" || hasTemporalGaps)
       {
           std::vector<double> frameValues(Nframe);
           for (long int i = 0; i < Nframe; ++i) frameValues[i] = Cp[i][0];
           std::vector<double> times, values;
           BuildFrameRepresentativeCurve(scant, frameValues, times, values);
-          Cp_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, "pchip", N_cp);
+          Cp_new = FineSampleExplicitInputFunction(
+              times, values, scanEndSec, timestep, interpolationType, N_cp);
       }
       else
       {
@@ -2921,13 +3485,14 @@ void vtkSlicerDynamicPETLogic::callTCM(
   }
   else
   {
-      if (interpolationType == "pchip")
+      if (interpolationType == "pchip" || hasTemporalGaps)
       {
           std::vector<double> frameValues(Nframe);
           for (long int i = 0; i < Nframe; ++i) frameValues[i] = Cwb[i][0];
           std::vector<double> times, values;
           BuildFrameRepresentativeCurve(scant, frameValues, times, values);
-          cwb_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, "pchip", N_wb);
+          cwb_new = FineSampleExplicitInputFunction(
+              times, values, scanEndSec, timestep, interpolationType, N_wb);
       }
       else
       {
@@ -3140,7 +3705,9 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
     const std::string& interpolationType,
     const std::vector<double>* nativeWholeBloodTimesSec,
     const std::vector<double>* nativeWholeBloodValues,
-    double acquisitionStartSec)
+    double acquisitionStartSec,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec)
 {
     constexpr double EPS = 1e-16;
     constexpr int numberOfParameters = 8;
@@ -3187,52 +3754,69 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
             weights[static_cast<size_t>(i)] != 0.0;
     }
 
-    std::vector<double> cumulative(
-        static_cast<size_t>(Nframe),
-        0.0);
+    const bool anyExplicitSchedule = frameStartTimesSec || frameEndTimesSec;
+    const bool useExplicitSchedule =
+        frameStartTimesSec && frameEndTimesSec &&
+        frameStartTimesSec->size() == static_cast<size_t>(Nframe) &&
+        frameEndTimesSec->size() == static_cast<size_t>(Nframe);
+    if (anyExplicitSchedule && !useExplicitSchedule)
+    {
+        throw std::invalid_argument(
+            "Explicit Liver DBIF frame starts/ends must both match Nframe.");
+    }
 
-    double accumulatedTime = 0.0;
-
-    double** scant =
-        new double*[Nframe];
+    double** scant = new double*[Nframe];
+    double cumulativeEndSec = acquisitionStartSec;
+    bool hasTemporalGaps = false;
 
     for (long int i = 0; i < Nframe; ++i)
     {
         if (framing[static_cast<size_t>(i)].empty() ||
             framing[static_cast<size_t>(i)][0] <= 0.0)
         {
-            for (long int j = 0; j < i; ++j)
-            {
-                delete[] scant[j];
-            }
-
+            for (long int j = 0; j < i; ++j) delete[] scant[j];
             delete[] scant;
-
             throw std::invalid_argument(
                 "Liver DBIF frame durations must be positive.");
         }
 
-        accumulatedTime +=
-            framing[static_cast<size_t>(i)][0];
-
-        cumulative[static_cast<size_t>(i)] =
-            accumulatedTime;
-
         scant[i] = new double[2];
 
-        scant[i][0] =
-            acquisitionStartSec +
-            ((i == 0)
-             ? 0.0
-             : cumulative[static_cast<size_t>(i - 1)]);
+        if (useExplicitSchedule)
+        {
+            const double startSec = (*frameStartTimesSec)[static_cast<size_t>(i)];
+            const double endSec = (*frameEndTimesSec)[static_cast<size_t>(i)];
+            const double durationSec = framing[static_cast<size_t>(i)][0];
 
-        scant[i][1] =
-            acquisitionStartSec +
-            cumulative[static_cast<size_t>(i)];
+            if (!std::isfinite(startSec) || !std::isfinite(endSec) ||
+                !(endSec > startSec) ||
+                std::abs((endSec - startSec) - durationSec) >
+                    std::max(1e-6, 1e-6 * durationSec) ||
+                (i > 0 && startSec < scant[i - 1][1] - 1e-6))
+            {
+                for (long int j = 0; j <= i; ++j) delete[] scant[j];
+                delete[] scant;
+                throw std::invalid_argument(
+                    "Invalid explicit Liver DBIF frame schedule.");
+            }
+
+            if (i > 0 && startSec > scant[i - 1][1] + 1e-6)
+            {
+                hasTemporalGaps = true;
+            }
+
+            scant[i][0] = startSec;
+            scant[i][1] = endSec;
+        }
+        else
+        {
+            scant[i][0] = cumulativeEndSec;
+            cumulativeEndSec += framing[static_cast<size_t>(i)][0];
+            scant[i][1] = cumulativeEndSec;
+        }
     }
 
-    const double scanEndSec =
-        acquisitionStartSec + cumulative.back();
+    const double scanEndSec = scant[Nframe - 1][1];
 
     long int numberOfFineSamples = 0;
     double* arterialInputFine = nullptr;
@@ -3257,19 +3841,31 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
     }
     else
     {
-        // Segment-derived IDIFs intentionally retain the established
-        // frame-aware fine-sampling pathway.
-        std::vector<std::vector<double>>
-            wholeBloodFrameValues = Cwb;
-
-        arterialInputFine =
-            finesample(
-                scant,
-                wholeBloodFrameValues,
-                Nframe,
-                numberOfFineSamples,
-                timestep,
-                interpolationType);
+        // For ordinary contiguous acquisitions retain the established
+        // frame-aware pathway. Across true acquisition gaps, however, the
+        // input must remain continuous instead of becoming zero in the
+        // unobserved interval (notably for const interpolation).
+        if (hasTemporalGaps || interpolationType == "pchip")
+        {
+            std::vector<double> frameValues(static_cast<size_t>(Nframe));
+            for (long int i = 0; i < Nframe; ++i)
+            {
+                frameValues[static_cast<size_t>(i)] =
+                    Cwb[static_cast<size_t>(i)][0];
+            }
+            std::vector<double> times, values;
+            BuildFrameRepresentativeCurve(scant, frameValues, times, values);
+            arterialInputFine = FineSampleExplicitInputFunction(
+                times, values, scanEndSec, timestep, interpolationType,
+                numberOfFineSamples);
+        }
+        else
+        {
+            std::vector<std::vector<double>> wholeBloodFrameValues = Cwb;
+            arterialInputFine = finesample(
+                scant, wholeBloodFrameValues, Nframe, numberOfFineSamples,
+                timestep, interpolationType);
+        }
     }
 
     if (!arterialInputFine ||
@@ -3621,6 +4217,394 @@ void vtkSlicerDynamicPETLogic::callLiverTCM(
 //   return;
 // }
 
+
+bool vtkSlicerDynamicPETLogic::PredictTCM(
+    const std::vector<std::vector<double>>& Cp,
+    const std::vector<std::vector<double>>& Cwb,
+    const std::vector<std::vector<double>>& framing,
+    const TCMParameters& params,
+    int n_tc,
+    double dk,
+    double timestep,
+    std::vector<double>& predictedCurve,
+    const std::string& interpolationType,
+    const std::vector<double>* nativePlasmaTimesSec,
+    const std::vector<double>* nativePlasmaValues,
+    const std::vector<double>* nativeWholeBloodTimesSec,
+    const std::vector<double>* nativeWholeBloodValues,
+    const std::vector<double>* parentFractionTimesSec,
+    const std::vector<double>* parentFractionValues,
+    bool plasmaIsParent,
+    double acquisitionStartSec,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec,
+    std::string* errorMessage)
+{
+    predictedCurve.clear();
+    const long int Nframe = static_cast<long int>(framing.size());
+    if (Nframe <= 0 || Cp.size() != static_cast<size_t>(Nframe) ||
+        Cwb.size() != static_cast<size_t>(Nframe) || timestep <= 0.0 ||
+        (n_tc != 1 && n_tc != 2))
+    {
+        if (errorMessage) *errorMessage = "Invalid TCM prediction inputs.";
+        return false;
+    }
+
+    const bool anyExplicitSchedule = frameStartTimesSec || frameEndTimesSec;
+    const bool useExplicitSchedule =
+        frameStartTimesSec && frameEndTimesSec &&
+        frameStartTimesSec->size() == static_cast<size_t>(Nframe) &&
+        frameEndTimesSec->size() == static_cast<size_t>(Nframe);
+    if (anyExplicitSchedule && !useExplicitSchedule)
+    {
+        if (errorMessage) *errorMessage = "Prediction frame starts/ends must both match the frame count.";
+        return false;
+    }
+
+    std::vector<std::array<double, 2>> schedule(static_cast<size_t>(Nframe));
+    double cumulativeEndSec = acquisitionStartSec;
+    bool hasTemporalGaps = false;
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        if (framing[static_cast<size_t>(i)].empty() ||
+            !(framing[static_cast<size_t>(i)][0] > 0.0))
+        {
+            if (errorMessage) *errorMessage = "Prediction frame durations must be positive.";
+            return false;
+        }
+        if (useExplicitSchedule)
+        {
+            const double start = (*frameStartTimesSec)[static_cast<size_t>(i)];
+            const double end = (*frameEndTimesSec)[static_cast<size_t>(i)];
+            const double duration = framing[static_cast<size_t>(i)][0];
+            if (!std::isfinite(start) || !std::isfinite(end) || !(end > start) ||
+                std::abs((end - start) - duration) > std::max(1e-6, 1e-6 * duration) ||
+                (i > 0 && start < schedule[static_cast<size_t>(i - 1)][1] - 1e-6))
+            {
+                if (errorMessage) *errorMessage = "Invalid explicit TCM prediction schedule.";
+                return false;
+            }
+            if (i > 0 && start > schedule[static_cast<size_t>(i - 1)][1] + 1e-6)
+                hasTemporalGaps = true;
+            schedule[static_cast<size_t>(i)] = {start, end};
+        }
+        else
+        {
+            schedule[static_cast<size_t>(i)] =
+                {cumulativeEndSec, cumulativeEndSec + framing[static_cast<size_t>(i)][0]};
+            cumulativeEndSec = schedule[static_cast<size_t>(i)][1];
+        }
+    }
+
+    const double scanEndSec = schedule.back()[1];
+    std::vector<double*> scant(static_cast<size_t>(Nframe), nullptr);
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        scant[static_cast<size_t>(i)] = new double[2];
+        scant[static_cast<size_t>(i)][0] = schedule[static_cast<size_t>(i)][0];
+        scant[static_cast<size_t>(i)][1] = schedule[static_cast<size_t>(i)][1];
+    }
+
+    auto cleanupScant = [&]()
+    {
+        for (double* frame : scant) delete[] frame;
+    };
+    double** scantPtr = scant.data();
+
+    long int N_cp = 0;
+    long int N_wb = 0;
+    double* Cp_new = nullptr;
+    double* Cwb_new = nullptr;
+
+    try
+    {
+      const bool useNativePlasma =
+          nativePlasmaTimesSec && nativePlasmaValues &&
+          nativePlasmaTimesSec->size() >= 2 &&
+          nativePlasmaTimesSec->size() == nativePlasmaValues->size();
+      if (useNativePlasma)
+      {
+          Cp_new = FineSampleExplicitInputFunction(
+              *nativePlasmaTimesSec, *nativePlasmaValues,
+              scanEndSec, timestep, interpolationType, N_cp);
+      }
+      else if (interpolationType == "pchip" || hasTemporalGaps)
+      {
+          std::vector<double> frameValues(static_cast<size_t>(Nframe));
+          for (long int i = 0; i < Nframe; ++i) frameValues[static_cast<size_t>(i)] = Cp[static_cast<size_t>(i)][0];
+          std::vector<double> times, values;
+          BuildFrameRepresentativeCurve(scant.data(), frameValues, times, values);
+          Cp_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, interpolationType, N_cp);
+      }
+      else
+      {
+          // KMAP finesample() takes the blood curve by non-const lvalue reference.
+          // Prediction inputs are intentionally const, so provide a local mutable copy
+          // at this legacy API boundary without changing caller-visible data.
+          std::vector<std::vector<double>> CpMutable = Cp;
+          Cp_new = finesample(scantPtr, CpMutable, Nframe, N_cp, timestep, interpolationType);
+      }
+
+      const bool useNativeWholeBlood =
+          nativeWholeBloodTimesSec && nativeWholeBloodValues &&
+          nativeWholeBloodTimesSec->size() >= 2 &&
+          nativeWholeBloodTimesSec->size() == nativeWholeBloodValues->size();
+      if (useNativeWholeBlood)
+      {
+          Cwb_new = FineSampleExplicitInputFunction(
+              *nativeWholeBloodTimesSec, *nativeWholeBloodValues,
+              scanEndSec, timestep, interpolationType, N_wb);
+      }
+      else if (interpolationType == "pchip" || hasTemporalGaps)
+      {
+          std::vector<double> frameValues(static_cast<size_t>(Nframe));
+          for (long int i = 0; i < Nframe; ++i) frameValues[static_cast<size_t>(i)] = Cwb[static_cast<size_t>(i)][0];
+          std::vector<double> times, values;
+          BuildFrameRepresentativeCurve(scant.data(), frameValues, times, values);
+          Cwb_new = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, interpolationType, N_wb);
+      }
+      else
+      {
+          // See CpMutable above: finesample() requires a mutable lvalue reference.
+          std::vector<std::vector<double>> CwbMutable = Cwb;
+          Cwb_new = finesample(scantPtr, CwbMutable, Nframe, N_wb, timestep, interpolationType);
+      }
+
+      if (!Cp_new || !Cwb_new || N_cp <= 0 || N_cp != N_wb)
+      {
+          delete[] Cp_new;
+          delete[] Cwb_new;
+          cleanupScant();
+          if (errorMessage) *errorMessage = "Could not fine-sample TCM prediction inputs.";
+          return false;
+      }
+
+      const bool applyParentFraction =
+          !plasmaIsParent && parentFractionTimesSec && parentFractionValues &&
+          parentFractionTimesSec->size() >= 2 &&
+          parentFractionTimesSec->size() == parentFractionValues->size();
+      if (applyParentFraction)
+      {
+          long int N_parent = 0;
+          double* parent = FineSampleExplicitInputFunction(
+              *parentFractionTimesSec, *parentFractionValues,
+              scanEndSec, timestep, "linear", N_parent);
+          if (!parent || N_parent != N_cp)
+          {
+              delete[] parent;
+              delete[] Cp_new;
+              delete[] Cwb_new;
+              cleanupScant();
+              if (errorMessage) *errorMessage = "Parent-fraction support does not cover the requested TCM prediction interval.";
+              return false;
+          }
+          for (long int i = 0; i < N_cp; ++i) Cp_new[i] *= parent[i];
+          delete[] parent;
+      }
+
+    }
+    catch (const std::exception& e)
+    {
+        delete[] Cp_new;
+        delete[] Cwb_new;
+        cleanupScant();
+        if (errorMessage) *errorMessage = std::string("TCM prediction input sampling failed: ") + e.what();
+        return false;
+    }
+
+    std::vector<double> scantFlattened(static_cast<size_t>(Nframe) * 2);
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        scantFlattened[static_cast<size_t>(i)] = schedule[static_cast<size_t>(i)][0];
+        scantFlattened[static_cast<size_t>(i + Nframe)] = schedule[static_cast<size_t>(i)][1];
+    }
+
+    predictedCurve.resize(static_cast<size_t>(Nframe));
+    if (n_tc == 1)
+    {
+        double p[4] = {params.vb, params.K1, params.k2, params.td};
+        kconv_1tcm_tac(p, dk, scantFlattened.data(), timestep,
+                       Cp_new, Cwb_new, static_cast<int>(Nframe), 1,
+                       predictedCurve.data());
+    }
+    else
+    {
+        double p[6] = {params.vb, params.K1, params.k2, params.k3, params.k4, params.td};
+        kconv_2tcm_tac(p, dk, scantFlattened.data(), timestep,
+                       Cp_new, Cwb_new, static_cast<int>(Nframe), 1,
+                       predictedCurve.data());
+    }
+
+    delete[] Cp_new;
+    delete[] Cwb_new;
+    cleanupScant();
+
+    for (double value : predictedCurve)
+    {
+        if (!std::isfinite(value))
+        {
+            if (errorMessage) *errorMessage = "TCM forward prediction produced a non-finite value.";
+            predictedCurve.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
+bool vtkSlicerDynamicPETLogic::PredictLiverTCM(
+    const std::vector<std::vector<double>>& Cwb,
+    const std::vector<std::vector<double>>& framing,
+    const TCMParameters& params,
+    double dk,
+    double timestep,
+    std::vector<double>& predictedCurve,
+    const std::string& interpolationType,
+    const std::vector<double>* nativeWholeBloodTimesSec,
+    const std::vector<double>* nativeWholeBloodValues,
+    double acquisitionStartSec,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec,
+    std::string* errorMessage)
+{
+    predictedCurve.clear();
+    const long int Nframe = static_cast<long int>(framing.size());
+    if (Nframe <= 0 || Cwb.size() != static_cast<size_t>(Nframe) || timestep <= 0.0)
+    {
+        if (errorMessage) *errorMessage = "Invalid liver TCM prediction inputs.";
+        return false;
+    }
+
+    const bool anyExplicitSchedule = frameStartTimesSec || frameEndTimesSec;
+    const bool useExplicitSchedule =
+        frameStartTimesSec && frameEndTimesSec &&
+        frameStartTimesSec->size() == static_cast<size_t>(Nframe) &&
+        frameEndTimesSec->size() == static_cast<size_t>(Nframe);
+    if (anyExplicitSchedule && !useExplicitSchedule)
+    {
+        if (errorMessage) *errorMessage = "Liver prediction frame starts/ends must both match the frame count.";
+        return false;
+    }
+
+    std::vector<std::array<double, 2>> schedule(static_cast<size_t>(Nframe));
+    double cumulativeEndSec = acquisitionStartSec;
+    bool hasTemporalGaps = false;
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        if (framing[static_cast<size_t>(i)].empty() || !(framing[static_cast<size_t>(i)][0] > 0.0))
+        {
+            if (errorMessage) *errorMessage = "Liver prediction frame durations must be positive.";
+            return false;
+        }
+        if (useExplicitSchedule)
+        {
+            const double start = (*frameStartTimesSec)[static_cast<size_t>(i)];
+            const double end = (*frameEndTimesSec)[static_cast<size_t>(i)];
+            const double duration = framing[static_cast<size_t>(i)][0];
+            if (!std::isfinite(start) || !std::isfinite(end) || !(end > start) ||
+                std::abs((end - start) - duration) > std::max(1e-6, 1e-6 * duration) ||
+                (i > 0 && start < schedule[static_cast<size_t>(i - 1)][1] - 1e-6))
+            {
+                if (errorMessage) *errorMessage = "Invalid explicit liver TCM prediction schedule.";
+                return false;
+            }
+            if (i > 0 && start > schedule[static_cast<size_t>(i - 1)][1] + 1e-6)
+                hasTemporalGaps = true;
+            schedule[static_cast<size_t>(i)] = {start, end};
+        }
+        else
+        {
+            schedule[static_cast<size_t>(i)] =
+                {cumulativeEndSec, cumulativeEndSec + framing[static_cast<size_t>(i)][0]};
+            cumulativeEndSec = schedule[static_cast<size_t>(i)][1];
+        }
+    }
+
+    const double scanEndSec = schedule.back()[1];
+    std::vector<double*> scant(static_cast<size_t>(Nframe), nullptr);
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        scant[static_cast<size_t>(i)] = new double[2];
+        scant[static_cast<size_t>(i)][0] = schedule[static_cast<size_t>(i)][0];
+        scant[static_cast<size_t>(i)][1] = schedule[static_cast<size_t>(i)][1];
+    }
+    auto cleanupScant = [&]() { for (double* frame : scant) delete[] frame; };
+    double** scantPtr = scant.data();
+
+    long int N_wb = 0;
+    double* arterialInput = nullptr;
+    try
+    {
+      const bool useNativeWholeBlood =
+          nativeWholeBloodTimesSec && nativeWholeBloodValues &&
+          nativeWholeBloodTimesSec->size() >= 2 &&
+          nativeWholeBloodTimesSec->size() == nativeWholeBloodValues->size();
+      if (useNativeWholeBlood)
+      {
+          arterialInput = FineSampleExplicitInputFunction(
+              *nativeWholeBloodTimesSec, *nativeWholeBloodValues,
+              scanEndSec, timestep, interpolationType, N_wb);
+      }
+      else if (interpolationType == "pchip" || hasTemporalGaps)
+      {
+          std::vector<double> frameValues(static_cast<size_t>(Nframe));
+          for (long int i = 0; i < Nframe; ++i) frameValues[static_cast<size_t>(i)] = Cwb[static_cast<size_t>(i)][0];
+          std::vector<double> times, values;
+          BuildFrameRepresentativeCurve(scant.data(), frameValues, times, values);
+          arterialInput = FineSampleExplicitInputFunction(times, values, scanEndSec, timestep, interpolationType, N_wb);
+      }
+      else
+      {
+          // KMAP finesample() requires a non-const lvalue reference even though this
+          // prediction path must not mutate the caller's whole-blood input.
+          std::vector<std::vector<double>> CwbMutable = Cwb;
+          arterialInput = finesample(scantPtr, CwbMutable, Nframe, N_wb, timestep, interpolationType);
+      }
+
+    }
+    catch (const std::exception& e)
+    {
+        delete[] arterialInput;
+        cleanupScant();
+        if (errorMessage) *errorMessage = std::string("Liver TCM prediction input sampling failed: ") + e.what();
+        return false;
+    }
+
+    if (!arterialInput || N_wb <= 0)
+    {
+        delete[] arterialInput;
+        cleanupScant();
+        if (errorMessage) *errorMessage = "Could not fine-sample liver TCM prediction input.";
+        return false;
+    }
+
+    std::vector<double> scantFlattened(static_cast<size_t>(Nframe) * 2);
+    for (long int i = 0; i < Nframe; ++i)
+    {
+        scantFlattened[static_cast<size_t>(i)] = schedule[static_cast<size_t>(i)][0];
+        scantFlattened[static_cast<size_t>(i + Nframe)] = schedule[static_cast<size_t>(i)][1];
+    }
+
+    double p[8] = {params.vb, params.K1, params.k2, params.k3,
+                   params.k4, params.ka, params.fa, params.td};
+    predictedCurve.resize(static_cast<size_t>(Nframe));
+    kconv_liver_tac(p, dk, scantFlattened.data(), timestep,
+                    arterialInput, arterialInput,
+                    static_cast<int>(Nframe), 1, predictedCurve.data());
+
+    delete[] arterialInput;
+    cleanupScant();
+    for (double value : predictedCurve)
+    {
+        if (!std::isfinite(value))
+        {
+            if (errorMessage) *errorMessage = "Liver TCM forward prediction produced a non-finite value.";
+            predictedCurve.clear();
+            return false;
+        }
+    }
+    return true;
+}
+
 double vtkSlicerDynamicPETLogic::computeAIC(const std::vector<double>& obs,
                                       const std::vector<double>& est,
                                       int numpar,
@@ -3952,31 +4936,41 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
                                 double huber_tune,
                                 double tol,
                                 int max_iter,
-                                double initialPlasmaIntegral
+                                double initialPlasmaIntegral,
+                                const std::vector<double>* frameStartTimesSec,
+                                const std::vector<double>* frameEndTimesSec,
+                                const std::vector<double>* plasmaIntegralAtMidSec
                               )
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
   std::vector<int> outframe;
 
-  // normalize framing to minutes
-  std::vector<double> frameScaled(N);
-  for (size_t i = 0; i < N; ++i)
-      frameScaled[i] = framing[i] / framingNorm;
-
-  // PET values are frame averages. Associate each observation with its
-  // frame midpoint and integrate frame-average values directly. Full-frame
-  // areas are known exactly; only the current half-frame is approximated.
-  std::vector<double> timeAlong(N, 0.0);
-  std::vector<double> intCp(N, 0.0);
-  double elapsed = 0.0;
-  double accumulatedCp = initialPlasmaIntegral;
-  for (size_t i = 0; i < N; ++i)
+  std::vector<double> frameStart, frameEnd, timeAlong;
+  if (Cp.size() != N ||
+      !BuildMTGAObservationSchedule(
+          framing, framingNorm, frameStartTimesSec, frameEndTimesSec,
+          frameStart, frameEnd, timeAlong))
   {
-      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
-      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
-      accumulatedCp += Cp[i] * frameScaled[i];
-      elapsed += frameScaled[i];
+      throw std::invalid_argument("Invalid Patlak observation schedule.");
+  }
+
+  // Plasma integration is continuous on the real clock.  If the caller has
+  // the fully processed native IF, use its cumulative integral (preferred for
+  // temporal gaps). Otherwise preserve exact frame-average areas and bridge
+  // only true unobserved gaps by linear interpolation.
+  std::vector<double> intCp(N, 0.0);
+  if (plasmaIntegralAtMidSec && plasmaIntegralAtMidSec->size() == N)
+  {
+      for (size_t i = 0; i < N; ++i)
+      {
+          intCp[i] = (*plasmaIntegralAtMidSec)[i] / framingNorm;
+      }
+  }
+  else
+  {
+      BuildGapAwareFrameAverageIntegralAtMid(
+          Cp, frameStart, frameEnd, initialPlasmaIntegral, intCp);
   }
 
   // build X, Y with time filter
@@ -4167,6 +5161,33 @@ void vtkSlicerDynamicPETLogic::Patlak(const std::vector<double>& tac,
       robust
       ? finalFitWeights
       : baseFitWeights;
+
+  // Plotting is intentionally broader than regression. Preserve all
+  // model-supported graphical observations and mark which ones actually
+  // contributed to the selected regression start/end window.
+  params.plotX.clear();
+  params.plotY.clear();
+  params.plotFitted.clear();
+  params.plotFrame.clear();
+  params.plotIncluded.clear();
+  params.plotX.reserve(N);
+  params.plotY.reserve(N);
+  params.plotFitted.reserve(N);
+  params.plotFrame.reserve(N);
+  params.plotIncluded.reserve(N);
+  for (size_t i = 0; i < N; ++i)
+  {
+      const double x = intCp[i] / (Cp[i] + 1e-16);
+      const double y = tac[i] / (Cp[i] + 1e-16);
+      const bool included =
+          timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0);
+      params.plotX.push_back(x);
+      params.plotY.push_back(y);
+      params.plotFitted.push_back(intercept + slope * x);
+      params.plotFrame.push_back(static_cast<int>(i + 1));
+      params.plotIncluded.push_back(included);
+  }
 }
 
 void vtkSlicerDynamicPETLogic::RelativePatlak(
@@ -4182,7 +5203,10 @@ void vtkSlicerDynamicPETLogic::RelativePatlak(
     double huber_tune,
     double tol,
     int max_iter,
-    size_t dataStartIndex)
+    size_t dataStartIndex,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec,
+    const std::vector<double>* plasmaIntegralAtMidSec)
 {
     const size_t N = tac.size();
     if (Cp.size() != N || framing.size() != N || dataStartIndex >= N)
@@ -4193,18 +5217,22 @@ void vtkSlicerDynamicPETLogic::RelativePatlak(
     // Relative Patlak (Zuo, Qi & Wang, PMB 2018) restarts the plasma
     // integral at t*.  Here t* is the selected MTGA start frame, constrained
     // to be no earlier than the first jointly available tissue/input frame.
+    std::vector<double> frameStart, frameEnd, frameMid;
+    if (!BuildMTGAObservationSchedule(
+            framing, framingNorm, frameStartTimesSec, frameEndTimesSec,
+            frameStart, frameEnd, frameMid))
+    {
+        throw std::invalid_argument("Invalid Relative Patlak observation schedule.");
+    }
+
     size_t relativeStartIndex = N;
-    double frameStart = 0.0;
     for (size_t i = 0; i < N; ++i)
     {
-        const double frameMid =
-            frameStart + 0.5 * framing[i] / framingNorm;
-        if (i >= dataStartIndex && frameMid + 1e-12 >= timeOffset)
+        if (i >= dataStartIndex && frameMid[i] + 1e-12 >= timeOffset)
         {
             relativeStartIndex = i;
             break;
         }
-        frameStart += framing[i] / framingNorm;
     }
 
     if (relativeStartIndex >= N || N - relativeStartIndex < 2)
@@ -4219,6 +5247,31 @@ void vtkSlicerDynamicPETLogic::RelativePatlak(
         Cp.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), Cp.end());
     std::vector<double> framingSub(
         framing.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), framing.end());
+    std::vector<double> frameStartSubSec;
+    std::vector<double> frameEndSubSec;
+    frameStartSubSec.reserve(N - relativeStartIndex);
+    frameEndSubSec.reserve(N - relativeStartIndex);
+    for (size_t i = relativeStartIndex; i < N; ++i)
+    {
+        frameStartSubSec.push_back(frameStart[i] * framingNorm);
+        frameEndSubSec.push_back(frameEnd[i] * framingNorm);
+    }
+
+    std::vector<double> plasmaIntegralSubSec;
+    const std::vector<double>* plasmaIntegralSubPtr = nullptr;
+    if (plasmaIntegralAtMidSec && plasmaIntegralAtMidSec->size() == N)
+    {
+        const double integralAtRelativeStartSec =
+            (*plasmaIntegralAtMidSec)[relativeStartIndex] -
+            0.5 * Cp[relativeStartIndex] * framing[relativeStartIndex];
+        plasmaIntegralSubSec.reserve(N - relativeStartIndex);
+        for (size_t i = relativeStartIndex; i < N; ++i)
+        {
+            plasmaIntegralSubSec.push_back(
+                (*plasmaIntegralAtMidSec)[i] - integralAtRelativeStartSec);
+        }
+        plasmaIntegralSubPtr = &plasmaIntegralSubSec;
+    }
 
     std::vector<double> weightSub;
     const std::vector<double>* weightPtr = nullptr;
@@ -4237,9 +5290,14 @@ void vtkSlicerDynamicPETLogic::RelativePatlak(
     // integral in Patlak() therefore implements integral_{t*}^{t} Cp(tau)dtau.
     this->Patlak(tacSub, cpSub, framingSub, params, weightPtr,
                  0.0, framingNorm, robust, std,
-                 huber_tune, tol, max_iter, 0.0);
+                 huber_tune, tol, max_iter, 0.0,
+                 &frameStartSubSec, &frameEndSubSec, plasmaIntegralSubPtr);
 
     for (int& frame : params.frame)
+    {
+        frame += static_cast<int>(relativeStartIndex);
+    }
+    for (int& frame : params.plotFrame)
     {
         frame += static_cast<int>(relativeStartIndex);
     }
@@ -4256,42 +5314,44 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
                                bool std,
                                double huber_tune,
                                double tol,
-                               int max_iter
+                               int max_iter,
+                               const std::vector<double>* frameStartTimesSec,
+                               const std::vector<double>* frameEndTimesSec,
+                               const std::vector<double>* plasmaIntegralAtMidSec
 )
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
   std::vector<int> outframe;
 
-  // normalize framing to minutes
-  std::vector<double> frameScaled(N);
-  for (size_t i = 0; i < N; ++i)
-      frameScaled[i] = framing[i] / framingNorm;
+  std::vector<double> frameStart, frameEnd, timeAlong;
+  if (Cp.size() != N ||
+      !BuildMTGAObservationSchedule(
+          framing, framingNorm, frameStartTimesSec, frameEndTimesSec,
+          frameStart, frameEnd, timeAlong))
+  {
+      throw std::invalid_argument("Invalid Logan observation schedule.");
+  }
 
-  // PET values are frame averages. Associate each observation with its
-  // frame midpoint and integrate frame-average values directly. Full-frame
-  // areas are known exactly; only the current half-frame is approximated.
-  std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
-  double elapsed = 0.0;
-  double accumulatedCp = 0.0;
-  for (size_t i = 0; i < N; ++i)
+  if (plasmaIntegralAtMidSec && plasmaIntegralAtMidSec->size() == N)
   {
-      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
-      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
-      accumulatedCp += Cp[i] * frameScaled[i];
-      elapsed += frameScaled[i];
+      for (size_t i = 0; i < N; ++i)
+      {
+          intCp[i] = (*plasmaIntegralAtMidSec)[i] / framingNorm;
+      }
+  }
+  else
+  {
+      BuildGapAwareFrameAverageIntegralAtMid(
+          Cp, frameStart, frameEnd, 0.0, intCp);
   }
 
-  // Cumulative tissue area at each frame midpoint, using the same
-  // frame-average convention as for the input function.
+  // Logan requires a tissue integral. Acquired frame-average areas remain
+  // exact; only genuinely unobserved temporal gaps are bridged linearly.
   std::vector<double> intCt(N, 0.0);
-  double accumulatedCt = 0.0;
-  for (size_t i = 0; i < N; ++i)
-  {
-      intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
-      accumulatedCt += tac[i] * frameScaled[i];
-  }
+  BuildGapAwareFrameAverageIntegralAtMid(
+      tac, frameStart, frameEnd, 0.0, intCt);
 
   // Build X, Y with time filter
   std::vector<double> wgt_adj;
@@ -4481,6 +5541,33 @@ void vtkSlicerDynamicPETLogic::Logan(const std::vector<double>& tac,
       robust
       ? finalFitWeights
       : baseFitWeights;
+
+  // Plotting is intentionally broader than regression. Preserve all
+  // model-supported graphical observations and mark which ones actually
+  // contributed to the selected regression start/end window.
+  params.plotX.clear();
+  params.plotY.clear();
+  params.plotFitted.clear();
+  params.plotFrame.clear();
+  params.plotIncluded.clear();
+  params.plotX.reserve(N);
+  params.plotY.reserve(N);
+  params.plotFitted.reserve(N);
+  params.plotFrame.reserve(N);
+  params.plotIncluded.reserve(N);
+  for (size_t i = 0; i < N; ++i)
+  {
+      const double x = intCp[i] / (tac[i] + 1e-16);
+      const double y = intCt[i] / (tac[i] + 1e-16);
+      const bool included =
+          timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0);
+      params.plotX.push_back(x);
+      params.plotY.push_back(y);
+      params.plotFitted.push_back(intercept + slope * x);
+      params.plotFrame.push_back(static_cast<int>(i + 1));
+      params.plotIncluded.push_back(included);
+  }
 }
 
 void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
@@ -4494,42 +5581,44 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
                             bool std,
                             double huber_tune,
                             double tol,
-                            int max_iter
+                            int max_iter,
+                            const std::vector<double>* frameStartTimesSec,
+                            const std::vector<double>* frameEndTimesSec,
+                            const std::vector<double>* plasmaIntegralAtMidSec
 )
 {
   size_t N = tac.size();
   std::vector<double> outX, outY, fittedValues;
   std::vector<int> outframe;
 
-  // normalize framing to minutes
-  std::vector<double> frameScaled(N);
-  for (size_t i = 0; i < N; ++i)
-      frameScaled[i] = framing[i] / framingNorm;
+  std::vector<double> frameStart, frameEnd, timeAlong;
+  if (Cp.size() != N ||
+      !BuildMTGAObservationSchedule(
+          framing, framingNorm, frameStartTimesSec, frameEndTimesSec,
+          frameStart, frameEnd, timeAlong))
+  {
+      throw std::invalid_argument("Invalid RE observation schedule.");
+  }
 
-  // PET values are frame averages. Associate each observation with its
-  // frame midpoint and integrate frame-average values directly. Full-frame
-  // areas are known exactly; only the current half-frame is approximated.
-  std::vector<double> timeAlong(N, 0.0);
   std::vector<double> intCp(N, 0.0);
-  double elapsed = 0.0;
-  double accumulatedCp = 0.0;
-  for (size_t i = 0; i < N; ++i)
+  if (plasmaIntegralAtMidSec && plasmaIntegralAtMidSec->size() == N)
   {
-      timeAlong[i] = elapsed + 0.5 * frameScaled[i];
-      intCp[i] = accumulatedCp + 0.5 * Cp[i] * frameScaled[i];
-      accumulatedCp += Cp[i] * frameScaled[i];
-      elapsed += frameScaled[i];
+      for (size_t i = 0; i < N; ++i)
+      {
+          intCp[i] = (*plasmaIntegralAtMidSec)[i] / framingNorm;
+      }
+  }
+  else
+  {
+      BuildGapAwareFrameAverageIntegralAtMid(
+          Cp, frameStart, frameEnd, 0.0, intCp);
   }
 
-  // Cumulative tissue area at each frame midpoint, using the same
-  // frame-average convention as for the input function.
+  // RE also contains the tissue TAC integral, so true acquisition gaps are
+  // represented explicitly by a linear bridge rather than collapsed in time.
   std::vector<double> intCt(N, 0.0);
-  double accumulatedCt = 0.0;
-  for (size_t i = 0; i < N; ++i)
-  {
-      intCt[i] = accumulatedCt + 0.5 * tac[i] * frameScaled[i];
-      accumulatedCt += tac[i] * frameScaled[i];
-  }
+  BuildGapAwareFrameAverageIntegralAtMid(
+      tac, frameStart, frameEnd, 0.0, intCt);
 
   // Build X, Y with time filter
   std::vector<double> wgt_adj;
@@ -4719,6 +5808,33 @@ void vtkSlicerDynamicPETLogic::RE(const std::vector<double>& tac,
       robust
       ? finalFitWeights
       : baseFitWeights;
+
+  // Plotting is intentionally broader than regression. Preserve all
+  // model-supported graphical observations and mark which ones actually
+  // contributed to the selected regression start/end window.
+  params.plotX.clear();
+  params.plotY.clear();
+  params.plotFitted.clear();
+  params.plotFrame.clear();
+  params.plotIncluded.clear();
+  params.plotX.reserve(N);
+  params.plotY.reserve(N);
+  params.plotFitted.reserve(N);
+  params.plotFrame.reserve(N);
+  params.plotIncluded.reserve(N);
+  for (size_t i = 0; i < N; ++i)
+  {
+      const double x = intCp[i] / (Cp[i] + 1e-16);
+      const double y = intCt[i] / (Cp[i] + 1e-16);
+      const bool included =
+          timeAlong[i] >= timeOffset &&
+          (!wgt || (*wgt)[i] > 0.0);
+      params.plotX.push_back(x);
+      params.plotY.push_back(y);
+      params.plotFitted.push_back(intercept + slope * x);
+      params.plotFrame.push_back(static_cast<int>(i + 1));
+      params.plotIncluded.push_back(included);
+  }
 }
 
 vtkSmartPointer<vtkOrientedImageData>
@@ -5806,7 +6922,10 @@ void vtkSlicerDynamicPETLogic::RelativeRE(
     double huber_tune,
     double tol,
     int max_iter,
-    size_t dataStartIndex)
+    size_t dataStartIndex,
+    const std::vector<double>* frameStartTimesSec,
+    const std::vector<double>* frameEndTimesSec,
+    const std::vector<double>* plasmaIntegralAtMidSec)
 {
     const size_t N = tac.size();
     if (Cp.size() != N || framing.size() != N || dataStartIndex >= N)
@@ -5814,17 +6933,22 @@ void vtkSlicerDynamicPETLogic::RelativeRE(
         throw std::invalid_argument("Invalid Relative RE input dimensions.");
     }
 
+    std::vector<double> frameStart, frameEnd, frameMid;
+    if (!BuildMTGAObservationSchedule(
+            framing, framingNorm, frameStartTimesSec, frameEndTimesSec,
+            frameStart, frameEnd, frameMid))
+    {
+        throw std::invalid_argument("Invalid Relative RE observation schedule.");
+    }
+
     size_t relativeStartIndex = N;
-    double frameStart = 0.0;
     for (size_t i = 0; i < N; ++i)
     {
-        const double frameMid = frameStart + 0.5 * framing[i] / framingNorm;
-        if (i >= dataStartIndex && frameMid + 1e-12 >= timeOffset)
+        if (i >= dataStartIndex && frameMid[i] + 1e-12 >= timeOffset)
         {
             relativeStartIndex = i;
             break;
         }
-        frameStart += framing[i] / framingNorm;
     }
     if (relativeStartIndex >= N || N - relativeStartIndex < 2)
     {
@@ -5834,6 +6958,32 @@ void vtkSlicerDynamicPETLogic::RelativeRE(
     std::vector<double> tacSub(tac.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), tac.end());
     std::vector<double> cpSub(Cp.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), Cp.end());
     std::vector<double> framingSub(framing.begin() + static_cast<std::ptrdiff_t>(relativeStartIndex), framing.end());
+    std::vector<double> frameStartSubSec;
+    std::vector<double> frameEndSubSec;
+    frameStartSubSec.reserve(N - relativeStartIndex);
+    frameEndSubSec.reserve(N - relativeStartIndex);
+    for (size_t i = relativeStartIndex; i < N; ++i)
+    {
+        frameStartSubSec.push_back(frameStart[i] * framingNorm);
+        frameEndSubSec.push_back(frameEnd[i] * framingNorm);
+    }
+
+    std::vector<double> plasmaIntegralSubSec;
+    const std::vector<double>* plasmaIntegralSubPtr = nullptr;
+    if (plasmaIntegralAtMidSec && plasmaIntegralAtMidSec->size() == N)
+    {
+        const double integralAtRelativeStartSec =
+            (*plasmaIntegralAtMidSec)[relativeStartIndex] -
+            0.5 * Cp[relativeStartIndex] * framing[relativeStartIndex];
+        plasmaIntegralSubSec.reserve(N - relativeStartIndex);
+        for (size_t i = relativeStartIndex; i < N; ++i)
+        {
+            plasmaIntegralSubSec.push_back(
+                (*plasmaIntegralAtMidSec)[i] - integralAtRelativeStartSec);
+        }
+        plasmaIntegralSubPtr = &plasmaIntegralSubSec;
+    }
+
     std::vector<double> weightSub;
     const std::vector<double>* weightPtr = nullptr;
     if (wgt)
@@ -5847,8 +6997,13 @@ void vtkSlicerDynamicPETLogic::RelativeRE(
     }
 
     this->RE(tacSub, cpSub, framingSub, params, weightPtr, 0.0, framingNorm,
-             robust, std, huber_tune, tol, max_iter);
+             robust, std, huber_tune, tol, max_iter,
+             &frameStartSubSec, &frameEndSubSec, plasmaIntegralSubPtr);
     for (int& frame : params.frame)
+    {
+        frame += static_cast<int>(relativeStartIndex);
+    }
+    for (int& frame : params.plotFrame)
     {
         frame += static_cast<int>(relativeStartIndex);
     }

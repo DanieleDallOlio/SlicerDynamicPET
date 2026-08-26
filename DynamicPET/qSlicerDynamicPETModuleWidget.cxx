@@ -39,20 +39,34 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLineEdit>
+#include <QLabel>
+#include <QSlider>
 #include <QFileInfo>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QDateTime>
 #include <QDir>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #include <vtkWeakPointer.h>
 #include <vtkDataArray.h>
 #include <vtkSlicerSegmentationsModuleLogic.h>
+#include <vtkSegmentationConverter.h>
 
 #include <cmath>
 #include <limits>
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <map>
+#include <exception>
 
 #ifdef _WIN32
 #include <sstream>
@@ -96,7 +110,8 @@ enum class ActivityUnit
 {
   BqPerMl = 0,
   KBqPerMl = 1,
-  SUVbw = 2
+  MBqPerMl = 2,
+  SUVbw = 3
 };
 
 struct InputFunctionResult
@@ -154,6 +169,15 @@ struct InputFunctionResult
   std::vector<double> processedSourcePreviewTimesSec;
   std::vector<double> processedSourcePreviewValues;
   FengParameters fengParameters;
+
+  // Explicit model-support provenance. These flags distinguish measured input
+  // support from intervals supplied only by a fitted analytic model.
+  bool fengExtrapolationApplied{false};
+  double sourceMeasuredEndTimeSec{std::numeric_limits<double>::quiet_NaN()};
+  double sourceModeledEndTimeSec{std::numeric_limits<double>::quiet_NaN()};
+  bool parentFractionExtrapolationApplied{false};
+  double parentFractionMeasuredEndTimeSec{std::numeric_limits<double>::quiet_NaN()};
+  double parentFractionModeledEndTimeSec{std::numeric_limits<double>::quiet_NaN()};
 };
 
 struct PreviewCurve
@@ -188,6 +212,67 @@ struct AcquisitionTimingContext
   QString injectionDateTime;
   QString firstFrameDateTime;
   QString source;
+};
+
+struct MultiTimepointCandidate
+{
+  vtkIdType studyItemID{vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
+  vtkIdType petItemID{vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
+  QString studyName;
+  QString petName;
+  QString acquisitionType;
+  QString timingText;
+  QDateTime acquisitionStart;
+  QDateTime acquisitionEnd;
+  double durationSec{std::numeric_limits<double>::quiet_NaN()};
+  bool dynamic{false};
+  bool kineticMetadataReady{false};
+  QString metadataNodeID;
+};
+
+struct MultiTimepointFrameInterval
+{
+  QDateTime start;
+  QDateTime end;
+  double durationSec{std::numeric_limits<double>::quiet_NaN()};
+};
+
+struct PreparedMultiTimepointAcquisition
+{
+  int sourceRow{-1};
+  bool dynamic{false};
+  bool segmentationTemporal{false};
+  QString petName;
+  QString petNodeID;
+  QString segmentationNodeID;
+  QString metadataNodeID;
+  QString petSequenceNodeID;
+  QString petBrowserNodeID;
+  QString segmentationSequenceNodeID;
+  QDateTime start;
+  QDateTime end;
+  double durationSec{std::numeric_limits<double>::quiet_NaN()};
+  QString valueType;
+  QString decayCorrection;
+  double sourceSUVbwFactor{std::numeric_limits<double>::quiet_NaN()};
+};
+
+struct PreparedMultiTimepointObservation
+{
+  int acquisitionIndex{-1};
+  int frameIndex{-1};
+  bool dynamic{false};
+  QString acquisitionName;
+  QString sequenceIndex;
+  QString petNodeID;
+  QString segmentationNodeID;
+  QString petSequenceNodeID;
+  QString segmentationSequenceNodeID;
+  QString metadataNodeID;
+  QDateTime start;
+  QDateTime end;
+  double durationSec{std::numeric_limits<double>::quiet_NaN()};
+  std::map<std::string, std::string> segmentIDsByName;
 };
 
 struct TACStatisticOption
@@ -508,12 +593,455 @@ QDateTime parseDICOMDateTimeText(const QString& value)
     return QDateTime();
   }
 
-  // DynamicPET only needs a robust seconds-level difference here.  Ignore
-  // optional fractional seconds and timezone suffixes after YYYYMMDDHHMMSS.
-  const QDateTime dt = QDateTime::fromString(
+  QDateTime dt = QDateTime::fromString(
       text.left(14),
       QStringLiteral("yyyyMMddHHmmss"));
+  if (!dt.isValid())
+  {
+    return QDateTime();
+  }
+
+  // Preserve the fractional part when present. DICOM DT permits arbitrary
+  // fractional-second precision; QDateTime stores milliseconds, which is more
+  // than sufficient for PET frame/acquisition chronology here.
+  if (text.size() > 15 && text.at(14) == QLatin1Char('.'))
+  {
+    QString fraction;
+    for (int i = 15; i < text.size() && text.at(i).isDigit(); ++i)
+    {
+      fraction.append(text.at(i));
+    }
+    if (!fraction.isEmpty())
+    {
+      const QString millisecondsText = fraction.left(3).leftJustified(3, QLatin1Char('0'));
+      bool ok = false;
+      const int milliseconds = millisecondsText.toInt(&ok);
+      if (ok)
+      {
+        dt = dt.addMSecs(milliseconds);
+      }
+    }
+  }
   return dt;
+}
+
+QString nodeAttributeText(vtkMRMLNode* node, const char* name)
+{
+  if (!node || !name)
+  {
+    return QString();
+  }
+  const char* value = node->GetAttribute(name);
+  return value ? QString::fromUtf8(value).trimmed() : QString();
+}
+
+QString kineticMetadataCommonText(vtkMRMLNode* node, const QString& key)
+{
+  if (!node || key.isEmpty())
+  {
+    return QString();
+  }
+
+  const QString metadataText = nodeAttributeText(node, "dPET.KineticMetadata");
+  if (metadataText.isEmpty())
+  {
+    return QString();
+  }
+
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(metadataText.toUtf8(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isObject())
+  {
+    return QString();
+  }
+
+  const QJsonObject root = document.object();
+  const QJsonValue commonValue = root.value(QStringLiteral("common"));
+  if (!commonValue.isObject())
+  {
+    return QString();
+  }
+
+  const QJsonValue value = commonValue.toObject().value(key);
+  if (value.isString())
+  {
+    return value.toString().trimmed();
+  }
+  if (value.isDouble())
+  {
+    return QString::number(value.toDouble(), 'g', 16);
+  }
+  if (value.isBool())
+  {
+    return value.toBool() ? QStringLiteral("1") : QStringLiteral("0");
+  }
+  return QString();
+}
+
+QString nodeOrKineticMetadataText(
+    vtkMRMLNode* node,
+    const char* attributeName,
+    const QString& commonKey)
+{
+  const QString direct = nodeAttributeText(node, attributeName);
+  if (!direct.isEmpty())
+  {
+    return direct;
+  }
+  return kineticMetadataCommonText(node, commonKey);
+}
+
+bool readPersistedKineticTiming(
+    vtkMRMLNode* node,
+    QDateTime& startDT,
+    QDateTime& endDT,
+    double& durationSec)
+{
+  startDT = parseDICOMDateTimeText(nodeAttributeText(node, "dPET.AcquisitionStartDateTime"));
+  endDT = parseDICOMDateTimeText(nodeAttributeText(node, "dPET.AcquisitionEndDateTime"));
+  durationSec = std::numeric_limits<double>::quiet_NaN();
+
+  const QString metadataText = nodeAttributeText(node, "dPET.KineticMetadata");
+  if (!metadataText.isEmpty())
+  {
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(metadataText.toUtf8(), &parseError);
+    if (parseError.error == QJsonParseError::NoError && document.isObject())
+    {
+      const QJsonObject root = document.object();
+      const QDateTime jsonStart = parseDICOMDateTimeText(
+          root.value(QStringLiteral("acquisitionStartDateTime")).toString());
+      const QDateTime jsonEnd = parseDICOMDateTimeText(
+          root.value(QStringLiteral("acquisitionEndDateTime")).toString());
+
+      if (!startDT.isValid() && jsonStart.isValid())
+      {
+        startDT = jsonStart;
+      }
+      if ((!endDT.isValid() || (startDT.isValid() && endDT <= startDT)) && jsonEnd.isValid())
+      {
+        endDT = jsonEnd;
+      }
+
+      // The top-level end time should already be authoritative.  For robustness,
+      // recover the full range from per-frame/per-slice records if a stale or
+      // incomplete scalar attribute was encountered.
+      QDateTime recordStart;
+      QDateTime recordEnd;
+      const auto accumulateRecords = [&](const QJsonArray& records)
+      {
+        for (const QJsonValue& value : records)
+        {
+          if (!value.isObject())
+          {
+            continue;
+          }
+          const QJsonObject record = value.toObject();
+          const QDateTime rs = parseDICOMDateTimeText(
+              record.value(QStringLiteral("acquisitionStartDateTime")).toString());
+          QDateTime re = parseDICOMDateTimeText(
+              record.value(QStringLiteral("acquisitionEndDateTime")).toString());
+          const double d = record.value(QStringLiteral("durationSec")).toDouble(
+              std::numeric_limits<double>::quiet_NaN());
+          if (!re.isValid() && rs.isValid() && std::isfinite(d) && d > 0.0)
+          {
+            re = rs.addMSecs(static_cast<qint64>(std::llround(d * 1000.0)));
+          }
+          if (rs.isValid() && (!recordStart.isValid() || rs < recordStart))
+          {
+            recordStart = rs;
+          }
+          if (re.isValid() && (!recordEnd.isValid() || re > recordEnd))
+          {
+            recordEnd = re;
+          }
+        }
+      };
+
+      if (root.value(QStringLiteral("frames")).isArray())
+      {
+        accumulateRecords(root.value(QStringLiteral("frames")).toArray());
+      }
+      if (root.value(QStringLiteral("spatialTiming")).isArray())
+      {
+        accumulateRecords(root.value(QStringLiteral("spatialTiming")).toArray());
+      }
+
+      if (!startDT.isValid() && recordStart.isValid())
+      {
+        startDT = recordStart;
+      }
+      if ((!endDT.isValid() || (startDT.isValid() && endDT <= startDT)) && recordEnd.isValid())
+      {
+        endDT = recordEnd;
+      }
+    }
+  }
+
+  if (!startDT.isValid())
+  {
+    startDT = parseDICOMDateTimeText(
+        nodeAttributeText(node, "dPET.FirstFrameAcquisitionDateTime"));
+  }
+
+  if (startDT.isValid() && endDT.isValid() && endDT > startDT)
+  {
+    durationSec = static_cast<double>(startDT.msecsTo(endDT)) / 1000.0;
+  }
+
+  return startDT.isValid();
+}
+
+
+bool readPersistedDynamicFrameIntervals(
+    vtkMRMLNode* metadataNode,
+    std::vector<MultiTimepointFrameInterval>& intervals)
+{
+  intervals.clear();
+  if (!metadataNode)
+  {
+    return false;
+  }
+
+  const QString metadataText = nodeAttributeText(metadataNode, "dPET.KineticMetadata");
+  if (metadataText.isEmpty())
+  {
+    return false;
+  }
+
+  QJsonParseError parseError;
+  const QJsonDocument document = QJsonDocument::fromJson(metadataText.toUtf8(), &parseError);
+  if (parseError.error != QJsonParseError::NoError || !document.isObject())
+  {
+    return false;
+  }
+
+  const QJsonValue framesValue = document.object().value(QStringLiteral("frames"));
+  if (!framesValue.isArray())
+  {
+    return false;
+  }
+
+  const QJsonArray frames = framesValue.toArray();
+  intervals.reserve(static_cast<size_t>(frames.size()));
+  for (const QJsonValue& value : frames)
+  {
+    if (!value.isObject())
+    {
+      intervals.clear();
+      return false;
+    }
+
+    const QJsonObject frame = value.toObject();
+    MultiTimepointFrameInterval interval;
+    interval.start = parseDICOMDateTimeText(
+        frame.value(QStringLiteral("acquisitionStartDateTime")).toString());
+    interval.end = parseDICOMDateTimeText(
+        frame.value(QStringLiteral("acquisitionEndDateTime")).toString());
+    interval.durationSec = frame.value(QStringLiteral("durationSec")).toDouble(
+        std::numeric_limits<double>::quiet_NaN());
+
+    if (!interval.start.isValid() || !std::isfinite(interval.durationSec) ||
+        !(interval.durationSec > 0.0))
+    {
+      intervals.clear();
+      return false;
+    }
+    if (!interval.end.isValid() || interval.end <= interval.start)
+    {
+      interval.end = interval.start.addMSecs(
+          static_cast<qint64>(std::llround(interval.durationSec * 1000.0)));
+    }
+    intervals.push_back(interval);
+  }
+
+  return !intervals.empty();
+}
+
+vtkMRMLSequenceNode* findSequenceForProxy(
+    vtkMRMLScene* scene,
+    vtkMRMLScalarVolumeNode* proxyVolume,
+    vtkMRMLSequenceBrowserNode** browserOut = nullptr)
+{
+  if (browserOut)
+  {
+    *browserOut = nullptr;
+  }
+  if (!scene || !proxyVolume)
+  {
+    return nullptr;
+  }
+
+  for (int i = 0; i < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode"); ++i)
+  {
+    vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(
+        scene->GetNthNodeByClass(i, "vtkMRMLSequenceBrowserNode"));
+    if (!browser)
+    {
+      continue;
+    }
+    vtkMRMLSequenceNode* sequence = browser->GetMasterSequenceNode();
+    if (!sequence || browser->GetProxyNode(sequence) != proxyVolume)
+    {
+      continue;
+    }
+    if (browserOut)
+    {
+      *browserOut = browser;
+    }
+    return sequence;
+  }
+  return nullptr;
+}
+
+std::string exactSegmentIDForName(
+    vtkMRMLSegmentationNode* segmentationNode,
+    const QString& exactName)
+{
+  if (!segmentationNode || !segmentationNode->GetSegmentation())
+  {
+    return std::string();
+  }
+
+  vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+  const std::vector<std::string> ids = segmentation->GetSegmentIDs();
+  for (const std::string& id : ids)
+  {
+    vtkSegment* segment = segmentation->GetSegment(id);
+    if (!segment || !segment->GetName())
+    {
+      continue;
+    }
+    if (QString::fromStdString(segment->GetName()).trimmed() == exactName)
+    {
+      return id;
+    }
+  }
+  return std::string();
+}
+
+double nodeSUVbwFactor(vtkMRMLNode* node, bool& valid)
+{
+  valid = false;
+  if (!node)
+  {
+    return 0.0;
+  }
+  bool ok = false;
+  const double factor = nodeAttributeText(node, "dPET.SUVbwFactor").toDouble(&ok);
+  const QString validText = nodeAttributeText(node, "dPET.SUVbwFactorValid");
+  valid = ok && std::isfinite(factor) && factor > 0.0 &&
+      (validText == QStringLiteral("1") || std::abs(factor - 1.0) > 1e-12);
+  return ok && std::isfinite(factor) ? factor : 0.0;
+}
+
+QString normalizedDecayCorrection(vtkMRMLNode* node)
+{
+  return nodeOrKineticMetadataText(
+      node, "DecayCorrection", QStringLiteral("DecayCorrection")).trimmed().toUpper();
+}
+
+bool multiAcquisitionSUVbwFactor(
+    vtkMRMLNode* petNode,
+    vtkMRMLNode* metadataNode,
+    const QString& decayCorrection,
+    double& factor,
+    QString* errorMessage = nullptr)
+{
+  factor = std::numeric_limits<double>::quiet_NaN();
+
+  bool valid = false;
+  factor = nodeSUVbwFactor(petNode, valid);
+  if (!valid && metadataNode && metadataNode != petNode)
+  {
+    factor = nodeSUVbwFactor(metadataNode, valid);
+  }
+  if (valid && std::isfinite(factor) && factor > 0.0)
+  {
+    return true;
+  }
+
+  // ADMIN does not require the administration datetime for quantitative
+  // normalization: an ADMIN-referenced activity concentration is paired with
+  // the administered (non-decayed) dose.  This intentionally avoids any
+  // back-extrapolation through a potentially unreliable administration time.
+  if (decayCorrection == QStringLiteral("ADMIN"))
+  {
+    bool weightOK = false;
+    bool doseOK = false;
+    const double weightKg = nodeOrKineticMetadataText(
+        metadataNode, "PatientWeight", QStringLiteral("PatientWeight")).toDouble(&weightOK);
+    const double doseBq = nodeOrKineticMetadataText(
+        metadataNode, "RadionuclideTotalDose", QStringLiteral("RadionuclideTotalDose")).toDouble(&doseOK);
+    if (weightOK && doseOK && weightKg > 0.0 && doseBq > 0.0)
+    {
+      factor = weightKg / (doseBq * 0.001); // kg/kBq == g/Bq numerically
+      return std::isfinite(factor) && factor > 0.0;
+    }
+  }
+
+  if (errorMessage)
+  {
+    *errorMessage = decayCorrection == QStringLiteral("START")
+        ? QObject::tr("A START-corrected PET lacks the validated dPETImporter SUVbw factor required for Multi-timepoint normalization. Re-import it with the current dPETImporter.")
+        : QObject::tr("Could not establish a valid SUVbw factor for this PET acquisition.");
+  }
+  return false;
+}
+
+void scaleVoxelStatistics(VoxelStatistics& stats, double scale)
+{
+  if (stats.empty || !std::isfinite(scale))
+  {
+    return;
+  }
+  stats.mean *= scale;
+  stats.median *= scale;
+  stats.min *= scale;
+  stats.max *= scale;
+  stats.stddev *= std::abs(scale);
+  stats.q1 *= scale;
+  stats.q3 *= scale;
+  stats.iqr *= std::abs(scale);
+  stats.peak *= scale;
+  stats.peakStddev *= std::abs(scale);
+}
+
+QString formatAcquisitionTiming(
+    const QDateTime& startDT,
+    const QDateTime& endDT,
+    double durationSec)
+{
+  if (!startDT.isValid())
+  {
+    return QString();
+  }
+
+  QString result = startDT.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+  if (endDT.isValid() && endDT > startDT)
+  {
+    const QString endFormat = startDT.date() == endDT.date()
+        ? QStringLiteral("HH:mm:ss")
+        : QStringLiteral("yyyy-MM-dd HH:mm:ss");
+    result += QStringLiteral(" -> ") + endDT.toString(endFormat);
+  }
+
+  if (std::isfinite(durationSec) && durationSec > 0.0)
+  {
+    if (durationSec >= 3600.0)
+    {
+      result += QObject::tr(" (%1 h)").arg(durationSec / 3600.0, 0, 'f', 2);
+    }
+    else if (durationSec >= 60.0)
+    {
+      result += QObject::tr(" (%1 min)").arg(durationSec / 60.0, 0, 'f', 1);
+    }
+    else
+    {
+      result += QObject::tr(" (%1 s)").arg(durationSec, 0, 'f', 1);
+    }
+  }
+  return result;
 }
 
 
@@ -684,26 +1212,40 @@ std::vector<std::string> sortedSegmentIDs(
   return ids;
 }
 
-void padFittedCurveToFullFrames(
+void replaceFittedCurveForPlot(
     double*& fittedCurve,
     size_t fittedFrameCount,
-    size_t fullFrameCount)
+    size_t fullFrameCount,
+    const std::vector<double>* extendedPrediction = nullptr)
 {
-  if (!fittedCurve || fittedFrameCount >= fullFrameCount)
+  if (!fittedCurve || fullFrameCount == 0)
   {
     return;
   }
 
-  double* padded = new double[fullFrameCount];
+  double* fullCurve = new double[fullFrameCount];
   const double nan = std::numeric_limits<double>::quiet_NaN();
+  std::fill(fullCurve, fullCurve + fullFrameCount, nan);
 
-  for (size_t i = 0; i < fullFrameCount; ++i)
+  if (extendedPrediction && !extendedPrediction->empty())
   {
-    padded[i] = i < fittedFrameCount ? fittedCurve[i] : nan;
+    const size_t n = std::min(fullFrameCount, extendedPrediction->size());
+    for (size_t i = 0; i < n; ++i)
+    {
+      fullCurve[i] = (*extendedPrediction)[i];
+    }
+  }
+  else
+  {
+    const size_t n = std::min(fittedFrameCount, fullFrameCount);
+    for (size_t i = 0; i < n; ++i)
+    {
+      fullCurve[i] = fittedCurve[i];
+    }
   }
 
   delete[] fittedCurve;
-  fittedCurve = padded;
+  fittedCurve = fullCurve;
 }
 
 }
@@ -763,6 +1305,10 @@ protected:
   std::vector<unsigned char>
       MTGAOptimizedSelection;
 
+  // Optional Designer widget. Keep an explicit pointer so this feature also
+  // compiles against an older generated ui_qSlicerDynamicPETModuleWidget.h.
+  QCheckBox* fengExtrapolationCheckBox{nullptr};
+
   std::vector<double>
       MTGAOptimizedKiValues;
 
@@ -806,6 +1352,31 @@ public:
   void initializeTableBasedUI();
   void setTableBasedMode(bool enabled);
   bool isTableBasedMode() const { return this->tableBasedMode; }
+  void initializeMultiTimepointUI();
+  void setMultiTimepointMode(bool enabled);
+  bool isMultiTimepointMode() const { return this->multiTimepointMode; }
+  void populateMultiTimepointAcquisitionTable();
+  void updateMultiTimepointSelectionStatus();
+  void populateMultiTimepointCommonSegmentCheckboxes();
+  void syncMultiTimepointSelectedSegments();
+  bool prepareMultiTimepointAcquisitions(QString* errorMessage = nullptr);
+  bool prepareDynamicMultiTimepointAcquisition(
+      PreparedMultiTimepointAcquisition& acquisition,
+      std::vector<PreparedMultiTimepointObservation>& observations,
+      QString* errorMessage = nullptr);
+  bool prepareStaticMultiTimepointAcquisition(
+      PreparedMultiTimepointAcquisition& acquisition,
+      std::vector<PreparedMultiTimepointObservation>& observations,
+      QString* errorMessage = nullptr);
+  bool ensureMultiTimepointBinaryRepresentation(
+      vtkMRMLSegmentationNode* segmentationNode,
+      vtkMRMLScalarVolumeNode* referencePET,
+      QString* errorMessage = nullptr,
+      double* elapsedMs = nullptr,
+      bool* converted = nullptr);
+  bool computeMultiTimepointTAC(QString* errorMessage = nullptr);
+  void showMultiTimepointSelectionDialog();
+  void invalidateMultiTimepointDerivedState();
   void setImageSetupVisible(bool visible);
   void captureActiveTACState(TACModeState& state);
   void restoreActiveTACState(const TACModeState& state);
@@ -831,6 +1402,9 @@ public:
       const VoxelStatistics& stats) const;
   bool plotDistributionSelected() const;
   void enforceDistributionSelection();
+  void updateDistributionFrameUI(bool resetRange = false);
+  void updateDistributionFrameInfo();
+  void refreshDistributionPlotIfActive();
   bool plotROIDistribution(
       const std::string& segmentID,
       QString* errorMessage = nullptr);
@@ -932,12 +1506,32 @@ public:
   double initialModelPlasmaIntegralSec(
       const InputFunctionResult& result,
       double endTimeSec);
+  double integrateModelPlasmaOverInterval(
+      const InputFunctionResult& result,
+      double startTimeSec,
+      double endTimeSec);
   bool pbrAtTime(
       double timeSec,
       double& pbr,
       QString* errorMessage = nullptr) const;
 
   bool tableBasedMode{false};
+  bool multiTimepointMode{false};
+  bool updatingMultiTimepointTable{false};
+  bool multiTimepointSelectionValidated{false};
+  bool multiTimepointPreparationValid{false};
+  bool multiTimepointPreparationRunning{false};
+  bool multiTimepointExtractionRunning{false};
+  // Prevent synchronous Subject Hierarchy callbacks from rebuilding Single
+  // selectors while Multi mode is being entered/exited. Multi preparation and
+  // plotting create/remove MRML nodes, so mode teardown must be atomic.
+  bool multiTimepointModeTransitionRunning{false};
+  QSet<QString> multiTimepointCommonSegmentNames;
+  QString multiTimepointReferenceMetadataNodeID;
+  QString lastMultiTimepointValidationLog;
+  std::vector<PreparedMultiTimepointAcquisition> preparedMultiTimepointAcquisitions;
+  std::vector<PreparedMultiTimepointObservation> preparedMultiTimepointObservations;
+  QPointer<QDialog> multiTimepointSelectionDialog;
   bool tableDataLoaded{false};
   TACModeState imageTACState;
   TACModeState tableTACState;
@@ -958,6 +1552,11 @@ public:
   std::vector<TACStatisticOption> tablePlotStatistics;
   std::map<std::string, std::map<std::string, std::vector<double>>> tableSigma;
   std::string lastPlotSegmentID;
+  QLabel* distributionFrameLabel{nullptr};
+  QWidget* distributionFrameWidget{nullptr};
+  QSlider* distributionFrameSlider{nullptr};
+  QLineEdit* distributionFrameInfoEdit{nullptr};
+  bool syncingVOICheckSelection{false};
 
   QString externalIFPath;
   std::vector<double> externalIFTimesSec;
@@ -985,6 +1584,8 @@ public:
   std::vector<double> parentFractionValues;
   bool parentFractionZeroAnchorAdded{false};
   bool suvbwFactorValidated{false};
+  double multiTimepointReferenceSUVbwFactor{std::numeric_limits<double>::quiet_NaN()};
+  QString multiTimepointReferenceDecayCorrection;
 
   bool inputFunctionCacheValid{false};
   InputFunctionResult cachedInputFunction;
@@ -1074,6 +1675,7 @@ public:
 
   std::map<std::string, QString> MTGAImgFitSignatures;
   std::map<std::string, QString> TCMImgFitSignatures;
+  bool syncingResultVOISelection{false};
 
   bool parametricFitRunning{false};
 
@@ -1935,8 +2537,13 @@ previewInputFunction()
         {
             processedPreviewTimes = frameTimes;
         }
+        QString processedCurveLabel = result.sourceProcessingLabel;
+        if (result.fengExtrapolationApplied)
+        {
+            processedCurveLabel += QObject::tr(" (extrapolated)");
+        }
         curves.push_back(
-            {result.sourceProcessingLabel,
+            {processedCurveLabel,
              processedPreviewTimes,
              processedDisplayValues,
              false});
@@ -2043,7 +2650,7 @@ previewInputFunction()
         }
 
         curves.push_back(
-            {QObject::tr("Parent plasma / model input (frame average)"),
+            {QObject::tr("Parent plasma"),
              frameTimes,
              displayValues,
              false});
@@ -2289,6 +2896,15 @@ previewParentFraction()
     {
         title += QObject::tr(" - %1").arg(processingLabel);
     }
+    if (this->selectedParentFractionModel() != ParentFractionModel::Linear &&
+        !measuredTimes.empty() &&
+        !processedTimes.empty() &&
+        processedTimes.back() > measuredTimes.back() + 1e-6)
+    {
+        title += QObject::tr(" (extrapolated %1 -> %2 s)")
+            .arg(measuredTimes.back(), 0, 'g', 7)
+            .arg(processedTimes.back(), 0, 'g', 7);
+    }
 
     std::vector<PreviewCurve> curves;
     curves.push_back(
@@ -2503,9 +3119,13 @@ ActivityUnit
 qSlicerDynamicPETModuleWidgetPrivate::
 selectedDisplayActivityUnit() const
 {
-    return this->QuantitativeDisplayUnitSelector->currentIndex() == 1
-        ? ActivityUnit::BqPerMl
-        : ActivityUnit::SUVbw;
+    switch (this->QuantitativeDisplayUnitSelector->currentIndex())
+    {
+      case 1: return ActivityUnit::BqPerMl;
+      case 2: return ActivityUnit::KBqPerMl;
+      case 3: return ActivityUnit::MBqPerMl;
+      default: return ActivityUnit::SUVbw;
+    }
 }
 
 ActivityUnit
@@ -2568,6 +3188,10 @@ activityUnitLabel(ActivityUnit unit) const
     {
         return QObject::tr("kBq/mL");
     }
+    if (unit == ActivityUnit::MBqPerMl)
+    {
+        return QObject::tr("MBq/mL");
+    }
     return QObject::tr("Bq/mL");
 }
 
@@ -2580,6 +3204,14 @@ getCommonSUVbwFactor(
     Q_Q(const qSlicerDynamicPETModuleWidget);
 
     factor = 0.0;
+
+    if (this->multiTimepointMode && this->multiTimepointPreparationValid &&
+        std::isfinite(this->multiTimepointReferenceSUVbwFactor) &&
+        this->multiTimepointReferenceSUVbwFactor > 0.0)
+    {
+        factor = this->multiTimepointReferenceSUVbwFactor;
+        return true;
+    }
 
     if (this->tableBasedMode)
     {
@@ -2651,8 +3283,13 @@ getCommonSUVbwFactor(
         {
             if (errorMessage)
             {
-                *errorMessage = QObject::tr(
-                    "Frame-dependent SUVbw factors are not supported by the current input-function unit conversion.");
+                *errorMessage = this->multiTimepointMode
+                    ? QObject::tr(
+                        "The selected acquisitions use different validated SUVbw factors. "
+                        "For Multi-timepoint analysis, supply an external input function already in SUVbw for now; "
+                        "time-dependent Bq/mL <-> SUVbw conversion across separated acquisitions is not implemented yet.")
+                    : QObject::tr(
+                        "Frame-dependent SUVbw factors are not supported by the current input-function unit conversion.");
             }
             return false;
         }
@@ -2689,6 +3326,10 @@ convertActivityValue(
     {
         bqPerMl = value * 1000.0;
     }
+    else if (from == ActivityUnit::MBqPerMl)
+    {
+        bqPerMl = value * 1000000.0;
+    }
     else if (from == ActivityUnit::SUVbw)
     {
         double factor = 0.0;
@@ -2708,6 +3349,11 @@ convertActivityValue(
     if (to == ActivityUnit::KBqPerMl)
     {
         converted = bqPerMl / 1000.0;
+        return true;
+    }
+    if (to == ActivityUnit::MBqPerMl)
+    {
+        converted = bqPerMl / 1000000.0;
         return true;
     }
 
@@ -2761,8 +3407,12 @@ updateQuantitativeUnitUI()
     const bool hasQuantitativeSource =
         this->tableBasedMode
         ? this->tableDataLoaded
-        : (q->petID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID &&
-           q->sequencePETNode != nullptr);
+        : (this->multiTimepointMode
+            ? (this->multiTimepointPreparationValid &&
+               std::isfinite(this->multiTimepointReferenceSUVbwFactor) &&
+               this->multiTimepointReferenceSUVbwFactor > 0.0)
+            : (q->petID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID &&
+               q->sequencePETNode != nullptr));
 
     this->QuantitativeDisplayUnitLabel->setEnabled(hasQuantitativeSource);
     this->QuantitativeDisplayUnitSelector->setEnabled(hasQuantitativeSource);
@@ -2774,10 +3424,16 @@ updateQuantitativeUnitUI()
 
     const ActivityUnit nativeUnit = this->petStoredActivityUnit();
 
-    this->QuantitativeDisplayUnitSelector->blockSignals(true);
-    this->QuantitativeDisplayUnitSelector->setCurrentIndex(
-        nativeUnit == ActivityUnit::SUVbw ? 0 : 1);
-    this->QuantitativeDisplayUnitSelector->blockSignals(false);
+    // For a newly prepared Multi problem SUVbw is the canonical initial
+    // display, but do not overwrite a user's later Bq/kBq/MBq choice every
+    // time the UI refreshes. Single/Table retain their established behavior.
+    if (!this->multiTimepointMode)
+    {
+        this->QuantitativeDisplayUnitSelector->blockSignals(true);
+        this->QuantitativeDisplayUnitSelector->setCurrentIndex(
+            nativeUnit == ActivityUnit::SUVbw ? 0 : 1);
+        this->QuantitativeDisplayUnitSelector->blockSignals(false);
+    }
 
     QStandardItemModel* model = qobject_cast<QStandardItemModel*>(
         this->QuantitativeDisplayUnitSelector->model());
@@ -2786,6 +3442,8 @@ updateQuantitativeUnitUI()
     {
         QStandardItem* suvItem = model->item(0);
         QStandardItem* bqItem = model->item(1);
+        QStandardItem* kbqItem = model->item(2);
+        QStandardItem* mbqItem = model->item(3);
 
         if (suvItem)
         {
@@ -2794,15 +3452,16 @@ updateQuantitativeUnitUI()
             suvItem->setEnabled(
                 nativeUnit == ActivityUnit::SUVbw || hasSUVFactor);
         }
-        if (bqItem)
-        {
-            double factor = 0.0;
-            const bool hasSUVFactor = this->getCommonSUVbwFactor(factor, nullptr);
-            bqItem->setEnabled(
-                nativeUnit == ActivityUnit::BqPerMl ||
-                nativeUnit == ActivityUnit::KBqPerMl ||
-                hasSUVFactor);
-        }
+        double factor = 0.0;
+        const bool hasSUVFactor = this->getCommonSUVbwFactor(factor, nullptr);
+        const bool activityEnabled =
+            nativeUnit == ActivityUnit::BqPerMl ||
+            nativeUnit == ActivityUnit::KBqPerMl ||
+            nativeUnit == ActivityUnit::MBqPerMl ||
+            hasSUVFactor;
+        if (bqItem) bqItem->setEnabled(activityEnabled);
+        if (kbqItem) kbqItem->setEnabled(activityEnabled);
+        if (mbqItem) mbqItem->setEnabled(activityEnabled);
     }
 }
 
@@ -2904,21 +3563,2489 @@ clearActiveTACState()
 //-----------------------------------------------------------------------------
 void
 qSlicerDynamicPETModuleWidgetPrivate::
+initializeMultiTimepointUI()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    this->multiTimepointMode = false;
+    this->MultiTimepointAnalysisCheckBox->setChecked(false);
+    this->MultiTimepointSelectionLabel->setVisible(false);
+    this->MultiTimepointSelectionRow->setVisible(false);
+
+    // The dialog contents are designed in qSlicerDynamicPETModuleWidget.ui so
+    // they remain fully editable in Qt Designer. Only the QDialog shell is
+    // created here, then the Designer-defined group is reparented into it.
+    this->multiTimepointSelectionDialog = new QDialog(q);
+    this->multiTimepointSelectionDialog->setWindowTitle(
+        QObject::tr("Select Multi-timepoint Acquisitions"));
+    this->multiTimepointSelectionDialog->setModal(true);
+    this->multiTimepointSelectionDialog->resize(980, 520);
+    QVBoxLayout* dialogLayout = new QVBoxLayout(this->multiTimepointSelectionDialog);
+    this->MultiTimepointGroupBox->setParent(this->multiTimepointSelectionDialog);
+    this->MultiTimepointGroupBox->setTitle(QObject::tr("Acquisitions"));
+    dialogLayout->addWidget(this->MultiTimepointGroupBox);
+
+    QHeaderView* header = this->MultiTimepointAcquisitionTable->horizontalHeader();
+    if (header)
+    {
+        header->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(2, QHeaderView::Stretch);
+        header->setSectionResizeMode(3, QHeaderView::Stretch);
+        header->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+        header->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    }
+    this->MultiTimepointAcquisitionTable->verticalHeader()->setVisible(false);
+
+    QObject::connect(
+        this->MultiTimepointAnalysisCheckBox,
+        &QCheckBox::toggled,
+        q,
+        [this](bool checked)
+        {
+            // The three top-level states are intentionally exclusive:
+            // neither checked = Single Image, left = Multi-timepoint Image,
+            // right = Table mode.
+            if (checked && this->tableBasedMode)
+            {
+                {
+                    QSignalBlocker blocker(this->TableBasedAnalysisCheckBox);
+                    this->TableBasedAnalysisCheckBox->setChecked(false);
+                }
+                this->setTableBasedMode(false);
+            }
+            this->setMultiTimepointMode(checked);
+        });
+
+    QObject::connect(
+        this->MultiTimepointSelectionButton,
+        &QPushButton::clicked,
+        q,
+        [this]()
+        {
+            this->showMultiTimepointSelectionDialog();
+        });
+
+    QObject::connect(
+        this->MultiTimepointDialogButtonBox,
+        &QDialogButtonBox::rejected,
+        this->multiTimepointSelectionDialog,
+        &QDialog::accept);
+
+    QObject::connect(
+        this->MultiTimepointAcquisitionTable,
+        &QTableWidget::itemChanged,
+        q,
+        [this](QTableWidgetItem* item)
+        {
+            if (this->updatingMultiTimepointTable || !item || item->column() != 0)
+            {
+                return;
+            }
+            this->invalidateMultiTimepointDerivedState();
+            this->updateMultiTimepointSelectionStatus();
+        });
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+showMultiTimepointSelectionDialog()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->multiTimepointMode || !this->multiTimepointSelectionDialog)
+    {
+        return;
+    }
+
+    if (q->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+        QMessageBox::information(
+            q,
+            QObject::tr("Multi-timepoint acquisitions"),
+            QObject::tr("Select a patient first."));
+        return;
+    }
+
+    this->populateMultiTimepointAcquisitionTable();
+    this->multiTimepointSelectionDialog->exec();
+    this->updateMultiTimepointSelectionStatus();
+
+    if (this->multiTimepointSelectionValidated)
+    {
+        QString preparationError;
+        if (!this->prepareMultiTimepointAcquisitions(&preparationError))
+        {
+            this->multiTimepointSelectionValidated = false;
+            this->multiTimepointPreparationValid = false;
+            this->MultiTimepointStatusLabel->setText(
+                QObject::tr("Acquisition preparation failed: %1").arg(preparationError));
+            this->logToPythonConsole(
+                QObject::tr("[SlicerDynamicPET multi-timepoint PREP] FAILED: %1")
+                .arg(preparationError));
+            q->enableTACbutton();
+            QMessageBox::warning(
+                q,
+                QObject::tr("Multi-timepoint preparation"),
+                preparationError);
+        }
+        else
+        {
+            // Preparation creates sequence/representation MRML nodes.  Common
+            // ROI widgets are intentionally rebuilt only once preparation has
+            // finished, instead of reacting to every Subject Hierarchy event.
+            this->populateMultiTimepointCommonSegmentCheckboxes();
+            q->enableTACbutton();
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+invalidateMultiTimepointDerivedState()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    // Changing the acquisition set changes the ROI temporal problem, but an
+    // external CSV input function is independent patient data and is therefore
+    // preserved. Segment-derived IF/TAC/model results cannot be preserved.
+    q->clearTACdata();
+    q->clearFITdata();
+    q->clearFITMTGAdata();
+
+    q->timePoints.clear();
+    q->durations.clear();
+    q->suvFactors.clear();
+    q->numberOfTimepoints = 0;
+    q->PET_flatten_values.clear();
+    q->MTGAImgOutcomes.clear();
+    q->TCMImgOutcomes.clear();
+    this->multiTimepointSelectionValidated = false;
+    this->multiTimepointPreparationValid = false;
+    this->preparedMultiTimepointAcquisitions.clear();
+    this->preparedMultiTimepointObservations.clear();
+    this->multiTimepointReferenceMetadataNodeID.clear();
+
+    if (this->IFSourceSelector->currentIndex() == 0)
+    {
+        this->resetInputFunctionData(false);
+    }
+    else
+    {
+        this->invalidateInputFunctionResults();
+        this->updateInputFunctionStatus();
+    }
+
+    this->setPostTACEnabled(false);
+    this->updateParametricImagingAvailability();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+setMultiTimepointMode(bool enabled)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (enabled == this->multiTimepointMode)
+    {
+        return;
+    }
+
+    // clearTACdata()/plot cleanup and selector rebuilding modify MRML/Subject
+    // Hierarchy nodes.  Keep the whole mode transition atomic so synchronous
+    // hierarchy callbacks cannot execute the opposite mode's refresh logic on
+    // half-reset state.
+    this->multiTimepointModeTransitionRunning = true;
+    this->multiTimepointMode = enabled;
+    this->multiTimepointCommonSegmentNames.clear();
+    this->invalidateMultiTimepointDerivedState();
+
+    // The single-acquisition PET/segmentation state must never leak into a
+    // multi-timepoint analysis. Keep the selected patient, but clear all
+    // acquisition-dependent handles and timing state.
+    q->sequencePETNode = nullptr;
+    q->sequenceBrowserPETNode = nullptr;
+    q->segSequenceNode = nullptr;
+    if (q->SegWatcher)
+    {
+        q->SegWatcher->browser = nullptr;
+    }
+    q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    q->segmentIDs.clear();
+    if (enabled)
+    {
+        // Do not inherit checked Single-mode segment boxes into the new
+        // patient-wide common-ROI selection. The validated common list will
+        // be rebuilt after the acquisition dialog is configured.
+        this->populateMultiTimepointCommonSegmentCheckboxes();
+    }
+    q->dPETvalueType.clear();
+    this->suvbwFactorValidated = false;
+    this->resetAcquisitionTimingDisplay();
+
+    for (QSlider* slider : {this->timeOffsetSlider, this->timeEndSlider, this->TCMEndSlider,
+                            this->timeOffsetSliderImg, this->timeEndSliderImg, this->TCMEndSliderImg})
+    {
+        if (!slider) continue;
+        QSignalBlocker blocker(slider);
+        slider->setRange(1, 1);
+        slider->setValue(1);
+    }
+    for (QLineEdit* edit : {this->frameEdit, this->timeSecEdit, this->timeMinEdit,
+                            this->timeEndInfoEdit, this->TCMEndInfoEdit,
+                            this->frameEditImg, this->timeSecEditImg, this->timeMinEditImg,
+                            this->timeEndInfoEditImg, this->TCMEndInfoEditImg})
+    {
+        if (edit) edit->clear();
+    }
+
+    if (enabled)
+    {
+        // Multi-timepoint selection is patient-wide. There is deliberately no
+        // active Study selection in the main workflow.
+        q->stuID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+        this->populateMultiTimepointAcquisitionTable();
+        if (q->patID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            QTimer::singleShot(0, q, [this]()
+            {
+                this->showMultiTimepointSelectionDialog();
+            });
+        }
+    }
+    else
+    {
+        if (this->multiTimepointSelectionDialog)
+        {
+            this->multiTimepointSelectionDialog->close();
+        }
+        this->updatingMultiTimepointTable = true;
+        this->MultiTimepointAcquisitionTable->setRowCount(0);
+        this->updatingMultiTimepointTable = false;
+        this->MultiTimepointStatusLabel->setText(QObject::tr("No acquisitions selected."));
+        this->MultiTimepointSelectionSummaryLabel->setText(QObject::tr("None selected"));
+        this->MultiTimepointSelectionButton->setText(QObject::tr("Select acquisitions..."));
+
+        // Rebuild the standard hidden selectors from the retained patient so
+        // returning to Single always starts from a clean, predictable state.
+        this->populateStudyComboBox(q->patID);
+    }
+
+    this->setImageSetupVisible(!this->tableBasedMode);
+
+    // Segmentation editing and voxelwise imaging are intentionally unavailable
+    // for multi-timepoint ROI analysis.
+    this->SegmentationAdvancedCollapsibleButton->setVisible(
+        !this->tableBasedMode && !this->multiTimepointMode);
+
+    const int imagingIndex = this->PlotsTabWidget->indexOf(this->ImagingWidget);
+    if (imagingIndex >= 0)
+    {
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        this->PlotsTabWidget->setTabVisible(
+            imagingIndex,
+            !this->tableBasedMode && !this->multiTimepointMode);
+#else
+        this->PlotsTabWidget->setTabEnabled(
+            imagingIndex,
+            !this->tableBasedMode && !this->multiTimepointMode);
+#endif
+    }
+
+    this->updateQuantitativeUnitUI();
+    this->updateInputFunctionStatus();
+    this->updateSegmentationAdvancedUI();
+    this->updateParametricImagingAvailability();
+    q->enableTACbutton();
+    this->multiTimepointModeTransitionRunning = false;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+populateMultiTimepointAcquisitionTable()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->multiTimepointMode || this->tableBasedMode ||
+        this->multiTimepointPreparationRunning || this->multiTimepointExtractionRunning)
+    {
+        return;
+    }
+
+    // Preserve the user's current include/segmentation choices across subject
+    // hierarchy refreshes whenever the corresponding PET node still exists.
+    struct PreviousChoice
+    {
+        bool checked{false};
+        vtkIdType segmentationItemID{vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID};
+    };
+    std::map<vtkIdType, PreviousChoice> previousChoices;
+    for (int row = 0; row < this->MultiTimepointAcquisitionTable->rowCount(); ++row)
+    {
+        QTableWidgetItem* petItem = this->MultiTimepointAcquisitionTable->item(row, 2);
+        QTableWidgetItem* useItem = this->MultiTimepointAcquisitionTable->item(row, 0);
+        if (!petItem || !useItem)
+            continue;
+        const vtkIdType petItemID = petItem->data(Qt::UserRole).value<vtkIdType>();
+        PreviousChoice choice;
+        choice.checked = useItem->checkState() == Qt::Checked;
+        if (QComboBox* segCombo = qobject_cast<QComboBox*>(
+                this->MultiTimepointAcquisitionTable->cellWidget(row, 3)))
+        {
+            choice.segmentationItemID = segCombo->currentData().value<vtkIdType>();
+        }
+        previousChoices[petItemID] = choice;
+    }
+
+    this->updatingMultiTimepointTable = true;
+    this->MultiTimepointAcquisitionTable->setRowCount(0);
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkMRMLSubjectHierarchyNode* shNode = scene
+        ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene)
+        : nullptr;
+
+    if (!scene || !shNode ||
+        q->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+        this->updatingMultiTimepointTable = false;
+        this->MultiTimepointStatusLabel->setText(
+            QObject::tr("Choose a patient to list PET acquisitions."));
+        return;
+    }
+
+    std::vector<MultiTimepointCandidate> candidates;
+    std::vector<vtkIdType> studies;
+    shNode->GetItemChildren(q->patID, studies);
+
+    for (vtkIdType studyID : studies)
+    {
+        if (!shNode->HasItemAttribute(studyID, "Level") ||
+            shNode->GetItemAttribute(studyID, "Level") != "Study")
+        {
+            continue;
+        }
+
+        const QString studyName = QString::fromStdString(shNode->GetItemName(studyID));
+        std::function<void(vtkIdType)> collectPET;
+        collectPET = [&](vtkIdType itemID)
+        {
+            vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(
+                shNode->GetItemDataNode(itemID));
+            if (petNode)
+            {
+                const std::string modality = shNode->HasItemAttribute(itemID, "DICOM.Modality")
+                    ? shNode->GetItemAttribute(itemID, "DICOM.Modality")
+                    : std::string();
+                const char* internalAttr = petNode->GetAttribute("SlicerDynamicPET.InternalNode");
+                const bool internalNode = internalAttr && std::string(internalAttr) == "1";
+
+                if (modality == "PT" && !internalNode)
+                {
+                    MultiTimepointCandidate candidate;
+                    candidate.studyItemID = studyID;
+                    candidate.petItemID = itemID;
+                    candidate.studyName = studyName;
+                    candidate.petName = QString::fromStdString(shNode->GetItemName(itemID));
+
+                    vtkMRMLSequenceNode* dynamicSequence = nullptr;
+                    for (int browserIndex = 0;
+                         browserIndex < scene->GetNumberOfNodesByClass("vtkMRMLSequenceBrowserNode");
+                         ++browserIndex)
+                    {
+                        vtkMRMLSequenceBrowserNode* browser = vtkMRMLSequenceBrowserNode::SafeDownCast(
+                            scene->GetNthNodeByClass(browserIndex, "vtkMRMLSequenceBrowserNode"));
+                        if (!browser) continue;
+                        vtkMRMLSequenceNode* master = browser->GetMasterSequenceNode();
+                        if (!master || browser->GetProxyNode(master) != petNode) continue;
+                        const char* proxyLoadedBy = petNode->GetAttribute("dPETImporter.LoadedBy");
+                        const char* seqLoadedBy = master->GetAttribute("dPETImporter.LoadedBy");
+                        if ((proxyLoadedBy && std::string(proxyLoadedBy) == "dPETImporterPlugin") ||
+                            (seqLoadedBy && std::string(seqLoadedBy) == "dPETImporterPlugin"))
+                        {
+                            dynamicSequence = master;
+                            candidate.dynamic = true;
+                            if (master->GetName() && std::string(master->GetName()).size() > 0)
+                            {
+                                candidate.petName = QString::fromUtf8(master->GetName());
+                            }
+                            break;
+                        }
+                    }
+
+                    vtkMRMLNode* metadataNode = dynamicSequence
+                        ? static_cast<vtkMRMLNode*>(dynamicSequence)
+                        : static_cast<vtkMRMLNode*>(petNode);
+                    if (metadataNode && metadataNode->GetID())
+                    {
+                        candidate.metadataNodeID = QString::fromUtf8(metadataNode->GetID());
+                    }
+
+                    const char* kindAttr = metadataNode->GetAttribute("dPET.AcquisitionKind");
+                    const QString kind = kindAttr ? QString::fromUtf8(kindAttr).trimmed() : QString();
+                    if (kind.compare(QStringLiteral("DYNAMIC"), Qt::CaseInsensitive) == 0)
+                    {
+                        candidate.dynamic = true;
+                    }
+
+                    const char* metadataJson = metadataNode->GetAttribute("dPET.KineticMetadata");
+                    const char* metadataSchema = metadataNode->GetAttribute("dPET.KineticMetadataSchemaVersion");
+                    candidate.kineticMetadataReady =
+                        (metadataJson && std::string(metadataJson).size() > 0) ||
+                        (metadataSchema && std::string(metadataSchema).size() > 0);
+
+                    const char* wholeBodyAttr = metadataNode->GetAttribute("dPET.WholeBody");
+                    const bool wholeBody = wholeBodyAttr && std::string(wholeBodyAttr) == "1";
+                    if (candidate.dynamic)
+                        candidate.acquisitionType = QObject::tr("Dynamic");
+                    else if (wholeBody)
+                        candidate.acquisitionType = QObject::tr("Static / whole-body");
+                    else
+                        candidate.acquisitionType = QObject::tr("Static");
+                    if (!candidate.kineticMetadataReady)
+                        candidate.acquisitionType += QObject::tr(" (fallback)");
+
+                    readPersistedKineticTiming(
+                        metadataNode,
+                        candidate.acquisitionStart,
+                        candidate.acquisitionEnd,
+                        candidate.durationSec);
+
+                    if (candidate.acquisitionStart.isValid())
+                    {
+                        candidate.timingText = formatAcquisitionTiming(
+                            candidate.acquisitionStart,
+                            candidate.acquisitionEnd,
+                            candidate.durationSec);
+                    }
+                    else
+                    {
+                        candidate.timingText = candidate.kineticMetadataReady
+                            ? QObject::tr("Timing incomplete")
+                            : QObject::tr("DICOM fallback required");
+                    }
+
+                    const char* petLoadedBy = petNode->GetAttribute("dPETImporter.LoadedBy");
+                    const char* metadataLoadedBy = metadataNode
+                        ? metadataNode->GetAttribute("dPETImporter.LoadedBy") : nullptr;
+                    const bool loadedByDPET =
+                        (petLoadedBy && std::string(petLoadedBy) == "dPETImporterPlugin") ||
+                        (metadataLoadedBy && std::string(metadataLoadedBy) == "dPETImporterPlugin");
+                    if (loadedByDPET)
+                    {
+                        candidates.push_back(candidate);
+                    }
+                }
+            }
+
+            std::vector<vtkIdType> children;
+            shNode->GetItemChildren(itemID, children);
+            for (vtkIdType childID : children)
+            {
+                collectPET(childID);
+            }
+        };
+        collectPET(studyID);
+    }
+
+    std::stable_sort(
+        candidates.begin(), candidates.end(),
+        [](const MultiTimepointCandidate& a, const MultiTimepointCandidate& b)
+        {
+            if (a.acquisitionStart.isValid() != b.acquisitionStart.isValid())
+                return a.acquisitionStart.isValid();
+            if (a.acquisitionStart.isValid() && b.acquisitionStart.isValid() &&
+                a.acquisitionStart != b.acquisitionStart)
+                return a.acquisitionStart < b.acquisitionStart;
+            const int studyCompare = QString::compare(a.studyName, b.studyName, Qt::CaseInsensitive);
+            if (studyCompare != 0) return studyCompare < 0;
+            return QString::compare(a.petName, b.petName, Qt::CaseInsensitive) < 0;
+        });
+
+    for (const MultiTimepointCandidate& candidate : candidates)
+    {
+        const int row = this->MultiTimepointAcquisitionTable->rowCount();
+        this->MultiTimepointAcquisitionTable->insertRow(row);
+
+        QTableWidgetItem* useItem = new QTableWidgetItem();
+        useItem->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        useItem->setCheckState(Qt::Unchecked);
+        useItem->setData(Qt::UserRole, QVariant::fromValue(candidate.petItemID));
+        useItem->setData(Qt::UserRole + 1, QVariant::fromValue(candidate.studyItemID));
+        useItem->setData(Qt::UserRole + 2, candidate.dynamic);
+        useItem->setData(Qt::UserRole + 3, candidate.kineticMetadataReady);
+        useItem->setData(Qt::UserRole + 4, candidate.metadataNodeID);
+        this->MultiTimepointAcquisitionTable->setItem(row, 0, useItem);
+
+        QTableWidgetItem* studyItem = new QTableWidgetItem(candidate.studyName);
+        this->MultiTimepointAcquisitionTable->setItem(row, 1, studyItem);
+
+        QTableWidgetItem* petItem = new QTableWidgetItem(candidate.petName);
+        petItem->setData(Qt::UserRole, QVariant::fromValue(candidate.petItemID));
+        this->MultiTimepointAcquisitionTable->setItem(row, 2, petItem);
+
+        QComboBox* segCombo = new QComboBox(this->MultiTimepointAcquisitionTable);
+        segCombo->addItem(
+            QObject::tr("None"),
+            QVariant::fromValue(vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID));
+
+        std::function<void(vtkIdType)> collectSeg;
+        collectSeg = [&](vtkIdType itemID)
+        {
+            vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(
+                shNode->GetItemDataNode(itemID));
+            if (segNode)
+            {
+                segCombo->addItem(
+                    QString::fromStdString(shNode->GetItemName(itemID)),
+                    QVariant::fromValue(itemID));
+            }
+            std::vector<vtkIdType> children;
+            shNode->GetItemChildren(itemID, children);
+            for (vtkIdType childID : children)
+                collectSeg(childID);
+        };
+        collectSeg(candidate.studyItemID);
+
+        const auto previousIt = previousChoices.find(candidate.petItemID);
+        if (previousIt != previousChoices.end())
+        {
+            useItem->setCheckState(previousIt->second.checked ? Qt::Checked : Qt::Unchecked);
+            const int previousSegIndex = segCombo->findData(
+                QVariant::fromValue(previousIt->second.segmentationItemID));
+            if (previousSegIndex >= 0)
+                segCombo->setCurrentIndex(previousSegIndex);
+        }
+
+        QObject::connect(
+            segCombo,
+            QOverload<int>::of(&QComboBox::currentIndexChanged),
+            q,
+            [this](int)
+            {
+                if (this->updatingMultiTimepointTable)
+                    return;
+                this->invalidateMultiTimepointDerivedState();
+                this->updateMultiTimepointSelectionStatus();
+            });
+        this->MultiTimepointAcquisitionTable->setCellWidget(row, 3, segCombo);
+
+        this->MultiTimepointAcquisitionTable->setItem(
+            row, 4, new QTableWidgetItem(candidate.acquisitionType));
+        this->MultiTimepointAcquisitionTable->setItem(
+            row, 5, new QTableWidgetItem(candidate.timingText));
+    }
+
+    this->updatingMultiTimepointTable = false;
+    this->updateMultiTimepointSelectionStatus();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateMultiTimepointSelectionStatus()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->multiTimepointMode)
+    {
+        return;
+    }
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkMRMLSubjectHierarchyNode* shNode = scene
+        ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene)
+        : nullptr;
+
+    int selectedCount = 0;
+    int missingSegmentationCount = 0;
+    int fallbackCount = 0;
+    int missingTimingCount = 0;
+    int earliestSelectedRow = -1;
+
+    bool duplicateSegmentNames = false;
+    QString duplicateSegmentDescription;
+    bool haveCommonSegments = false;
+    QSet<QString> commonSegmentNames;
+
+    bool missingAdministrationMetadata = false;
+    bool injectionMismatch = false;
+    bool tracerMismatch = false;
+    bool unsupportedQuantitativeType = false;
+    bool unsupportedDecayCorrection = false;
+    bool missingDecayCorrectionMetadata = false;
+    bool invalidSUVFactor = false;
+    bool spatialStaticTimingUnsupported = false;
+
+    QDateTime referenceInjection;
+    QString referenceRadionuclideCode;
+    QString referenceRadiopharmaceuticalCode;
+    QString referenceRadiopharmaceuticalName;
+    QString referenceDecayCorrection;
+    double referenceSUVbwFactor = std::numeric_limits<double>::quiet_NaN();
+    double referenceHalfLife = std::numeric_limits<double>::quiet_NaN();
+    QStringList validationDiagnostics;
+
+    auto firstNonEmptyReference = [](QString& reference, const QString& value)
+    {
+        if (reference.isEmpty() && !value.isEmpty())
+        {
+            reference = value;
+        }
+    };
+
+    for (int row = 0; row < this->MultiTimepointAcquisitionTable->rowCount(); ++row)
+    {
+        QTableWidgetItem* useItem = this->MultiTimepointAcquisitionTable->item(row, 0);
+        if (!useItem || useItem->checkState() != Qt::Checked)
+            continue;
+
+        ++selectedCount;
+        if (earliestSelectedRow < 0)
+            earliestSelectedRow = row; // table is chronological when timing is known
+
+        const bool metadataReady = useItem->data(Qt::UserRole + 3).toBool();
+        if (!metadataReady)
+            ++fallbackCount;
+
+        QTableWidgetItem* timingItem = this->MultiTimepointAcquisitionTable->item(row, 5);
+        if (!timingItem || timingItem->text().contains("required", Qt::CaseInsensitive) ||
+            timingItem->text().contains("incomplete", Qt::CaseInsensitive))
+        {
+            ++missingTimingCount;
+        }
+
+        QComboBox* segCombo = qobject_cast<QComboBox*>(
+            this->MultiTimepointAcquisitionTable->cellWidget(row, 3));
+        const vtkIdType segItemID = segCombo
+            ? segCombo->currentData().value<vtkIdType>()
+            : vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+        if (segItemID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            ++missingSegmentationCount;
+        }
+        else if (shNode)
+        {
+            vtkMRMLSegmentationNode* segNode = vtkMRMLSegmentationNode::SafeDownCast(
+                shNode->GetItemDataNode(segItemID));
+            vtkSegmentation* segmentation = segNode ? segNode->GetSegmentation() : nullptr;
+            if (segmentation)
+            {
+                QSet<QString> namesInThisSegmentation;
+                const std::vector<std::string> ids = segmentation->GetSegmentIDs();
+                for (const std::string& id : ids)
+                {
+                    vtkSegment* segment = segmentation->GetSegment(id);
+                    if (!segment)
+                    {
+                        continue;
+                    }
+                    const QString name = QString::fromStdString(segment->GetName()).trimmed();
+                    if (name.isEmpty())
+                    {
+                        continue;
+                    }
+                    if (namesInThisSegmentation.contains(name))
+                    {
+                        duplicateSegmentNames = true;
+                        if (duplicateSegmentDescription.isEmpty())
+                        {
+                            duplicateSegmentDescription = QObject::tr(
+                                "Segmentation '%1' contains the duplicate segment name '%2'.")
+                                .arg(QString::fromStdString(shNode->GetItemName(segItemID)), name);
+                        }
+                    }
+                    namesInThisSegmentation.insert(name);
+                }
+
+                if (!haveCommonSegments)
+                {
+                    commonSegmentNames = namesInThisSegmentation;
+                    haveCommonSegments = true;
+                }
+                else
+                {
+                    commonSegmentNames.intersect(namesInThisSegmentation);
+                }
+            }
+        }
+
+        if (!shNode)
+        {
+            continue;
+        }
+        const vtkIdType petItemID = useItem->data(Qt::UserRole).value<vtkIdType>();
+        vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(
+            shNode->GetItemDataNode(petItemID));
+        if (!petNode || !metadataReady)
+        {
+            continue;
+        }
+
+        vtkMRMLNode* metadataNode = petNode;
+        const QString metadataNodeID = useItem->data(Qt::UserRole + 4).toString();
+        if (!metadataNodeID.isEmpty() && scene)
+        {
+            if (vtkMRMLNode* candidateMetadataNode = scene->GetNodeByID(metadataNodeID.toUtf8().constData()))
+            {
+                metadataNode = candidateMetadataNode;
+            }
+        }
+
+        const bool selectedDynamic = useItem->data(Qt::UserRole + 2).toBool();
+        if (!selectedDynamic &&
+            nodeAttributeText(metadataNode, "dPET.SpatiallyVaryingTiming") == QStringLiteral("1"))
+        {
+            spatialStaticTimingUnsupported = true;
+        }
+
+        // Same-administration validation. Prefer the authoritative metadata node
+        // selected while the acquisition table was populated (the sequence node
+        // for dPET dynamic PET, the scalar volume for static PET). Fall back to
+        // the compact persisted JSON if a convenience MRML attribute is absent.
+        const QString injectionText = nodeOrKineticMetadataText(
+            metadataNode, "RadionuclideStartDateTime", QStringLiteral("RadionuclideStartDateTime"));
+        const QString injectionSource = nodeOrKineticMetadataText(
+            metadataNode, "dPET.InjectionDateTimeSource", QStringLiteral("InjectionDateTimeSource"));
+        const QString rawStartDT = nodeOrKineticMetadataText(
+            metadataNode, "RadiopharmaceuticalStartDateTime", QStringLiteral("RadiopharmaceuticalStartDateTime"));
+        const QString rawStartTime = nodeOrKineticMetadataText(
+            metadataNode, "RadiopharmaceuticalStartTime", QStringLiteral("RadiopharmaceuticalStartTime"));
+        const QString injectionOffset = nodeOrKineticMetadataText(
+            metadataNode, "dPET.InjectionToAcquisitionOffsetSec", QStringLiteral("InjectionToAcquisitionOffsetSec"));
+        const QString acquisitionStartText = nodeAttributeText(metadataNode, "dPET.AcquisitionStartDateTime");
+        const QDateTime injectionDT = parseDICOMDateTimeText(injectionText);
+        if (!injectionDT.isValid())
+        {
+            missingAdministrationMetadata = true;
+        }
+        else if (!referenceInjection.isValid())
+        {
+            referenceInjection = injectionDT;
+        }
+        else if (std::abs(static_cast<double>(referenceInjection.secsTo(injectionDT))) > 120.0)
+        {
+            injectionMismatch = true;
+        }
+
+        const QString petName = this->MultiTimepointAcquisitionTable->item(row, 2)
+            ? this->MultiTimepointAcquisitionTable->item(row, 2)->text()
+            : QStringLiteral("<unnamed PET>");
+        const QString studyName = this->MultiTimepointAcquisitionTable->item(row, 1)
+            ? this->MultiTimepointAcquisitionTable->item(row, 1)->text()
+            : QStringLiteral("<unnamed study>");
+        validationDiagnostics << QObject::tr(
+            "  [%1] Study='%2' PET='%3' metadataNode='%4' kind='%5' acquisitionStart='%6' "
+            "RadionuclideStartDateTime='%7' source='%8' rawStartDT='%9' rawStartTime='%10' offsetSec='%11'")
+            .arg(row + 1)
+            .arg(studyName)
+            .arg(petName)
+            .arg(metadataNode && metadataNode->GetName() ? QString::fromUtf8(metadataNode->GetName()) : QStringLiteral("<none>"))
+            .arg(nodeAttributeText(metadataNode, "dPET.AcquisitionKind"))
+            .arg(acquisitionStartText)
+            .arg(injectionText)
+            .arg(injectionSource)
+            .arg(rawStartDT)
+            .arg(rawStartTime)
+            .arg(injectionOffset);
+
+        const QString radionuclideCode = nodeOrKineticMetadataText(
+            metadataNode, "dPET.RadionuclideCode", QStringLiteral("RadionuclideCode"));
+        const QString radiopharmaceuticalCode = nodeOrKineticMetadataText(
+            metadataNode, "dPET.RadiopharmaceuticalCode", QStringLiteral("RadiopharmaceuticalCode"));
+        const QString radiopharmaceuticalName = nodeOrKineticMetadataText(
+            metadataNode, "RadiopharmaceuticalName", QStringLiteral("RadiopharmaceuticalName"));
+
+        if (!referenceRadionuclideCode.isEmpty() && !radionuclideCode.isEmpty() &&
+            referenceRadionuclideCode != radionuclideCode)
+        {
+            tracerMismatch = true;
+        }
+        if (!referenceRadiopharmaceuticalCode.isEmpty() && !radiopharmaceuticalCode.isEmpty() &&
+            referenceRadiopharmaceuticalCode != radiopharmaceuticalCode)
+        {
+            tracerMismatch = true;
+        }
+        if (referenceRadiopharmaceuticalCode.isEmpty() && radiopharmaceuticalCode.isEmpty() &&
+            !referenceRadiopharmaceuticalName.isEmpty() && !radiopharmaceuticalName.isEmpty() &&
+            QString::compare(referenceRadiopharmaceuticalName, radiopharmaceuticalName,
+                             Qt::CaseInsensitive) != 0)
+        {
+            tracerMismatch = true;
+        }
+        firstNonEmptyReference(referenceRadionuclideCode, radionuclideCode);
+        firstNonEmptyReference(referenceRadiopharmaceuticalCode, radiopharmaceuticalCode);
+        firstNonEmptyReference(referenceRadiopharmaceuticalName, radiopharmaceuticalName);
+
+        bool halfLifeOK = false;
+        const double halfLife = nodeOrKineticMetadataText(
+            metadataNode, "RadionuclideHalfLife", QStringLiteral("RadionuclideHalfLife")).toDouble(&halfLifeOK);
+        if (halfLifeOK && halfLife > 0.0)
+        {
+            if (std::isfinite(referenceHalfLife) && referenceHalfLife > 0.0 &&
+                std::abs(halfLife - referenceHalfLife) /
+                    std::max(referenceHalfLife, halfLife) > 0.01)
+            {
+                tracerMismatch = true;
+            }
+            else if (!std::isfinite(referenceHalfLife))
+            {
+                referenceHalfLife = halfLife;
+            }
+        }
+
+        QString valueType = nodeAttributeText(petNode, "dPET.ValueType").toUpper();
+        if (valueType.isEmpty())
+        {
+            valueType = nodeAttributeText(metadataNode, "dPET.ValueType").toUpper();
+        }
+        if (valueType.isEmpty())
+        {
+            const QString units = nodeOrKineticMetadataText(
+                metadataNode, "Units", QStringLiteral("Units")).toUpper();
+            if (units == QStringLiteral("GML"))
+                valueType = QStringLiteral("SUVBW");
+            else if (units == QStringLiteral("BQML"))
+                valueType = QStringLiteral("BQML");
+        }
+        if (valueType != QStringLiteral("BQML") &&
+            valueType != QStringLiteral("SUVBW") &&
+            valueType != QStringLiteral("SUV"))
+        {
+            unsupportedQuantitativeType = true;
+        }
+        const QString decayCorrection = normalizedDecayCorrection(metadataNode);
+        if (decayCorrection.isEmpty())
+        {
+            missingDecayCorrectionMetadata = true;
+        }
+        else if (decayCorrection != QStringLiteral("START") &&
+                 decayCorrection != QStringLiteral("ADMIN"))
+        {
+            unsupportedDecayCorrection = true;
+        }
+        double sourceFactor = std::numeric_limits<double>::quiet_NaN();
+        QString factorError;
+        if ((decayCorrection == QStringLiteral("START") ||
+             decayCorrection == QStringLiteral("ADMIN")) &&
+            !multiAcquisitionSUVbwFactor(
+                petNode, metadataNode, decayCorrection, sourceFactor, &factorError))
+        {
+            invalidSUVFactor = true;
+        }
+        if (!std::isfinite(referenceSUVbwFactor) &&
+            std::isfinite(sourceFactor) && sourceFactor > 0.0)
+        {
+            referenceSUVbwFactor = sourceFactor;
+            referenceDecayCorrection = decayCorrection;
+        }
+
+        validationDiagnostics.last() += QObject::tr(
+            " DecayCorrection='%1' sourceSUVfactor='%2'")
+            .arg(decayCorrection.isEmpty() ? QStringLiteral("<missing>") : decayCorrection)
+            .arg(std::isfinite(sourceFactor) ? QString::number(sourceFactor, 'g', 12) : QStringLiteral("<invalid>"));
+    }
+
+    QString status;
+    if (this->MultiTimepointAcquisitionTable->rowCount() == 0)
+    {
+        status = QObject::tr("No PET acquisitions were found for the selected patient.");
+    }
+    else if (selectedCount == 0)
+    {
+        status = QObject::tr("No acquisitions selected.");
+    }
+    else if (selectedCount < 2)
+    {
+        status = QObject::tr("Select at least two PET acquisitions for Multi-timepoint analysis.");
+    }
+    else if (missingTimingCount > 0)
+    {
+        status = QObject::tr(
+            "%1 selected acquisition(s) need timing metadata recovery before chronological validation.")
+            .arg(missingTimingCount);
+    }
+    else if (earliestSelectedRow >= 0)
+    {
+        QTableWidgetItem* earliestItem = this->MultiTimepointAcquisitionTable->item(
+            earliestSelectedRow, 0);
+        if (earliestItem && !earliestItem->data(Qt::UserRole + 2).toBool())
+        {
+            status = QObject::tr("The earliest selected acquisition must be dynamic.");
+        }
+    }
+
+    if (status.isEmpty() && missingSegmentationCount > 0)
+    {
+        status = QObject::tr("Assign one segmentation to every selected PET acquisition.");
+    }
+    if (status.isEmpty() && fallbackCount > 0)
+    {
+        status = QObject::tr(
+            "%1 selected acquisition(s) require the one-time source-DICOM metadata fallback before validation.")
+            .arg(fallbackCount);
+    }
+    if (status.isEmpty() && injectionMismatch)
+    {
+        status = QObject::tr(
+            "The selected PET acquisitions do not appear to belong to the same radiotracer administration (administration times differ by more than 2 minutes).");
+    }
+    if (status.isEmpty() && tracerMismatch)
+    {
+        status = QObject::tr(
+            "Radiopharmaceutical/radionuclide metadata are inconsistent across the selected acquisitions.");
+    }
+    if (status.isEmpty() && missingAdministrationMetadata)
+    {
+        status = QObject::tr(
+            "Administration timing is incomplete for at least one selected acquisition; same-injection validation is required before TAC merging.");
+    }
+    if (status.isEmpty() && unsupportedQuantitativeType)
+    {
+        status = QObject::tr(
+            "Multi-timepoint PET requires dPETImporter quantitative values in BQML or SUVbw.");
+    }
+    if (status.isEmpty() && missingDecayCorrectionMetadata)
+    {
+        status = QObject::tr(
+            "Decay Correction metadata is missing for at least one selected PET. Multi-timepoint mode requires START or ADMIN.");
+    }
+    if (status.isEmpty() && unsupportedDecayCorrection)
+    {
+        status = QObject::tr(
+            "Multi-timepoint mode supports only PET with Decay Correction START or ADMIN. NONE, missing, and unknown values are rejected.");
+    }
+    if (status.isEmpty() && invalidSUVFactor)
+    {
+        status = QObject::tr(
+            "A selected PET lacks a valid SUVbw normalization factor for its DICOM decay convention. Re-import START data with the current dPETImporter; ADMIN requires valid weight and administered dose.");
+    }
+    if (status.isEmpty() && spatialStaticTimingUnsupported)
+    {
+        status = QObject::tr(
+            "A selected static/whole-body PET has spatially varying acquisition timing. ROI-specific timing must be derived from the stored slice/bed timing map before TAC merging; a single global time will not be invented.");
+    }
+    if (status.isEmpty() && duplicateSegmentNames)
+    {
+        status = duplicateSegmentDescription + QObject::tr(
+            " Multi-timepoint matching requires unique exact segment names within every segmentation.");
+    }
+    if (status.isEmpty() && (!haveCommonSegments || commonSegmentNames.isEmpty()))
+    {
+        status = QObject::tr(
+            "No exact segment name is present in every selected segmentation.");
+    }
+    if (status.isEmpty())
+    {
+        status = QObject::tr(
+            "%1 acquisitions validated: dPETImporter provenance, same administration/tracer, START/ADMIN decay normalization available, and %2 exact common segment(s).")
+            .arg(selectedCount)
+            .arg(commonSegmentNames.size());
+    }
+
+    this->MultiTimepointStatusLabel->setText(status);
+
+    const bool validationPassed =
+        !status.isEmpty() && status.contains(QStringLiteral("acquisitions validated"), Qt::CaseInsensitive);
+    this->multiTimepointSelectionValidated = validationPassed;
+    if (!this->multiTimepointPreparationRunning && !this->multiTimepointExtractionRunning)
+    {
+        this->multiTimepointPreparationValid = false;
+        this->preparedMultiTimepointAcquisitions.clear();
+        this->preparedMultiTimepointObservations.clear();
+    }
+    if (validationPassed)
+    {
+        this->multiTimepointCommonSegmentNames = commonSegmentNames;
+        // Multi uses SUVbw as its canonical scalar bridge regardless of the
+        // native per-acquisition storage units.
+        q->dPETvalueType = "SUVbw";
+        this->multiTimepointReferenceSUVbwFactor = referenceSUVbwFactor;
+        this->multiTimepointReferenceDecayCorrection = referenceDecayCorrection;
+        this->suvbwFactorValidated =
+            std::isfinite(referenceSUVbwFactor) && referenceSUVbwFactor > 0.0;
+        QTableWidgetItem* referenceItem = earliestSelectedRow >= 0
+            ? this->MultiTimepointAcquisitionTable->item(earliestSelectedRow, 0)
+            : nullptr;
+        this->multiTimepointReferenceMetadataNodeID = referenceItem
+            ? referenceItem->data(Qt::UserRole + 4).toString()
+            : QString();
+    }
+    else
+    {
+        this->multiTimepointCommonSegmentNames.clear();
+        this->multiTimepointReferenceMetadataNodeID.clear();
+        q->dPETvalueType.clear();
+        this->multiTimepointReferenceSUVbwFactor = std::numeric_limits<double>::quiet_NaN();
+        this->multiTimepointReferenceDecayCorrection.clear();
+    }
+
+    this->updateQuantitativeUnitUI();
+    this->populateMultiTimepointCommonSegmentCheckboxes();
+    this->setImageSetupVisible(!this->tableBasedMode);
+    q->enableTACbutton();
+
+    if (selectedCount >= 2)
+    {
+        QString diagnosticMessage;
+        if (!validationPassed)
+        {
+            diagnosticMessage = QObject::tr(
+                "[SlicerDynamicPET multi-timepoint] Validation failed: %1\n%2")
+                .arg(status, validationDiagnostics.join(QStringLiteral("\n")));
+        }
+        else
+        {
+            diagnosticMessage = QObject::tr(
+                "[SlicerDynamicPET multi-timepoint] Validation passed. Reference administration='%1'; "
+                "reference dynamic decay='%2'; reference SUV factor=%3.")
+                .arg(referenceInjection.isValid()
+                    ? referenceInjection.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                    : QStringLiteral("<unavailable>"))
+                .arg(referenceDecayCorrection.isEmpty() ? QStringLiteral("<unavailable>") : referenceDecayCorrection)
+                .arg(std::isfinite(referenceSUVbwFactor)
+                    ? QString::number(referenceSUVbwFactor, 'g', 12)
+                    : QStringLiteral("<invalid>"));
+        }
+
+        if (!diagnosticMessage.isEmpty() && diagnosticMessage != this->lastMultiTimepointValidationLog)
+        {
+            this->logToPythonConsole(diagnosticMessage);
+            this->lastMultiTimepointValidationLog = diagnosticMessage;
+        }
+    }
+    else
+    {
+        this->lastMultiTimepointValidationLog.clear();
+    }
+
+    if (selectedCount == 0)
+    {
+        this->MultiTimepointSelectionSummaryLabel->setText(QObject::tr("None selected"));
+        this->MultiTimepointSelectionButton->setText(QObject::tr("Select acquisitions..."));
+    }
+    else
+    {
+        QString summary = QObject::tr("%1 selected").arg(selectedCount);
+        if (missingSegmentationCount > 0)
+        {
+            summary += QObject::tr(" · %1 segmentation(s) missing")
+                .arg(missingSegmentationCount);
+        }
+        else if (haveCommonSegments)
+        {
+            summary += QObject::tr(" · %1 common ROI(s)").arg(commonSegmentNames.size());
+        }
+        this->MultiTimepointSelectionSummaryLabel->setText(summary);
+        this->MultiTimepointSelectionButton->setText(QObject::tr("Edit acquisitions..."));
+    }
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+populateMultiTimepointCommonSegmentCheckboxes()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->multiTimepointMode)
+    {
+        return;
+    }
+
+    QSet<QString> previouslySelectedNames;
+    for (int i = 0; i < this->segmentCheckLayout->count(); ++i)
+    {
+        QCheckBox* checkbox = qobject_cast<QCheckBox*>(
+            this->segmentCheckLayout->itemAt(i)->widget());
+        if (checkbox && checkbox->isChecked())
+        {
+            previouslySelectedNames.insert(
+                checkbox->property("SegmentID").toString());
+        }
+    }
+
+    this->SegmentCheckContents->blockSignals(true);
+    QLayoutItem* item = nullptr;
+    while ((item = this->segmentCheckLayout->takeAt(0)) != nullptr)
+    {
+        if (QWidget* widget = item->widget())
+        {
+            widget->deleteLater();
+        }
+        delete item;
+    }
+
+    q->segmentIDs.clear();
+    this->segmentDisplayOrder.clear();
+
+    if (!this->multiTimepointSelectionValidated ||
+        this->multiTimepointCommonSegmentNames.isEmpty())
+    {
+        this->segmentSelectAll->setEnabled(false);
+        this->segmentCheckLayout->addStretch();
+        this->SegmentCheckContents->blockSignals(false);
+        return;
+    }
+
+    QStringList names = this->multiTimepointCommonSegmentNames.values();
+    std::sort(names.begin(), names.end(), [](const QString& a, const QString& b)
+    {
+        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
+    });
+
+    for (const QString& name : names)
+    {
+        QCheckBox* checkbox = new QCheckBox(name, this->SegmentCheckContents);
+        // In Multi-timepoint mode the stable cross-acquisition key is the exact
+        // segment name. Each acquisition resolves this name back to its own
+        // local segment ID during extraction.
+        checkbox->setProperty("SegmentID", name);
+        const bool wasSelected = previouslySelectedNames.contains(name);
+        checkbox->setChecked(wasSelected);
+        this->segmentCheckLayout->addWidget(checkbox);
+        QObject::connect(
+            checkbox, SIGNAL(stateChanged(int)),
+            q, SLOT(onSegmentsChanged()));
+        if (wasSelected)
+        {
+            q->segmentIDs.push_back(name);
+        }
+        this->segmentDisplayOrder.push_back(name.toStdString());
+    }
+
+    this->segmentCheckLayout->addStretch();
+    this->segmentSelectAll->setEnabled(!names.isEmpty());
+    this->SegmentCheckContents->blockSignals(false);
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+syncMultiTimepointSelectedSegments()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    if (!this->multiTimepointMode)
+    {
+        return;
+    }
+
+    q->segmentIDs.clear();
+    for (int i = 0; i < this->segmentCheckLayout->count(); ++i)
+    {
+        QCheckBox* checkbox = qobject_cast<QCheckBox*>(
+            this->segmentCheckLayout->itemAt(i)->widget());
+        if (checkbox && checkbox->isChecked())
+        {
+            const QString key = checkbox->property("SegmentID").toString();
+            if (!key.isEmpty())
+            {
+                q->segmentIDs.push_back(key);
+            }
+        }
+    }
+    q->enableTACbutton();
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+ensureMultiTimepointBinaryRepresentation(
+    vtkMRMLSegmentationNode* segmentationNode,
+    vtkMRMLScalarVolumeNode* referencePET,
+    QString* errorMessage,
+    double* elapsedMs,
+    bool* converted)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto start = Clock::now();
+
+    if (elapsedMs)
+    {
+        *elapsedMs = 0.0;
+    }
+    if (converted)
+    {
+        *converted = false;
+    }
+
+    if (!segmentationNode || !segmentationNode->GetSegmentation() ||
+        !referencePET || !referencePET->GetImageData())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Cannot prepare Binary labelmap: segmentation or PET reference is unavailable.");
+        }
+        return false;
+    }
+
+    vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+    const std::string binaryRep =
+        vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+
+    // Binary is a derived computational representation.  If it is already
+    // present then preparation is complete: never ask the converter for a
+    // Binary->Binary path.  This also safely accepts legacy scenes in which
+    // older Single-mode code made Binary the source representation.
+    if (segmentation->ContainsRepresentation(binaryRep))
+    {
+        if (elapsedMs)
+        {
+            *elapsedMs = std::chrono::duration<double, std::milli>(
+                Clock::now() - start).count();
+        }
+        return true;
+    }
+
+    const std::string sourceRep = segmentation->GetSourceRepresentationName();
+    if (sourceRep == binaryRep)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Segmentation '%1' reports Binary labelmap as its source representation, "
+                "but no Binary representation is stored. Refusing an invalid Binary-to-Binary conversion.")
+                .arg(segmentationNode->GetName()
+                    ? QString::fromUtf8(segmentationNode->GetName())
+                    : QObject::tr("<unnamed segmentation>"));
+        }
+        return false;
+    }
+
+    segmentationNode->SetReferenceImageGeometryParameterFromVolumeNode(referencePET);
+    if (!segmentation->CreateRepresentation(binaryRep) ||
+        !segmentation->ContainsRepresentation(binaryRep))
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Could not create the derived Binary labelmap representation for segmentation '%1' "
+                "using PET '%2' as reference geometry. Source representation remains '%3'.")
+                .arg(segmentationNode->GetName()
+                    ? QString::fromUtf8(segmentationNode->GetName())
+                    : QObject::tr("<unnamed segmentation>"))
+                .arg(referencePET->GetName()
+                    ? QString::fromUtf8(referencePET->GetName())
+                    : QObject::tr("<unnamed PET>"))
+                .arg(QString::fromStdString(sourceRep));
+        }
+        return false;
+    }
+
+    if (converted)
+    {
+        *converted = true;
+    }
+    if (elapsedMs)
+    {
+        *elapsedMs = std::chrono::duration<double, std::milli>(
+            Clock::now() - start).count();
+    }
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+prepareDynamicMultiTimepointAcquisition(
+    PreparedMultiTimepointAcquisition& acquisition,
+    std::vector<PreparedMultiTimepointObservation>& observations,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    if (!scene)
+    {
+        if (errorMessage) *errorMessage = QObject::tr("MRML scene is unavailable.");
+        return false;
+    }
+
+    vtkMRMLScalarVolumeNode* petProxy = vtkMRMLScalarVolumeNode::SafeDownCast(
+        scene->GetNodeByID(acquisition.petNodeID.toUtf8().constData()));
+    vtkMRMLSegmentationNode* segmentationProxy = vtkMRMLSegmentationNode::SafeDownCast(
+        scene->GetNodeByID(acquisition.segmentationNodeID.toUtf8().constData()));
+    vtkMRMLNode* metadataNode = scene->GetNodeByID(
+        acquisition.metadataNodeID.toUtf8().constData());
+    if (!petProxy || !segmentationProxy || !metadataNode)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Dynamic preparation could not recover PET, segmentation, or metadata for '%1'.")
+                .arg(acquisition.petName);
+        }
+        return false;
+    }
+
+    vtkMRMLSequenceBrowserNode* browser = nullptr;
+    vtkMRMLSequenceNode* petSequence = findSequenceForProxy(scene, petProxy, &browser);
+    if (!petSequence || !browser)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Could not resolve the PET sequence/browser for dynamic acquisition '%1'.")
+                .arg(acquisition.petName);
+        }
+        return false;
+    }
+
+    acquisition.petSequenceNodeID = QString::fromUtf8(petSequence->GetID());
+    acquisition.petBrowserNodeID = QString::fromUtf8(browser->GetID());
+
+    const int frameCount = petSequence->GetNumberOfDataNodes();
+    if (frameCount <= 0)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr("Dynamic acquisition '%1' contains no PET frames.")
+                .arg(acquisition.petName);
+        }
+        return false;
+    }
+
+    std::vector<MultiTimepointFrameInterval> intervals;
+    bool exactTiming = readPersistedDynamicFrameIntervals(metadataNode, intervals) &&
+        static_cast<int>(intervals.size()) == frameCount;
+    if (!exactTiming)
+    {
+        intervals.clear();
+        QDateTime cursor = acquisition.start;
+        for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+        {
+            vtkMRMLNode* frameNode = petSequence->GetNthDataNode(frameIndex);
+            bool durationOK = false;
+            const double durationSec = nodeAttributeText(
+                frameNode, "dPET.Duration").toDouble(&durationOK);
+            if (!durationOK || !std::isfinite(durationSec) || !(durationSec > 0.0))
+            {
+                if (errorMessage)
+                {
+                    *errorMessage = QObject::tr(
+                        "Dynamic acquisition '%1' has incomplete per-frame timing metadata.")
+                        .arg(acquisition.petName);
+                }
+                return false;
+            }
+            MultiTimepointFrameInterval interval;
+            interval.start = cursor;
+            interval.durationSec = durationSec;
+            interval.end = cursor.addMSecs(
+                static_cast<qint64>(std::llround(durationSec * 1000.0)));
+            intervals.push_back(interval);
+            cursor = interval.end;
+        }
+    }
+
+    vtkMRMLSequenceNode* segmentationSequence = browser->GetSequenceNode(segmentationProxy);
+
+    // First try the same dRTImporter adoption used by Single mode when the
+    // selected segmentation explicitly identifies itself as a dynamic RTSTRUCT.
+    const char* importedDynamicAttribute =
+        segmentationProxy->GetAttribute("dRTImporter.DynamicRTStruct");
+    const bool importedDynamicSegmentation =
+        importedDynamicAttribute &&
+        QString::fromUtf8(importedDynamicAttribute) == QStringLiteral("1");
+
+    if (!segmentationSequence && importedDynamicSegmentation)
+    {
+        PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+        const QVariant resultVariant = mainContext.call(
+            "DPE_adopt_dynamic_rtstruct",
+            QVariantList{
+                QString::fromUtf8(segmentationProxy->GetID()),
+                QString::fromUtf8(petSequence->GetID()),
+                QString::fromUtf8(browser->GetID())});
+        const QVariantMap result = resultVariant.toMap();
+        if (!result.value("ok").toBool())
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "The dynamic segmentation for '%1' could not be synchronized to its PET sequence: %2")
+                    .arg(acquisition.petName, result.value("error").toString());
+            }
+            return false;
+        }
+
+        const QByteArray sequenceNodeID =
+            result.value("sequence_node_id").toString().toUtf8();
+        segmentationSequence = vtkMRMLSequenceNode::SafeDownCast(
+            scene->GetNodeByID(sequenceNodeID.constData()));
+        if (!segmentationSequence)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "The dynamic segmentation for '%1' was synchronized, but its sequence could not be recovered.")
+                    .arg(acquisition.petName);
+            }
+            return false;
+        }
+    }
+
+    // Match Single-mode preparation for an ordinary/static segmentation
+    // assigned to a dynamic PET: prepare Binary once on the proxy, attach a
+    // segmentation sequence to the PET browser, then clone that prepared
+    // segmentation at every PET index.  Crucially, Binary remains derived;
+    // the source representation is not changed.
+    if (!segmentationSequence)
+    {
+        vtkMRMLScalarVolumeNode* firstPET = vtkMRMLScalarVolumeNode::SafeDownCast(
+            petSequence->GetNthDataNode(0));
+        double preparationMs = 0.0;
+        bool converted = false;
+        if (!this->ensureMultiTimepointBinaryRepresentation(
+                segmentationProxy, firstPET, errorMessage,
+                &preparationMs, &converted))
+        {
+            return false;
+        }
+
+        const std::string stableName =
+            segmentationProxy->GetName() ? segmentationProxy->GetName() : "Segmentation";
+
+        vtkSmartPointer<vtkMRMLSequenceNode> newSequence =
+            vtkSmartPointer<vtkMRMLSequenceNode>::New();
+        newSequence->SetName(stableName.c_str());
+        newSequence->SetAttribute("SlicerDynamicPET.MultiPreparedStaticSegmentation", "1");
+        scene->AddNode(newSequence);
+
+        browser->AddProxyNode(segmentationProxy, newSequence, false);
+        browser->SetSaveChanges(newSequence, true);
+
+        for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+        {
+            const std::string indexValue = petSequence->GetNthIndexValue(frameIndex);
+            if (!newSequence->GetDataNodeAtValue(indexValue))
+            {
+                newSequence->SetDataNodeAtValue(segmentationProxy, indexValue);
+            }
+        }
+        browser->SetOverwriteProxyName(newSequence, false);
+        segmentationSequence = newSequence;
+        acquisition.segmentationTemporal = false;
+
+        this->logToPythonConsole(QObject::tr(
+            "[SlicerDynamicPET multi-timepoint PREP][DYNAMIC] '%1': no PET-linked segmentation sequence existed; "
+            "created a %2-frame synchronized sequence from the assigned segmentation. Binary preparation=%3 ms (%4).")
+            .arg(acquisition.petName)
+            .arg(frameCount)
+            .arg(preparationMs, 0, 'f', 3)
+            .arg(converted ? QObject::tr("created") : QObject::tr("reused")));
+    }
+    else
+    {
+        const char* staticPrepared = segmentationSequence->GetAttribute(
+            "SlicerDynamicPET.MultiPreparedStaticSegmentation");
+        acquisition.segmentationTemporal = !(staticPrepared && std::string(staticPrepared) == "1");
+    }
+
+    acquisition.segmentationSequenceNodeID =
+        QString::fromUtf8(segmentationSequence->GetID());
+
+    double binaryPreparationMs = 0.0;
+    int binaryConversions = 0;
+    int binaryReuses = 0;
+
+    for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
+    {
+        if (q->stopRequested)
+        {
+            if (errorMessage) *errorMessage = QObject::tr("Multi-timepoint preparation was cancelled.");
+            return false;
+        }
+
+        const std::string indexValue = petSequence->GetNthIndexValue(frameIndex);
+        vtkMRMLScalarVolumeNode* framePET = vtkMRMLScalarVolumeNode::SafeDownCast(
+            petSequence->GetDataNodeAtValue(indexValue));
+        vtkMRMLSegmentationNode* frameSegmentation = vtkMRMLSegmentationNode::SafeDownCast(
+            segmentationSequence->GetDataNodeAtValue(indexValue));
+        if (!framePET || !frameSegmentation || !frameSegmentation->GetSegmentation())
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "Dynamic preparation found no matching PET/segmentation item at frame %1 of '%2'.")
+                    .arg(frameIndex + 1)
+                    .arg(acquisition.petName);
+            }
+            return false;
+        }
+
+        if (q->ProgressBar)
+        {
+            q->ProgressBar->setFormat(QObject::tr(
+                "Preparing frame %1/%2 (%p%)")
+                .arg(frameIndex + 1)
+                .arg(frameCount));
+            q->ProgressBar->setMaximum(frameCount);
+            q->ProgressBar->setValue(frameIndex);
+        }
+
+        double framePreparationMs = 0.0;
+        bool converted = false;
+        if (!this->ensureMultiTimepointBinaryRepresentation(
+                frameSegmentation, framePET, errorMessage,
+                &framePreparationMs, &converted))
+        {
+            return false;
+        }
+        binaryPreparationMs += framePreparationMs;
+        converted ? ++binaryConversions : ++binaryReuses;
+
+        PreparedMultiTimepointObservation observation;
+        observation.frameIndex = frameIndex;
+        observation.dynamic = true;
+        observation.acquisitionName = acquisition.petName;
+        observation.sequenceIndex = QString::fromStdString(indexValue);
+        observation.petSequenceNodeID = acquisition.petSequenceNodeID;
+        observation.segmentationSequenceNodeID = acquisition.segmentationSequenceNodeID;
+        observation.segmentationNodeID = acquisition.segmentationNodeID;
+        observation.metadataNodeID = acquisition.metadataNodeID;
+        observation.start = intervals[static_cast<size_t>(frameIndex)].start;
+        observation.end = intervals[static_cast<size_t>(frameIndex)].end;
+        observation.durationSec = intervals[static_cast<size_t>(frameIndex)].durationSec;
+
+        for (const QString& commonName : this->multiTimepointCommonSegmentNames)
+        {
+            const std::string localID = exactSegmentIDForName(frameSegmentation, commonName);
+            if (!localID.empty())
+            {
+                observation.segmentIDsByName[commonName.toStdString()] = localID;
+            }
+        }
+        observations.push_back(std::move(observation));
+
+        if (frameIndex == 0 || frameIndex == frameCount / 2 || frameIndex + 1 == frameCount)
+        {
+            vtkSegmentation* segmentation = frameSegmentation->GetSegmentation();
+            const std::string binaryRep =
+                vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+            this->logToPythonConsole(QObject::tr(
+                "[SlicerDynamicPET DIAG][PREP] dynamic='%1' frame=%2/%3 index='%4' "
+                "SEG='%5' source='%6' BinaryAvailable=%7 cachedCommonROIs=%8.")
+                .arg(acquisition.petName)
+                .arg(frameIndex + 1)
+                .arg(frameCount)
+                .arg(QString::fromStdString(indexValue))
+                .arg(frameSegmentation->GetID()
+                    ? QString::fromUtf8(frameSegmentation->GetID()) : QStringLiteral("<none>"))
+                .arg(QString::fromStdString(segmentation->GetSourceRepresentationName()))
+                .arg(segmentation->ContainsRepresentation(binaryRep) ? 1 : 0)
+                .arg(static_cast<int>(observations.back().segmentIDsByName.size())));
+        }
+
+        qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+    }
+
+    if (q->ProgressBar)
+    {
+        q->ProgressBar->setValue(frameCount);
+    }
+
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET PERF][MULTI PREP] Dynamic '%1': frames=%2; Binary preparation=%3 ms; "
+        "conversions=%4; reuses=%5; segmentationSequence='%6'; mode=%7.")
+        .arg(acquisition.petName)
+        .arg(frameCount)
+        .arg(binaryPreparationMs, 0, 'f', 3)
+        .arg(binaryConversions)
+        .arg(binaryReuses)
+        .arg(acquisition.segmentationSequenceNodeID)
+        .arg(acquisition.segmentationTemporal
+            ? QObject::tr("temporal") : QObject::tr("static-reused")));
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+prepareStaticMultiTimepointAcquisition(
+    PreparedMultiTimepointAcquisition& acquisition,
+    std::vector<PreparedMultiTimepointObservation>& observations,
+    QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkMRMLScalarVolumeNode* petNode = scene
+        ? vtkMRMLScalarVolumeNode::SafeDownCast(
+            scene->GetNodeByID(acquisition.petNodeID.toUtf8().constData()))
+        : nullptr;
+    vtkMRMLSegmentationNode* segmentationNode = scene
+        ? vtkMRMLSegmentationNode::SafeDownCast(
+            scene->GetNodeByID(acquisition.segmentationNodeID.toUtf8().constData()))
+        : nullptr;
+    if (!petNode || !segmentationNode || !segmentationNode->GetSegmentation())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Static preparation could not recover PET or segmentation for '%1'.")
+                .arg(acquisition.petName);
+        }
+        return false;
+    }
+
+    double preparationMs = 0.0;
+    bool converted = false;
+    if (!this->ensureMultiTimepointBinaryRepresentation(
+            segmentationNode, petNode, errorMessage,
+            &preparationMs, &converted))
+    {
+        return false;
+    }
+
+    PreparedMultiTimepointObservation observation;
+    observation.frameIndex = -1;
+    observation.dynamic = false;
+    observation.acquisitionName = acquisition.petName;
+    observation.petNodeID = acquisition.petNodeID;
+    observation.segmentationNodeID = acquisition.segmentationNodeID;
+    observation.metadataNodeID = acquisition.metadataNodeID;
+    observation.start = acquisition.start;
+    observation.end = acquisition.end;
+    observation.durationSec = acquisition.durationSec;
+
+    for (const QString& commonName : this->multiTimepointCommonSegmentNames)
+    {
+        const std::string localID = exactSegmentIDForName(segmentationNode, commonName);
+        if (!localID.empty())
+        {
+            observation.segmentIDsByName[commonName.toStdString()] = localID;
+        }
+    }
+    observations.push_back(std::move(observation));
+
+    vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+    const std::string binaryRep =
+        vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET PERF][MULTI PREP] Static '%1': Binary preparation=%2 ms (%3); "
+        "source='%4'; BinaryAvailable=%5; cachedCommonROIs=%6.")
+        .arg(acquisition.petName)
+        .arg(preparationMs, 0, 'f', 3)
+        .arg(converted ? QObject::tr("created") : QObject::tr("reused"))
+        .arg(QString::fromStdString(segmentation->GetSourceRepresentationName()))
+        .arg(segmentation->ContainsRepresentation(binaryRep) ? 1 : 0)
+        .arg(static_cast<int>(observations.back().segmentIDsByName.size())));
+
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+prepareMultiTimepointAcquisitions(QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    using Clock = std::chrono::steady_clock;
+
+    if (!this->multiTimepointMode || !this->multiTimepointSelectionValidated)
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "Multi-timepoint acquisition validation must pass before preparation.");
+        }
+        return false;
+    }
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkMRMLSubjectHierarchyNode* shNode = scene
+        ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene)
+        : nullptr;
+    if (!scene || !shNode)
+    {
+        if (errorMessage) *errorMessage = QObject::tr("MRML scene is unavailable.");
+        return false;
+    }
+
+    this->multiTimepointPreparationValid = false;
+    this->preparedMultiTimepointAcquisitions.clear();
+    this->preparedMultiTimepointObservations.clear();
+    this->multiTimepointPreparationRunning = true;
+    q->stopRequested = false;
+
+    auto finishUI = [&]()
+    {
+        this->multiTimepointPreparationRunning = false;
+        if (q->ProgressBar)
+        {
+            q->ProgressBar->setVisible(false);
+            q->ProgressBar->setValue(0);
+            q->ProgressBar->setMinimum(0);
+            q->ProgressBar->setMaximum(100);
+            q->ProgressBar->setFormat("%p%");
+        }
+        if (q->stopButton)
+        {
+            q->stopButton->setVisible(false);
+        }
+    };
+
+    if (q->ProgressBar)
+    {
+        q->ProgressBar->setMinimum(0);
+        q->ProgressBar->setMaximum(100);
+        q->ProgressBar->setValue(0);
+        q->ProgressBar->setFormat(QObject::tr("Preparing Multi-timepoint acquisitions (%p%)"));
+        q->ProgressBar->setVisible(true);
+        q->ProgressBar->show();
+    }
+    if (q->stopButton)
+    {
+        q->stopButton->setVisible(true);
+        q->stopButton->show();
+    }
+
+    std::vector<PreparedMultiTimepointAcquisition> acquisitions;
+    for (int row = 0; row < this->MultiTimepointAcquisitionTable->rowCount(); ++row)
+    {
+        QTableWidgetItem* useItem = this->MultiTimepointAcquisitionTable->item(row, 0);
+        if (!useItem || useItem->checkState() != Qt::Checked)
+        {
+            continue;
+        }
+
+        const vtkIdType petItemID = useItem->data(Qt::UserRole).value<vtkIdType>();
+        QComboBox* segCombo = qobject_cast<QComboBox*>(
+            this->MultiTimepointAcquisitionTable->cellWidget(row, 3));
+        const vtkIdType segmentationItemID = segCombo
+            ? segCombo->currentData().value<vtkIdType>()
+            : vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+
+        vtkMRMLScalarVolumeNode* petNode = vtkMRMLScalarVolumeNode::SafeDownCast(
+            shNode->GetItemDataNode(petItemID));
+        vtkMRMLSegmentationNode* segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+            shNode->GetItemDataNode(segmentationItemID));
+        if (!petNode || !segmentationNode)
+        {
+            finishUI();
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "A selected acquisition lost its PET or segmentation node during preparation.");
+            }
+            return false;
+        }
+
+        PreparedMultiTimepointAcquisition acquisition;
+        acquisition.sourceRow = row;
+        acquisition.dynamic = useItem->data(Qt::UserRole + 2).toBool();
+        acquisition.petName = this->MultiTimepointAcquisitionTable->item(row, 2)
+            ? this->MultiTimepointAcquisitionTable->item(row, 2)->text()
+            : QObject::tr("PET acquisition");
+        acquisition.petNodeID = QString::fromUtf8(petNode->GetID());
+        acquisition.segmentationNodeID = QString::fromUtf8(segmentationNode->GetID());
+
+        const QString metadataNodeID = useItem->data(Qt::UserRole + 4).toString();
+        vtkMRMLNode* metadataNode = !metadataNodeID.isEmpty()
+            ? scene->GetNodeByID(metadataNodeID.toUtf8().constData())
+            : static_cast<vtkMRMLNode*>(petNode);
+        if (!metadataNode)
+        {
+            metadataNode = petNode;
+        }
+        acquisition.metadataNodeID = QString::fromUtf8(metadataNode->GetID());
+
+        if (!readPersistedKineticTiming(
+                metadataNode, acquisition.start, acquisition.end,
+                acquisition.durationSec))
+        {
+            finishUI();
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "Could not recover persisted timing while preparing '%1'.")
+                    .arg(acquisition.petName);
+            }
+            return false;
+        }
+
+        acquisition.valueType = nodeAttributeText(petNode, "dPET.ValueType");
+        if (acquisition.valueType.isEmpty())
+        {
+            acquisition.valueType = nodeAttributeText(metadataNode, "dPET.ValueType");
+        }
+        acquisition.decayCorrection = normalizedDecayCorrection(metadataNode);
+        QString factorError;
+        if (!multiAcquisitionSUVbwFactor(
+                petNode, metadataNode, acquisition.decayCorrection,
+                acquisition.sourceSUVbwFactor, &factorError))
+        {
+            finishUI();
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr("Could not prepare quantitative normalization for '%1': %2")
+                    .arg(acquisition.petName, factorError);
+            }
+            return false;
+        }
+        acquisitions.push_back(std::move(acquisition));
+    }
+
+    if (acquisitions.size() < 2)
+    {
+        finishUI();
+        if (errorMessage) *errorMessage = QObject::tr("Select at least two acquisitions.");
+        return false;
+    }
+
+    std::stable_sort(acquisitions.begin(), acquisitions.end(),
+        [](const PreparedMultiTimepointAcquisition& a,
+           const PreparedMultiTimepointAcquisition& b)
+        {
+            return a.start < b.start;
+        });
+
+    this->multiTimepointReferenceSUVbwFactor = acquisitions.front().sourceSUVbwFactor;
+    this->multiTimepointReferenceDecayCorrection = acquisitions.front().decayCorrection;
+    this->suvbwFactorValidated =
+        std::isfinite(this->multiTimepointReferenceSUVbwFactor) &&
+        this->multiTimepointReferenceSUVbwFactor > 0.0;
+    if (!this->suvbwFactorValidated)
+    {
+        finishUI();
+        if (errorMessage) *errorMessage = QObject::tr(
+            "The earliest dynamic acquisition has no valid reference SUVbw factor.");
+        return false;
+    }
+
+    QStringList quantitativePreparationSummary;
+    for (const PreparedMultiTimepointAcquisition& acquisition : acquisitions)
+    {
+        quantitativePreparationSummary << QObject::tr(
+            "  '%1': stored=%2 DecayCorrection=%3 sourceSUVfactor=%4")
+            .arg(acquisition.petName)
+            .arg(acquisition.valueType)
+            .arg(acquisition.decayCorrection)
+            .arg(acquisition.sourceSUVbwFactor, 0, 'g', 12);
+    }
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET multi-timepoint PREP][QUANT] Canonical scalar domain=SUVbw; "
+        "reference dynamic SUV factor=%1 (%2). PET voxel data are unchanged; no cross-acquisition PET sequence is created.\n%3")
+        .arg(this->multiTimepointReferenceSUVbwFactor, 0, 'g', 12)
+        .arg(this->multiTimepointReferenceDecayCorrection)
+        .arg(quantitativePreparationSummary.join(QStringLiteral("\n"))));
+
+    const auto totalStart = Clock::now();
+    std::vector<PreparedMultiTimepointObservation> observations;
+
+    for (size_t acquisitionIndex = 0;
+         acquisitionIndex < acquisitions.size(); ++acquisitionIndex)
+    {
+        if (q->stopRequested)
+        {
+            finishUI();
+            if (errorMessage) *errorMessage = QObject::tr("Multi-timepoint preparation was cancelled.");
+            return false;
+        }
+
+        PreparedMultiTimepointAcquisition& acquisition = acquisitions[acquisitionIndex];
+        const size_t firstObservation = observations.size();
+        QString localError;
+        const bool ok = acquisition.dynamic
+            ? this->prepareDynamicMultiTimepointAcquisition(
+                acquisition, observations, &localError)
+            : this->prepareStaticMultiTimepointAcquisition(
+                acquisition, observations, &localError);
+        if (!ok)
+        {
+            finishUI();
+            if (errorMessage) *errorMessage = localError;
+            return false;
+        }
+
+        for (size_t observationIndex = firstObservation;
+             observationIndex < observations.size(); ++observationIndex)
+        {
+            observations[observationIndex].acquisitionIndex =
+                static_cast<int>(acquisitionIndex);
+        }
+    }
+
+    std::stable_sort(observations.begin(), observations.end(),
+        [](const PreparedMultiTimepointObservation& a,
+           const PreparedMultiTimepointObservation& b)
+        {
+            if (a.start != b.start)
+            {
+                return a.start < b.start;
+            }
+            return a.end < b.end;
+        });
+
+    this->preparedMultiTimepointAcquisitions = std::move(acquisitions);
+    this->preparedMultiTimepointObservations = std::move(observations);
+    this->multiTimepointPreparationValid =
+        !this->preparedMultiTimepointAcquisitions.empty() &&
+        !this->preparedMultiTimepointObservations.empty();
+
+    const double totalMs = std::chrono::duration<double, std::milli>(
+        Clock::now() - totalStart).count();
+
+    finishUI();
+    if (this->multiTimepointPreparationValid)
+    {
+        this->MultiTimepointStatusLabel->setText(
+            this->MultiTimepointStatusLabel->text() +
+            QObject::tr(" Prepared %1 observation(s); TAC can now run without representation conversion.")
+                .arg(static_cast<int>(this->preparedMultiTimepointObservations.size())));
+    }
+    q->enableTACbutton();
+
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET PERF][MULTI PREP] SUMMARY: total=%1 ms; acquisitions=%2; observations=%3. "
+        "Preparation is complete before TAC; Binary is treated only as a derived/cache representation and no Binary-to-Binary conversion is requested.")
+        .arg(totalMs, 0, 'f', 3)
+        .arg(static_cast<int>(this->preparedMultiTimepointAcquisitions.size()))
+        .arg(static_cast<int>(this->preparedMultiTimepointObservations.size())));
+
+    if (errorMessage)
+    {
+        errorMessage->clear();
+    }
+    return this->multiTimepointPreparationValid;
+}
+
+//-----------------------------------------------------------------------------
+bool
+qSlicerDynamicPETModuleWidgetPrivate::
+computeMultiTimepointTAC(QString* errorMessage)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    using Clock = std::chrono::steady_clock;
+
+    bool extractionStarted = false;
+    this->multiTimepointExtractionRunning = true;
+
+    auto resetProgress = [&]()
+    {
+        if (q->ProgressBar)
+        {
+            q->ProgressBar->setValue(0);
+            q->ProgressBar->setVisible(false);
+            q->ProgressBar->setMinimum(0);
+            q->ProgressBar->setMaximum(100);
+            q->ProgressBar->setFormat("%p%");
+        }
+        if (q->stopButton)
+        {
+            q->stopButton->setVisible(false);
+        }
+    };
+
+    auto fail = [&](const QString& message)
+    {
+        this->multiTimepointExtractionRunning = false;
+        resetProgress();
+        if (extractionStarted)
+        {
+            q->segmentTACs.clear();
+            q->segmentTACsnames.clear();
+            q->timePoints.clear();
+            q->durations.clear();
+            q->suvFactors.clear();
+            q->numberOfTimepoints = 0;
+            this->setPostTACEnabled(false);
+        }
+        if (errorMessage)
+        {
+            *errorMessage = message;
+        }
+        return false;
+    };
+
+    if (!this->multiTimepointMode || !this->multiTimepointSelectionValidated)
+    {
+        return fail(QObject::tr(
+            "Multi-timepoint acquisition validation has not passed."));
+    }
+    if (!this->multiTimepointPreparationValid ||
+        this->preparedMultiTimepointAcquisitions.empty() ||
+        this->preparedMultiTimepointObservations.empty())
+    {
+        return fail(QObject::tr(
+            "Multi-timepoint acquisitions have not been prepared. Re-open Edit acquisitions and close the validated selection to run preparation."));
+    }
+    if (q->segmentIDs.empty())
+    {
+        return fail(QObject::tr("Select at least one common segment."));
+    }
+
+    vtkMRMLScene* scene = q->mrmlScene();
+    vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
+    if (!scene || !logic)
+    {
+        return fail(QObject::tr("The MRML scene or DynamicPET logic is unavailable."));
+    }
+
+    // Freeze the computational problem.  MRML/Qt events are still serviced for
+    // progress and cancellation, but they cannot silently change which ROIs or
+    // observations are being extracted halfway through the TAC.
+    const std::vector<QString> selectedROIs = q->segmentIDs;
+    const std::vector<PreparedMultiTimepointAcquisition> acquisitions =
+        this->preparedMultiTimepointAcquisitions;
+    const std::vector<PreparedMultiTimepointObservation> observations =
+        this->preparedMultiTimepointObservations;
+
+    if (selectedROIs.empty() || observations.empty())
+    {
+        return fail(QObject::tr("The prepared Multi-timepoint problem is empty."));
+    }
+
+    const QDateTime referenceStart = acquisitions.front().start;
+    if (!referenceStart.isValid())
+    {
+        return fail(QObject::tr("The first prepared acquisition has no valid start time."));
+    }
+
+    q->clearTACdata();
+    extractionStarted = true;
+    q->timePoints.clear();
+    q->durations.clear();
+    q->suvFactors.clear();
+    q->numberOfTimepoints = 0;
+    q->PET_flatten_values.clear();
+    this->suvbwFactorValidated = true;
+
+    for (const QString& segmentName : selectedROIs)
+    {
+        const std::string key = segmentName.toStdString();
+        q->segmentTACs[key] = std::vector<VoxelStatistics>();
+        q->segmentTACsnames[key] = key;
+    }
+
+    // Prepared Multi observations are canonicalized to SUVbw acquisition by
+    // acquisition.  Bq-family display/export uses the earliest dynamic
+    // acquisition's SUVbw factor as the common scalar reference.
+    q->dPETvalueType = "SUVbw";
+    if (!std::isfinite(this->multiTimepointReferenceSUVbwFactor) ||
+        this->multiTimepointReferenceSUVbwFactor <= 0.0)
+    {
+        return fail(QObject::tr("The prepared Multi-timepoint reference SUVbw factor is invalid."));
+    }
+
+    if (q->ProgressBar)
+    {
+        q->ProgressBar->setFormat(QObject::tr("Computing prepared Multi-timepoint TAC (%p%)"));
+        q->ProgressBar->setMinimum(0);
+        q->ProgressBar->setMaximum(static_cast<int>(observations.size()));
+        q->ProgressBar->setValue(0);
+        q->ProgressBar->setVisible(true);
+        q->ProgressBar->show();
+    }
+    if (q->stopButton)
+    {
+        q->stopButton->setVisible(true);
+        q->stopButton->show();
+    }
+    q->stopRequested = false;
+
+    const auto totalStart = Clock::now();
+    double nodeResolutionMs = 0.0;
+    double mergedLabelmapMs = 0.0;
+    double voxelStatisticsMs = 0.0;
+    double uiEventMs = 0.0;
+    size_t mergedLabelmapCalls = 0;
+    size_t voxelStatisticsCalls = 0;
+    size_t missingSegmentCalls = 0;
+
+    auto elapsedMs = [](const Clock::time_point& start,
+                        const Clock::time_point& end)
+    {
+        return std::chrono::duration<double, std::milli>(end - start).count();
+    };
+
+    double previousEndSec = -std::numeric_limits<double>::infinity();
+    int gapCount = 0;
+    QStringList extractionWarnings;
+    QSet<QString> geometryWarningLoggedForAcquisition;
+
+    for (size_t observationIndex = 0;
+         observationIndex < observations.size(); ++observationIndex)
+    {
+        if (q->stopRequested)
+        {
+            break;
+        }
+
+        const PreparedMultiTimepointObservation& observation =
+            observations[observationIndex];
+
+        const auto resolveStart = Clock::now();
+        vtkMRMLScalarVolumeNode* petVolume = nullptr;
+        vtkMRMLSegmentationNode* segmentationNode = nullptr;
+        vtkMRMLNode* metadataNode = !observation.metadataNodeID.isEmpty()
+            ? scene->GetNodeByID(observation.metadataNodeID.toUtf8().constData())
+            : nullptr;
+
+        if (observation.dynamic)
+        {
+            vtkMRMLSequenceNode* petSequence = vtkMRMLSequenceNode::SafeDownCast(
+                scene->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()));
+            vtkMRMLSequenceNode* segmentationSequence = vtkMRMLSequenceNode::SafeDownCast(
+                scene->GetNodeByID(observation.segmentationSequenceNodeID.toUtf8().constData()));
+            if (petSequence && segmentationSequence)
+            {
+                const std::string indexValue = observation.sequenceIndex.toStdString();
+                petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+                    petSequence->GetDataNodeAtValue(indexValue));
+                segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+                    segmentationSequence->GetDataNodeAtValue(indexValue));
+            }
+        }
+        else
+        {
+            petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+                scene->GetNodeByID(observation.petNodeID.toUtf8().constData()));
+            segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+                scene->GetNodeByID(observation.segmentationNodeID.toUtf8().constData()));
+        }
+        nodeResolutionMs += elapsedMs(resolveStart, Clock::now());
+
+        if (!petVolume || !segmentationNode || !segmentationNode->GetSegmentation())
+        {
+            return fail(QObject::tr(
+                "A prepared PET/segmentation observation is no longer available for '%1'. Re-run acquisition preparation.")
+                .arg(observation.acquisitionName));
+        }
+
+        const double startSec =
+            static_cast<double>(referenceStart.msecsTo(observation.start)) / 1000.0;
+        const double endSec =
+            static_cast<double>(referenceStart.msecsTo(observation.end)) / 1000.0;
+        if (!(endSec > startSec))
+        {
+            return fail(QObject::tr(
+                "Prepared observation '%1' has an invalid time interval.")
+                .arg(observation.acquisitionName));
+        }
+        if (startSec < previousEndSec - 1e-3)
+        {
+            return fail(QObject::tr(
+                "Prepared observation intervals overlap near '%1'.")
+                .arg(observation.acquisitionName));
+        }
+        if (std::isfinite(previousEndSec) && startSec > previousEndSec + 1e-3)
+        {
+            ++gapCount;
+        }
+
+        if (q->ProgressBar)
+        {
+            if (observation.dynamic)
+            {
+                q->ProgressBar->setFormat(QObject::tr(
+                    "TAC frame %1 (%p%)")
+                    .arg(observation.frameIndex + 1));
+            }
+            else
+            {
+                q->ProgressBar->setFormat(QObject::tr(
+                    "TAC static (%p%)"));
+            }
+        }
+
+        int nonEmptySegmentCount = 0;
+        QStringList emptySegments;
+
+        for (size_t roiIndex = 0; roiIndex < selectedROIs.size(); ++roiIndex)
+        {
+            const QString& commonName = selectedROIs[roiIndex];
+            const std::string commonKey = commonName.toStdString();
+
+            VoxelStatistics stats;
+            stats.keep = false;
+            stats.empty = true;
+
+            const auto idIt = observation.segmentIDsByName.find(commonKey);
+            if (idIt == observation.segmentIDsByName.end() || idIt->second.empty())
+            {
+                ++missingSegmentCalls;
+                extractionWarnings << QObject::tr(
+                    "Segment '%1' is absent from one prepared observation of '%2'; the observation was marked unavailable.")
+                    .arg(commonName, observation.acquisitionName);
+            }
+            else
+            {
+                vtkNew<vtkStringArray> segmentArray;
+                segmentArray->InsertNextValue(idIt->second);
+                vtkSmartPointer<vtkOrientedImageData> labelmap =
+                    vtkSmartPointer<vtkOrientedImageData>::New();
+
+                const auto labelmapStart = Clock::now();
+                vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(
+                    segmentationNode,
+                    petVolume,
+                    segmentArray,
+                    vtkSegmentation::EXTENT_UNION_OF_EFFECTIVE_SEGMENTS,
+                    labelmap);
+                mergedLabelmapMs += elapsedMs(labelmapStart, Clock::now());
+                ++mergedLabelmapCalls;
+
+                vtkDataArray* labelScalars = labelmap && labelmap->GetPointData()
+                    ? labelmap->GetPointData()->GetScalars() : nullptr;
+                vtkImageData* petImage = petVolume->GetImageData();
+                vtkDataArray* petScalars = petImage && petImage->GetPointData()
+                    ? petImage->GetPointData()->GetScalars() : nullptr;
+
+                if (labelScalars && petScalars &&
+                    labelScalars->GetNumberOfTuples() == petScalars->GetNumberOfTuples())
+                {
+                    const auto statsStart = Clock::now();
+                    stats = logic->ComputeVoxelStatistics(petVolume, labelmap, 1);
+                    voxelStatisticsMs += elapsedMs(statsStart, Clock::now());
+                    ++voxelStatisticsCalls;
+
+                    if (!stats.empty)
+                    {
+                        const PreparedMultiTimepointAcquisition& sourceAcquisition =
+                            acquisitions.at(static_cast<size_t>(observation.acquisitionIndex));
+                        const QString sourceType = sourceAcquisition.valueType.trimmed().toUpper();
+                        if (sourceType == QStringLiteral("BQML"))
+                        {
+                            scaleVoxelStatistics(stats, sourceAcquisition.sourceSUVbwFactor);
+                        }
+                    }
+                }
+
+                bool representativeObservation = !observation.dynamic;
+                if (observation.dynamic)
+                {
+                    vtkMRMLSequenceNode* petSequence = vtkMRMLSequenceNode::SafeDownCast(
+                        scene->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()));
+                    const int frameCount = petSequence ? petSequence->GetNumberOfDataNodes() : 0;
+                    representativeObservation =
+                        observation.frameIndex == 0 ||
+                        (frameCount > 0 && observation.frameIndex == frameCount / 2) ||
+                        (frameCount > 0 && observation.frameIndex + 1 == frameCount);
+                }
+
+                if (roiIndex == 0 && representativeObservation)
+                {
+                    vtkSegmentation* segmentation = segmentationNode->GetSegmentation();
+                    const std::string binaryRep =
+                        vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+                    double labelRange[2] = {0.0, 0.0};
+                    if (labelmap && labelmap->GetPointData() && labelmap->GetPointData()->GetScalars())
+                    {
+                        labelmap->GetScalarRange(labelRange);
+                    }
+                    this->logToPythonConsole(QObject::tr(
+                        "[SlicerDynamicPET DIAG][MULTI TAC] acquisition='%1' frame=%2 ROI='%3' localID='%4' "
+                        "SEGsource='%5' BinaryAvailable=%6 mergedRange=[%7,%8] stats.count=%9 empty=%10.")
+                        .arg(observation.acquisitionName)
+                        .arg(observation.dynamic
+                            ? QString::number(observation.frameIndex + 1)
+                            : QStringLiteral("static"))
+                        .arg(commonName)
+                        .arg(QString::fromStdString(idIt->second))
+                        .arg(QString::fromStdString(segmentation->GetSourceRepresentationName()))
+                        .arg(segmentation->ContainsRepresentation(binaryRep) ? 1 : 0)
+                        .arg(labelRange[0], 0, 'g', 8)
+                        .arg(labelRange[1], 0, 'g', 8)
+                        .arg(static_cast<qlonglong>(stats.count))
+                        .arg(stats.empty ? 1 : 0));
+                }
+            }
+
+            if (!stats.empty && stats.count > 0)
+            {
+                ++nonEmptySegmentCount;
+            }
+            else
+            {
+                emptySegments << commonName;
+            }
+            q->segmentTACs[commonKey].push_back(stats);
+        }
+
+        if (nonEmptySegmentCount == 0)
+        {
+            const QString warning = QObject::tr(
+                "'%1' at %2-%3 s produced no voxels for any selected ROI in the prepared PET/segmentation geometry.")
+                .arg(observation.acquisitionName)
+                .arg(startSec, 0, 'g', 12)
+                .arg(endSec, 0, 'g', 12);
+            extractionWarnings << warning;
+            if (!geometryWarningLoggedForAcquisition.contains(observation.acquisitionName))
+            {
+                this->logToPythonConsole(
+                    QObject::tr("[SlicerDynamicPET multi-timepoint TAC] WARNING: %1")
+                    .arg(warning));
+                geometryWarningLoggedForAcquisition.insert(observation.acquisitionName);
+            }
+        }
+        else if (!emptySegments.isEmpty())
+        {
+            extractionWarnings << QObject::tr(
+                "'%1' at %2-%3 s: unavailable ROI(s): %4")
+                .arg(observation.acquisitionName)
+                .arg(startSec, 0, 'g', 12)
+                .arg(endSec, 0, 'g', 12)
+                .arg(emptySegments.join(QStringLiteral(", ")));
+        }
+
+        q->timePoints.push_back(endSec);
+        q->durations.push_back(endSec - startSec);
+
+        q->suvFactors.push_back(this->multiTimepointReferenceSUVbwFactor);
+
+        previousEndSec = endSec;
+        if (q->ProgressBar)
+        {
+            q->ProgressBar->setValue(static_cast<int>(observationIndex + 1));
+        }
+
+        const auto uiStart = Clock::now();
+        qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+        uiEventMs += elapsedMs(uiStart, Clock::now());
+    }
+
+    resetProgress();
+    this->multiTimepointExtractionRunning = false;
+
+    if (q->stopRequested)
+    {
+        q->segmentTACs.clear();
+        q->segmentTACsnames.clear();
+        q->timePoints.clear();
+        q->durations.clear();
+        q->suvFactors.clear();
+        return fail(QObject::tr("Multi-timepoint TAC extraction was cancelled."));
+    }
+
+    q->numberOfTimepoints = static_cast<int>(q->timePoints.size());
+    if (q->numberOfTimepoints == 0)
+    {
+        return fail(QObject::tr("No TAC observations were extracted."));
+    }
+
+    const double totalMs = elapsedMs(totalStart, Clock::now());
+    const double accountedMs =
+        nodeResolutionMs + mergedLabelmapMs + voxelStatisticsMs + uiEventMs;
+    this->logToPythonConsole(QObject::tr(
+        "[SlicerDynamicPET PERF][MULTI TAC] SUMMARY: total=%1 ms; observations=%2; frozenROIs=%3; "
+        "merged-labelmap generation=%4 ms across %5 call(s); voxel statistics=%6 ms across %7 call(s); "
+        "node resolution=%8 ms; UI/processEvents=%9 ms; missing-segment observations=%10; other/control=%11 ms.")
+        .arg(totalMs, 0, 'f', 3)
+        .arg(q->numberOfTimepoints)
+        .arg(static_cast<int>(selectedROIs.size()))
+        .arg(mergedLabelmapMs, 0, 'f', 3)
+        .arg(static_cast<qulonglong>(mergedLabelmapCalls))
+        .arg(voxelStatisticsMs, 0, 'f', 3)
+        .arg(static_cast<qulonglong>(voxelStatisticsCalls))
+        .arg(nodeResolutionMs, 0, 'f', 3)
+        .arg(uiEventMs, 0, 'f', 3)
+        .arg(static_cast<qulonglong>(missingSegmentCalls))
+        .arg(std::max(0.0, totalMs - accountedMs), 0, 'f', 3));
+
+    QStringList completelyEmptySegments;
+    for (const QString& segmentName : selectedROIs)
+    {
+        const auto it = q->segmentTACs.find(segmentName.toStdString());
+        bool hasValidVoxelObservation = false;
+        if (it != q->segmentTACs.end())
+        {
+            for (const VoxelStatistics& stats : it->second)
+            {
+                if (!stats.empty && stats.count > 0 && std::isfinite(stats.mean))
+                {
+                    hasValidVoxelObservation = true;
+                    break;
+                }
+            }
+        }
+        if (!hasValidVoxelObservation)
+        {
+            completelyEmptySegments << segmentName;
+        }
+    }
+    if (!completelyEmptySegments.isEmpty())
+    {
+        return fail(QObject::tr(
+            "Prepared Multi-timepoint ROI extraction produced no PET voxels for: %1. "
+            "No TAC has been accepted.")
+            .arg(completelyEmptySegments.join(QStringLiteral(", "))));
+    }
+
+    this->updateAcquisitionTimingContext(false);
+    this->updateQuantitativeUnitUI();
+
+    QString message = QObject::tr(
+        "[SlicerDynamicPET multi-timepoint] Merged ROI TAC created from prepared provenance: "
+        "%1 observations from %2 acquisitions, %3 preserved temporal gap(s), time span 0 -> %4 s. "
+        "TAC extraction performed no representation conversion or browser adoption.")
+        .arg(q->numberOfTimepoints)
+        .arg(static_cast<int>(acquisitions.size()))
+        .arg(gapCount)
+        .arg(q->timePoints.back(), 0, 'g', 12);
+    if (!extractionWarnings.isEmpty())
+    {
+        extractionWarnings.removeDuplicates();
+        message += QStringLiteral("\n") + extractionWarnings.join(QStringLiteral("\n"));
+    }
+    this->logToPythonConsole(message);
+
+    if (errorMessage)
+    {
+        errorMessage->clear();
+    }
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
 setImageSetupVisible(bool visible)
 {
+    const bool singleVisible = visible && !this->multiTimepointMode;
+    const bool multiVisible = visible && this->multiTimepointMode;
+
     this->label1->setVisible(visible);
     this->PatSelector->setVisible(visible);
-    this->label2->setVisible(visible);
-    this->StuSelector->setVisible(visible);
-    this->label3->setVisible(visible);
-    this->CTSelector->setVisible(visible);
-    this->label4->setVisible(visible);
-    this->PETSelector->setVisible(visible);
-    this->labseg->setVisible(visible);
-    this->SegSelector->setVisible(visible);
-    this->labsegments->setVisible(visible);
-    this->segmentSelectAll->setVisible(visible);
-    this->SegmentCheckScrollArea->setVisible(visible);
+
+    this->label2->setVisible(singleVisible);
+    this->StuSelector->setVisible(singleVisible);
+    this->label3->setVisible(singleVisible);
+    this->CTSelector->setVisible(singleVisible);
+    this->label4->setVisible(singleVisible);
+    this->PETSelector->setVisible(singleVisible);
+    if (!singleVisible)
+    {
+        this->AcquisitionTimingStatusLabel->setVisible(false);
+    }
+    this->labseg->setVisible(singleVisible);
+    this->SegSelector->setVisible(singleVisible);
+
+    const bool segmentSelectionVisible =
+        singleVisible || (multiVisible && this->multiTimepointSelectionValidated);
+    this->labsegments->setVisible(segmentSelectionVisible);
+    this->segmentSelectAll->setVisible(segmentSelectionVisible);
+    this->SegmentCheckScrollArea->setVisible(segmentSelectionVisible);
+    if (multiVisible)
+    {
+        this->labsegments->setText(QObject::tr("Common segments:"));
+    }
+    else
+    {
+        this->labsegments->setText(QObject::tr("Segments:"));
+    }
+
+    this->MultiTimepointSelectionLabel->setVisible(multiVisible);
+    this->MultiTimepointSelectionRow->setVisible(multiVisible);
     this->TACbutton->setVisible(visible);
 }
 
@@ -3135,9 +6262,13 @@ rebuildTACStatisticUI()
             {QObject::tr("Peak"), "Peak"},
             {QObject::tr("Min"), "Min"},
             {QObject::tr("Max"), "Max"},
-            {QObject::tr("Volume [PET] (cm3)"), "VolumePET"},
-            {QObject::tr("Distribution"), "Distribution"}
+            {QObject::tr("Volume [PET] (cm3)"), "VolumePET"}
         };
+        // Distribution is evaluated on one concrete prepared observation.
+        // In Single this maps to a PET/segmentation sequence frame; in Multi
+        // it maps through prepared provenance to the acquisition-specific PET
+        // and segmentation geometry. No cross-acquisition resampling occurs.
+        plotOptions.push_back({QObject::tr("Distribution"), "Distribution"});
 
     }
 
@@ -3182,19 +6313,27 @@ rebuildTACStatisticUI()
         else if (option.id == "Distribution")
         {
             cb->setToolTip(QObject::tr(
-                "Image mode only. Plot the voxel-value histogram for one ROI at the last selected TAC frame, or at the currently displayed PET frame if no TAC point has been selected. Selecting Distribution unchecks all other plot metrics and keeps only one ROI."));
+                "Image mode only. Plot the voxel-value histogram for one ROI at the frame/observation selected by the Distribution slider. In Multi, the selected observation is resolved through acquisition provenance and remains in its native PET geometry. Selecting Distribution unchecks all other plot metrics and keeps only one ROI."));
         }
 
         QObject::connect(
             cb, &QCheckBox::toggled, q,
             [this, cb, option](bool checked)
             {
-                if (!checked)
-                {
-                    return;
-                }
                 if (option.id == "Distribution")
                 {
+                    if (this->distributionFrameLabel)
+                    {
+                        this->distributionFrameLabel->setVisible(checked);
+                    }
+                    if (this->distributionFrameWidget)
+                    {
+                        this->distributionFrameWidget->setVisible(checked);
+                    }
+                    if (!checked)
+                    {
+                        return;
+                    }
                     for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
                     {
                         QCheckBox* other = qobject_cast<QCheckBox*>(
@@ -3206,26 +6345,50 @@ rebuildTACStatisticUI()
                         }
                     }
                     this->enforceDistributionSelection();
+                    this->updateDistributionFrameUI(false);
+                    this->refreshDistributionPlotIfActive();
+                    return;
                 }
-                else
+
+                if (!checked)
                 {
-                    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+                    return;
+                }
+
+                for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+                {
+                    QCheckBox* other = qobject_cast<QCheckBox*>(
+                        this->PlotStatsCheckLayout->itemAt(i)->widget());
+                    if (other && other != cb &&
+                        other->property("StatID").toString() == "Distribution")
                     {
-                        QCheckBox* other = qobject_cast<QCheckBox*>(
-                            this->PlotStatsCheckLayout->itemAt(i)->widget());
-                        if (other && other != cb &&
-                            other->property("StatID").toString() == "Distribution")
-                        {
-                            QSignalBlocker blocker(other);
-                            other->setChecked(false);
-                        }
+                        QSignalBlocker blocker(other);
+                        other->setChecked(false);
                     }
+                }
+                if (this->distributionFrameLabel)
+                {
+                    this->distributionFrameLabel->setVisible(false);
+                }
+                if (this->distributionFrameWidget)
+                {
+                    this->distributionFrameWidget->setVisible(false);
                 }
             });
 
         this->PlotStatsCheckLayout->addWidget(cb);
     }
 
+    this->updateDistributionFrameUI(false);
+    const bool showDistributionFrame = this->plotDistributionSelected() && !this->tableBasedMode;
+    if (this->distributionFrameLabel)
+    {
+        this->distributionFrameLabel->setVisible(showDistributionFrame);
+    }
+    if (this->distributionFrameWidget)
+    {
+        this->distributionFrameWidget->setVisible(showDistributionFrame);
+    }
     this->updateTableWeightingAvailability();
     q->clearFITdata();
     q->clearFITMTGAdata();
@@ -3306,6 +6469,142 @@ enforceDistributionSelection()
 }
 
 //-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateDistributionFrameInfo()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->distributionFrameSlider || !this->distributionFrameInfoEdit)
+    {
+        return;
+    }
+
+    const int observationIndex = this->distributionFrameSlider->value() - 1;
+    if (observationIndex < 0 ||
+        observationIndex >= static_cast<int>(q->timePoints.size()))
+    {
+        this->distributionFrameInfoEdit->clear();
+        return;
+    }
+
+    const double endSec = this->frameEndForInputSec(
+        static_cast<size_t>(observationIndex));
+
+    QString text;
+    if (this->multiTimepointMode &&
+        observationIndex < static_cast<int>(this->preparedMultiTimepointObservations.size()))
+    {
+        const PreparedMultiTimepointObservation& observation =
+            this->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
+        text = observation.dynamic
+            ? QObject::tr("Obs %1 | frame %2 | end %3 s (%4 min)")
+                .arg(observationIndex + 1)
+                .arg(observation.frameIndex + 1)
+                .arg(endSec, 0, 'f', 2)
+                .arg(endSec / 60.0, 0, 'f', 2)
+            : QObject::tr("Obs %1 | static | end %2 s (%3 min)")
+                .arg(observationIndex + 1)
+                .arg(endSec, 0, 'f', 2)
+                .arg(endSec / 60.0, 0, 'f', 2);
+    }
+    else
+    {
+        text = QObject::tr("Frame %1 | end %2 s (%3 min)")
+            .arg(observationIndex + 1)
+            .arg(endSec, 0, 'f', 2)
+            .arg(endSec / 60.0, 0, 'f', 2);
+    }
+
+    this->distributionFrameInfoEdit->setText(text);
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+updateDistributionFrameUI(bool resetRange)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!this->distributionFrameSlider)
+    {
+        return;
+    }
+
+    const int count = static_cast<int>(q->timePoints.size());
+    const bool available =
+        !this->tableBasedMode && count > 0 &&
+        (!this->multiTimepointMode ||
+         static_cast<int>(this->preparedMultiTimepointObservations.size()) == count);
+
+    this->distributionFrameSlider->setEnabled(available);
+    if (!available)
+    {
+        QSignalBlocker blocker(this->distributionFrameSlider);
+        this->distributionFrameSlider->setMinimum(1);
+        this->distributionFrameSlider->setMaximum(1);
+        this->distributionFrameSlider->setValue(1);
+        if (this->distributionFrameInfoEdit)
+        {
+            this->distributionFrameInfoEdit->clear();
+        }
+        return;
+    }
+
+    const bool uninitializedRange =
+        count > 1 && this->distributionFrameSlider->maximum() <= 1;
+    int preferred = this->distributionFrameSlider->value();
+    if (resetRange || uninitializedRange || preferred < 1 || preferred > count)
+    {
+        preferred = count;
+        if (!this->multiTimepointMode && q->sequenceBrowserPETNode)
+        {
+            const int browserFrame = q->sequenceBrowserPETNode->GetSelectedItemNumber();
+            if (browserFrame >= 0 && browserFrame < count)
+            {
+                preferred = browserFrame + 1;
+            }
+        }
+        else if (q->PlotSelectedFrame >= 0 && q->PlotSelectedFrame < count)
+        {
+            preferred = q->PlotSelectedFrame + 1;
+        }
+    }
+
+    {
+        QSignalBlocker blocker(this->distributionFrameSlider);
+        this->distributionFrameSlider->setMinimum(1);
+        this->distributionFrameSlider->setMaximum(count);
+        this->distributionFrameSlider->setValue(std::clamp(preferred, 1, count));
+    }
+    this->updateDistributionFrameInfo();
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+refreshDistributionPlotIfActive()
+{
+    if (!this->plotDistributionSelected())
+    {
+        return;
+    }
+
+    this->enforceDistributionSelection();
+    if (this->lastPlotSegmentID.empty())
+    {
+        return;
+    }
+
+    QString error;
+    if (!this->plotROIDistribution(this->lastPlotSegmentID, &error) && !error.isEmpty())
+    {
+        this->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET Distribution] %1").arg(error));
+    }
+}
+
+//-----------------------------------------------------------------------------
 bool
 qSlicerDynamicPETModuleWidgetPrivate::
 plotROIDistribution(
@@ -3323,54 +6622,165 @@ plotROIDistribution(
         }
         return false;
     }
-    if (!q->sequencePETNode || !q->segSequenceNode)
+
+    const int observationIndex = this->distributionFrameSlider
+        ? this->distributionFrameSlider->value() - 1
+        : q->PlotSelectedFrame;
+    if (observationIndex < 0 || observationIndex >= static_cast<int>(q->timePoints.size()))
     {
-        if (errorMessage)
+        if (errorMessage) *errorMessage = QObject::tr("No PET frame/observation is available.");
+        return false;
+    }
+
+    vtkMRMLScalarVolumeNode* petVolume = nullptr;
+    vtkMRMLSegmentationNode* segmentationNode = nullptr;
+    std::string localSegmentID = segmentID;
+    ActivityUnit sourceUnit = this->petStoredActivityUnit();
+    double sourceSUVbwFactor = std::numeric_limits<double>::quiet_NaN();
+    QString sourceDescription;
+
+    if (this->multiTimepointMode)
+    {
+        if (!this->multiTimepointPreparationValid ||
+            observationIndex >= static_cast<int>(this->preparedMultiTimepointObservations.size()))
         {
-            *errorMessage = QObject::tr("Dynamic PET or segmentation sequence is unavailable.");
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "Multi-timepoint provenance is unavailable. Re-open and validate the acquisition selection.");
+            }
+            return false;
         }
-        return false;
-    }
 
-    int frameIndex = q->PlotSelectedFrame;
-    if (frameIndex < 0 && q->sequenceBrowserPETNode)
-    {
-        frameIndex = q->sequenceBrowserPETNode->GetSelectedItemNumber();
-    }
-    if (frameIndex < 0)
-    {
-        frameIndex = 0;
-    }
-    if (frameIndex >= q->sequencePETNode->GetNumberOfDataNodes())
-    {
-        frameIndex = q->sequencePETNode->GetNumberOfDataNodes() - 1;
-    }
-    if (frameIndex < 0)
-    {
-        if (errorMessage) *errorMessage = QObject::tr("No PET frame is available.");
-        return false;
-    }
+        vtkMRMLScene* scene = q->mrmlScene();
+        const PreparedMultiTimepointObservation& observation =
+            this->preparedMultiTimepointObservations[static_cast<size_t>(observationIndex)];
 
-    const std::string indexValue =
-        q->sequencePETNode->GetNthIndexValue(frameIndex);
-    vtkMRMLScalarVolumeNode* petVolume =
-        vtkMRMLScalarVolumeNode::SafeDownCast(
+        if (observation.dynamic)
+        {
+            vtkMRMLSequenceNode* petSequence = scene
+                ? vtkMRMLSequenceNode::SafeDownCast(
+                    scene->GetNodeByID(observation.petSequenceNodeID.toUtf8().constData()))
+                : nullptr;
+            vtkMRMLSequenceNode* segmentationSequence = scene
+                ? vtkMRMLSequenceNode::SafeDownCast(
+                    scene->GetNodeByID(observation.segmentationSequenceNodeID.toUtf8().constData()))
+                : nullptr;
+            if (petSequence && segmentationSequence)
+            {
+                const std::string indexValue = observation.sequenceIndex.toStdString();
+                petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+                    petSequence->GetDataNodeAtValue(indexValue));
+                segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
+                    segmentationSequence->GetDataNodeAtValue(indexValue));
+            }
+            sourceDescription = QObject::tr("observation %1, frame %2")
+                .arg(observationIndex + 1)
+                .arg(observation.frameIndex + 1);
+        }
+        else
+        {
+            petVolume = scene
+                ? vtkMRMLScalarVolumeNode::SafeDownCast(
+                    scene->GetNodeByID(observation.petNodeID.toUtf8().constData()))
+                : nullptr;
+            segmentationNode = scene
+                ? vtkMRMLSegmentationNode::SafeDownCast(
+                    scene->GetNodeByID(observation.segmentationNodeID.toUtf8().constData()))
+                : nullptr;
+            sourceDescription = QObject::tr("observation %1, static")
+                .arg(observationIndex + 1);
+        }
+
+        const auto localIDIt = observation.segmentIDsByName.find(segmentID);
+        if (localIDIt == observation.segmentIDsByName.end() || localIDIt->second.empty())
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "The selected ROI is unavailable at the requested Multi-timepoint observation.");
+            }
+            return false;
+        }
+        localSegmentID = localIDIt->second;
+
+        if (observation.acquisitionIndex < 0 ||
+            observation.acquisitionIndex >= static_cast<int>(this->preparedMultiTimepointAcquisitions.size()))
+        {
+            if (errorMessage) *errorMessage = QObject::tr("The prepared acquisition provenance is invalid.");
+            return false;
+        }
+        const PreparedMultiTimepointAcquisition& acquisition =
+            this->preparedMultiTimepointAcquisitions[
+                static_cast<size_t>(observation.acquisitionIndex)];
+        const QString valueType = acquisition.valueType.trimmed().toUpper();
+        if (valueType == QStringLiteral("BQML"))
+        {
+            sourceUnit = ActivityUnit::BqPerMl;
+            sourceSUVbwFactor = acquisition.sourceSUVbwFactor;
+            if (!std::isfinite(sourceSUVbwFactor) || sourceSUVbwFactor <= 0.0)
+            {
+                if (errorMessage) *errorMessage = QObject::tr("The source acquisition SUVbw factor is invalid.");
+                return false;
+            }
+        }
+        else if (valueType == QStringLiteral("SUVBW"))
+        {
+            sourceUnit = ActivityUnit::SUVbw;
+        }
+        else
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr(
+                    "The prepared acquisition has unsupported quantitative type '%1'.")
+                    .arg(acquisition.valueType);
+            }
+            return false;
+        }
+    }
+    else
+    {
+        if (!q->sequencePETNode || !q->segSequenceNode)
+        {
+            if (errorMessage)
+            {
+                *errorMessage = QObject::tr("Dynamic PET or segmentation sequence is unavailable.");
+            }
+            return false;
+        }
+
+        int frameIndex = observationIndex;
+        if (frameIndex >= q->sequencePETNode->GetNumberOfDataNodes())
+        {
+            frameIndex = q->sequencePETNode->GetNumberOfDataNodes() - 1;
+        }
+        if (frameIndex < 0)
+        {
+            if (errorMessage) *errorMessage = QObject::tr("No PET frame is available.");
+            return false;
+        }
+
+        const std::string indexValue = q->sequencePETNode->GetNthIndexValue(frameIndex);
+        petVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
             q->sequencePETNode->GetDataNodeAtValue(indexValue));
-    vtkMRMLSegmentationNode* segmentationNode =
-        vtkMRMLSegmentationNode::SafeDownCast(
+        segmentationNode = vtkMRMLSegmentationNode::SafeDownCast(
             q->segSequenceNode->GetDataNodeAtValue(indexValue));
+        sourceDescription = QObject::tr("frame %1").arg(frameIndex + 1);
+    }
+
     if (!petVolume || !segmentationNode || !segmentationNode->GetSegmentation() ||
-        !segmentationNode->GetSegmentation()->GetSegment(segmentID))
+        !segmentationNode->GetSegmentation()->GetSegment(localSegmentID))
     {
         if (errorMessage)
         {
-            *errorMessage = QObject::tr("The selected ROI is unavailable at the requested frame.");
+            *errorMessage = QObject::tr("The selected ROI is unavailable at the requested frame/observation.");
         }
         return false;
     }
 
     vtkNew<vtkStringArray> segmentArray;
-    segmentArray->InsertNextValue(segmentID);
+    segmentArray->InsertNextValue(localSegmentID);
     vtkSmartPointer<vtkOrientedImageData> labelmap =
         vtkSmartPointer<vtkOrientedImageData>::New();
     vtkSlicerSegmentationsModuleLogic::GenerateMergedLabelmapInReferenceGeometry(
@@ -3395,7 +6805,6 @@ plotROIDistribution(
     std::vector<double> values;
     values.reserve(static_cast<size_t>(petScalars->GetNumberOfTuples() / 8));
     const ActivityUnit displayUnit = this->selectedDisplayActivityUnit();
-    const ActivityUnit sourceUnit = this->petStoredActivityUnit();
     for (vtkIdType i = 0; i < petScalars->GetNumberOfTuples(); ++i)
     {
         if (static_cast<int>(std::llround(labelScalars->GetComponent(i, 0))) != 1)
@@ -3407,9 +6816,22 @@ plotROIDistribution(
         {
             continue;
         }
+
+        double canonicalValue = nativeValue;
+        ActivityUnit canonicalUnit = sourceUnit;
+        if (this->multiTimepointMode && sourceUnit == ActivityUnit::BqPerMl)
+        {
+            // Match Multi TAC assembly: source-acquisition BQML is first
+            // normalized to canonical SUVbw using that acquisition's own
+            // validated factor. Display conversion then uses the common
+            // reference-dynamic factor without modifying PET image voxels.
+            canonicalValue = nativeValue * sourceSUVbwFactor;
+            canonicalUnit = ActivityUnit::SUVbw;
+        }
+
         double converted = nativeValue;
         if (!this->convertActivityValue(
-                nativeValue, sourceUnit, displayUnit, converted, nullptr) ||
+                canonicalValue, canonicalUnit, displayUnit, converted, nullptr) ||
             !std::isfinite(converted))
         {
             continue;
@@ -3478,12 +6900,12 @@ plotROIDistribution(
     const auto nameIt = q->segmentTACsnames.find(segmentID);
     const std::string roiName = nameIt != q->segmentTACsnames.end()
         ? nameIt->second : segmentID;
-    const double frameEnd = frameIndex < static_cast<int>(q->timePoints.size())
-        ? this->frameEndForInputSec(static_cast<size_t>(frameIndex)) : 0.0;
+    const double frameEnd = this->frameEndForInputSec(
+        static_cast<size_t>(observationIndex));
     chartNode->SetTitle(
-        QString("ROI distribution - %1 - frame %2 (end %3 s)")
+        QObject::tr("ROI distribution - %1 - %2 (end %3 s)")
             .arg(QString::fromStdString(roiName))
-            .arg(frameIndex)
+            .arg(sourceDescription)
             .arg(frameEnd, 0, 'g', 8)
             .toStdString().c_str());
     chartNode->SetXAxisTitle(this->activityUnitLabel(displayUnit).toStdString().c_str());
@@ -3844,8 +7266,21 @@ setTableBasedMode(bool enabled)
 {
     Q_Q(qSlicerDynamicPETModuleWidget);
 
+    // Multi-timepoint is an Image-mode choice only. Enforce exclusivity here
+    // as well as in the checkbox handlers so programmatic mode changes cannot
+    // leave both states active.
+    if (enabled && this->multiTimepointMode)
+    {
+        {
+            QSignalBlocker blocker(this->MultiTimepointAnalysisCheckBox);
+            this->MultiTimepointAnalysisCheckBox->setChecked(false);
+        }
+        this->setMultiTimepointMode(false);
+    }
+
     if (enabled == this->tableBasedMode)
     {
+        this->MultiTimepointAnalysisCheckBox->setVisible(!enabled);
         return;
     }
 
@@ -3973,7 +7408,8 @@ setTableBasedMode(bool enabled)
     }
 
     // Image-only controls are hidden, not merely disabled, in table mode.
-    this->SegmentationAdvancedCollapsibleButton->setVisible(!this->tableBasedMode);
+    this->SegmentationAdvancedCollapsibleButton->setVisible(
+        !this->tableBasedMode && !this->multiTimepointMode);
     this->Plottacsave->setVisible(!this->tableBasedMode);
     this->direxcel->setVisible(!this->tableBasedMode);
     this->fileexcel->setVisible(!this->tableBasedMode);
@@ -3983,9 +7419,13 @@ setTableBasedMode(bool enabled)
     if (imagingIndex >= 0)
     {
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-        this->PlotsTabWidget->setTabVisible(imagingIndex, !this->tableBasedMode);
+        this->PlotsTabWidget->setTabVisible(
+            imagingIndex,
+            !this->tableBasedMode && !this->multiTimepointMode);
 #else
-        this->PlotsTabWidget->setTabEnabled(imagingIndex, !this->tableBasedMode);
+        this->PlotsTabWidget->setTabEnabled(
+            imagingIndex,
+            !this->tableBasedMode && !this->multiTimepointMode);
 #endif
     }
 
@@ -3997,6 +7437,10 @@ setTableBasedMode(bool enabled)
     this->updateSegmentationAdvancedUI();
     this->setPostTACEnabled(!q->segmentTACs.empty());
     this->updateParametricImagingAvailability();
+
+    // Multi-timepoint belongs exclusively to Image mode; do not show an
+    // irrelevant second mode switch while Table mode is active.
+    this->MultiTimepointAnalysisCheckBox->setVisible(!this->tableBasedMode);
 
     // Force layouts to recompute after a mode switch; this minimizes dead
     // vertical space without adding another nested/scrolling UI hierarchy.
@@ -4022,6 +7466,14 @@ initializeTableBasedUI()
         q,
         [this](bool checked)
         {
+            if (checked && this->multiTimepointMode)
+            {
+                {
+                    QSignalBlocker blocker(this->MultiTimepointAnalysisCheckBox);
+                    this->MultiTimepointAnalysisCheckBox->setChecked(false);
+                }
+                this->setMultiTimepointMode(false);
+            }
             this->setTableBasedMode(checked);
         });
 
@@ -4133,11 +7585,82 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
   this->setupUi(q);
+
+  // Distribution is tied to one concrete image observation. Keep its frame
+  // selector immediately below the Plot controls and hidden unless the
+  // Distribution statistic is active. It is created programmatically so the
+  // feature does not depend on regenerated Ui_* members.
+  this->distributionFrameLabel = new QLabel(
+      QObject::tr("Distribution frame:"), this->TACCollapsibleButton);
+  this->distributionFrameWidget = new QWidget(this->TACCollapsibleButton);
+  QHBoxLayout* distributionFrameLayout = new QHBoxLayout(this->distributionFrameWidget);
+  distributionFrameLayout->setContentsMargins(0, 0, 0, 0);
+  this->distributionFrameSlider = new QSlider(Qt::Horizontal, this->distributionFrameWidget);
+  this->distributionFrameSlider->setMinimum(1);
+  this->distributionFrameSlider->setMaximum(1);
+  this->distributionFrameSlider->setValue(1);
+  this->distributionFrameSlider->setToolTip(QObject::tr(
+      "Select the PET frame/observation used for the ROI voxel distribution."));
+  this->distributionFrameInfoEdit = new QLineEdit(this->distributionFrameWidget);
+  this->distributionFrameInfoEdit->setReadOnly(true);
+  this->distributionFrameInfoEdit->setMinimumWidth(235);
+  distributionFrameLayout->addWidget(this->distributionFrameSlider, 1);
+  distributionFrameLayout->addWidget(this->distributionFrameInfoEdit);
+  if (this->formLayout_2)
+  {
+      this->formLayout_2->insertRow(3, this->distributionFrameLabel, this->distributionFrameWidget);
+  }
+  this->distributionFrameLabel->setVisible(false);
+  this->distributionFrameWidget->setVisible(false);
+  QObject::connect(
+      this->distributionFrameSlider, &QSlider::valueChanged, q,
+      [this](int)
+      {
+          this->updateDistributionFrameInfo();
+          this->refreshDistributionPlotIfActive();
+      });
+
+  this->PlotErrorCheckbox->setText(QObject::tr("Dispersion"));
+
+  // qSlicerDynamicPETModuleWidget.ui contains this checkbox in current
+  // sources.  Resolve it by object name instead of relying on the generated
+  // Ui_* class member so incremental builds using an older uic header still
+  // compile.  If the Designer widget is absent, create the same control
+  // programmatically at the end of the Advanced IF layout.
+  this->fengExtrapolationCheckBox =
+      q->findChild<QCheckBox*>(QStringLiteral("IFFengExtrapolationCheckBox"));
+  if (!this->fengExtrapolationCheckBox)
+  {
+      this->fengExtrapolationCheckBox =
+          new QCheckBox(
+              QObject::tr("Allow Feng extrapolation to PET support"),
+              this->IFAdvancedCollapsibleButton);
+      this->fengExtrapolationCheckBox->setObjectName(
+          QStringLiteral("IFFengExtrapolationCheckBox"));
+      this->fengExtrapolationCheckBox->setToolTip(
+          QObject::tr(
+              "When Feng modeling is selected, extend the fitted analytic "
+              "input function beyond the last measured blood sample only as "
+              "far as required by the available PET observations. Off by "
+              "default. Interpolation/smoothing and PBIF templates are never "
+              "extrapolated. Disabled while PBIF calibration is active so "
+              "modeled tail values cannot enter PBIF AUC calibration."));
+      this->fengExtrapolationCheckBox->setChecked(false);
+      if (this->IFAdvancedLayout)
+      {
+          this->IFAdvancedLayout->addWidget(
+              this->fengExtrapolationCheckBox,
+              this->IFAdvancedLayout->rowCount(),
+              0, 1, 4);
+      }
+  }
+
   this->initializeTableBasedUI();
+  this->initializeMultiTimepointUI();
 
   this->PlotLiveSegEdit->setToolTip(
       QObject::tr(
-          "Image mode only. Track Segment Editor changes and refresh image-derived TACs after segmentation corrections."));
+          "Single Image mode only. Track Segment Editor changes and refresh the active image-derived TAC after segmentation corrections. Multi-timepoint uses multiple prepared acquisition-specific segmentations, so live correction tracking is intentionally disabled there."));
   this->OpenSegmentEditorButton->setEnabled(false);
   this->SaveDynamicRTStructButton->setEnabled(false);
   this->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
@@ -4665,6 +8188,15 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
           &QComboBox::currentIndexChanged),
       q,
       [invalidateIFPipeline](int)
+      {
+          invalidateIFPipeline();
+      });
+
+  QObject::connect(
+      this->fengExtrapolationCheckBox,
+      &QCheckBox::toggled,
+      q,
+      [invalidateIFPipeline](bool)
       {
           invalidateIFPipeline();
       });
@@ -7411,6 +10943,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
             if (this->plotDistributionSelected())
             {
                 this->enforceDistributionSelection();
+                this->refreshDistributionPlotIfActive();
             }
         });
   }
@@ -7944,8 +11477,10 @@ buildCurrentSegmentInputFunction(
   {
     if (errorMessage)
     {
-      *errorMessage =
-          QObject::tr(
+      *errorMessage = this->multiTimepointMode
+          ? QObject::tr(
+              "Input-function observation count does not match the merged Multi-timepoint TAC.")
+          : QObject::tr(
               "Input-function frame count does not match the dynamic PET.");
     }
 
@@ -8034,10 +11569,14 @@ updateInputFunctionUI()
         this->IFSourceProcessingSelector->currentIndex();
     const bool lowessSelected = sourceProcessingIndex == 1;
     const bool gaussianSelected = sourceProcessingIndex == 2;
+    const bool fengSelected = sourceProcessingIndex == 3;
     this->IFLowessSpanLabel->setVisible(lowessSelected);
     this->IFLowessSpanSpinBox->setVisible(lowessSelected);
     this->IFGaussianSigmaLabel->setVisible(gaussianSelected);
     this->IFGaussianSigmaSpinBox->setVisible(gaussianSelected);
+    this->fengExtrapolationCheckBox->setVisible(fengSelected);
+    this->fengExtrapolationCheckBox->setEnabled(
+        fengSelected && !this->PBIFOptionCheckBox->isChecked());
 
     this->IFLabel->setText(
         this->tableBasedMode
@@ -8226,6 +11765,12 @@ updateInputFunctionUI()
                     .arg(result.fengParameters.lambda1, 0, 'g', 4)
                     .arg(result.fengParameters.lambda2, 0, 'g', 4)
                     .arg(result.fengParameters.lambda3, 0, 'g', 4);
+                if (result.fengExtrapolationApplied)
+                {
+                    status += QObject::tr(" | Feng extrapolated %1 -> %2 s")
+                        .arg(result.sourceMeasuredEndTimeSec, 0, 'g', 7)
+                        .arg(result.sourceModeledEndTimeSec, 0, 'g', 7);
+                }
             }
         }
 
@@ -8262,6 +11807,12 @@ updateInputFunctionUI()
             status +=
                 QObject::tr(
                     " | parent-fraction corrected");
+            if (result.parentFractionExtrapolationApplied)
+            {
+                status += QObject::tr(" (%1 -> %2 s modeled)")
+                    .arg(result.parentFractionMeasuredEndTimeSec, 0, 'g', 7)
+                    .arg(result.parentFractionModeledEndTimeSec, 0, 'g', 7);
+            }
         }
 
         if (parentPlasmaSource &&
@@ -8396,7 +11947,7 @@ updateParametricImagingAvailability()
 
     bool enabled = false;
 
-    if (this->tableBasedMode)
+    if (this->tableBasedMode || this->multiTimepointMode)
     {
         this->PlotsTabWidget->setTabEnabled(imagingIndex, false);
         return;
@@ -8840,8 +12391,22 @@ updateAcquisitionTimingContext(bool logMessage)
     }
     else
     {
-        vtkMRMLSequenceNode* sequence = q->sequencePETNode;
-        if (!sequence)
+        vtkMRMLNode* timingNode = nullptr;
+        if (this->multiTimepointMode)
+        {
+            vtkMRMLScene* scene = q->mrmlScene();
+            if (scene && !this->multiTimepointReferenceMetadataNodeID.isEmpty())
+            {
+                timingNode = scene->GetNodeByID(
+                    this->multiTimepointReferenceMetadataNodeID.toUtf8().constData());
+            }
+        }
+        else
+        {
+            timingNode = q->sequencePETNode;
+        }
+
+        if (!timingNode)
         {
             this->acquisitionTiming = ctx;
             if (this->AcquisitionTimingStatusLabel)
@@ -8852,42 +12417,41 @@ updateAcquisitionTimingContext(bool logMessage)
             return;
         }
 
-        QString injectionText =
-            QString::fromUtf8(
-                sequence->GetAttribute("RadiopharmaceuticalStartDateTime")
-                    ? sequence->GetAttribute("RadiopharmaceuticalStartDateTime")
-                    : "");
+        QString injectionText = nodeOrKineticMetadataText(
+            timingNode,
+            "RadiopharmaceuticalStartDateTime",
+            QStringLiteral("RadiopharmaceuticalStartDateTime"));
         if (injectionText.trimmed().isEmpty())
         {
-            injectionText =
-                QString::fromUtf8(
-                    sequence->GetAttribute("RadionuclideStartDateTime")
-                        ? sequence->GetAttribute("RadionuclideStartDateTime")
-                        : "");
+            injectionText = nodeOrKineticMetadataText(
+                timingNode,
+                "RadionuclideStartDateTime",
+                QStringLiteral("RadionuclideStartDateTime"));
         }
 
-        const QString firstFrameText =
-            QString::fromUtf8(
-                sequence->GetAttribute("dPET.FirstFrameAcquisitionDateTime")
-                    ? sequence->GetAttribute("dPET.FirstFrameAcquisitionDateTime")
-                    : "");
+        QString firstFrameText = nodeAttributeText(
+            timingNode, "dPET.FirstFrameAcquisitionDateTime");
+        if (firstFrameText.isEmpty())
+        {
+            firstFrameText = nodeAttributeText(
+                timingNode, "dPET.AcquisitionStartDateTime");
+        }
 
         const QDateTime injectionDT = parseDICOMDateTimeText(injectionText);
         const QDateTime firstFrameDT = parseDICOMDateTimeText(firstFrameText);
 
         bool rawOffsetOk = false;
-        double rawOffsetSec =
-            QString::fromUtf8(
-                sequence->GetAttribute("dPET.InjectionToAcquisitionOffsetSec")
-                    ? sequence->GetAttribute("dPET.InjectionToAcquisitionOffsetSec")
-                    : "")
-                .toDouble(&rawOffsetOk);
+        double rawOffsetSec = nodeOrKineticMetadataText(
+            timingNode,
+            "dPET.InjectionToAcquisitionOffsetSec",
+            QStringLiteral("InjectionToAcquisitionOffsetSec"))
+            .toDouble(&rawOffsetOk);
 
         if ((!rawOffsetOk || !std::isfinite(rawOffsetSec)) &&
             injectionDT.isValid() && firstFrameDT.isValid())
         {
             rawOffsetSec = static_cast<double>(
-                injectionDT.secsTo(firstFrameDT));
+                injectionDT.msecsTo(firstFrameDT)) / 1000.0;
             rawOffsetOk = true;
         }
 
@@ -8897,15 +12461,19 @@ updateAcquisitionTimingContext(bool logMessage)
             ctx.rawInjectionToAcquisitionOffsetSec = rawOffsetSec;
             ctx.injectionDateTime = injectionText;
             ctx.firstFrameDateTime = firstFrameText;
-            ctx.source = QString::fromUtf8(
-                sequence->GetAttribute("dPET.InjectionDateTimeSource")
-                    ? sequence->GetAttribute("dPET.InjectionDateTimeSource")
-                    : "DICOM");
+            ctx.source = nodeOrKineticMetadataText(
+                timingNode,
+                "dPET.InjectionDateTimeSource",
+                QStringLiteral("InjectionDateTimeSource"));
+            if (ctx.source.isEmpty())
+            {
+                ctx.source = QObject::tr("DICOM");
+            }
 
-            // The administration timestamp is often entered manually.  Do not
-            // use small, merely plausible differences as a kinetic time origin.
-            // Only an unambiguous post-injection acquisition (>= 5 min) changes
-            // the IF/PBIF clock.  Negative or small differences remain scan-zero.
+            // Keep the same conservative rule used in Single Image mode. A
+            // clear >=5 min delay shifts the merged scan-relative timeline onto
+            // the post-injection input-function clock; smaller differences do
+            // not redefine the kinetic origin.
             constexpr double ClearDelayThresholdSec = 300.0;
             if (rawOffsetSec >= ClearDelayThresholdSec)
             {
@@ -8920,7 +12488,9 @@ updateAcquisitionTimingContext(bool logMessage)
     if (this->AcquisitionTimingStatusLabel)
     {
         const bool showTimingLabel =
-            !this->tableBasedMode && q->sequencePETNode != nullptr;
+            !this->tableBasedMode &&
+            !this->multiTimepointMode &&
+            q->sequencePETNode != nullptr;
         this->AcquisitionTimingStatusLabel->setVisible(showTimingLabel);
         QString text = QObject::tr("Acquisition timing: —");
         QString tooltip = QObject::tr(
@@ -10157,6 +13727,144 @@ averagePlasmaTimesParentFractionOverInterval(
 
 double
 qSlicerDynamicPETModuleWidgetPrivate::
+integrateModelPlasmaOverInterval(
+    const InputFunctionResult& result,
+    double startTimeSec,
+    double endTimeSec)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    if (!(endTimeSec > startTimeSec))
+    {
+        return 0.0;
+    }
+
+    const std::string interpolation = this->selectedIFInterpolation();
+
+    // Preferred path: integrate the actual processed/native plasma curve.
+    // This retains external/PBIF temporal detail across periods where no PET
+    // tissue image was acquired.
+    if (result.nativePlasmaTimesSec.size() >= 2 &&
+        result.nativePlasmaTimesSec.size() == result.nativePlasmaValues.size() &&
+        startTimeSec >= result.nativePlasmaTimesSec.front() - 1e-6 &&
+        endTimeSec <= result.nativePlasmaTimesSec.back() + 1e-6)
+    {
+        if (result.plasmaIsParent || !result.applyParentFraction)
+        {
+            return this->integrateInputFunctionOverInterval(
+                result.nativePlasmaTimesSec,
+                result.nativePlasmaValues,
+                startTimeSec,
+                endTimeSec,
+                interpolation);
+        }
+
+        if (result.parentFractionTimesSec.size() >= 2 &&
+            result.parentFractionTimesSec.size() == result.parentFractionValues.size() &&
+            startTimeSec >= result.parentFractionTimesSec.front() - 1e-6 &&
+            endTimeSec <= result.parentFractionTimesSec.back() + 1e-6)
+        {
+            const double average =
+                this->averagePlasmaTimesParentFractionOverInterval(
+                    result.nativePlasmaTimesSec,
+                    result.nativePlasmaValues,
+                    false,
+                    interpolation,
+                    result.parentFractionTimesSec,
+                    result.parentFractionValues,
+                    startTimeSec,
+                    endTimeSec);
+            return std::isfinite(average)
+                ? average * (endTimeSec - startTimeSec)
+                : std::numeric_limits<double>::quiet_NaN();
+        }
+    }
+
+    // Frame-derived fallback. Acquired frame averages contribute their exact
+    // rectangular area. A genuine acquisition gap is the only interval that
+    // is inferred, using a linear bridge between the neighbouring plasma
+    // frame averages. This deliberately does not collapse the gap.
+    const std::vector<double>& values = result.frameModelPlasma;
+    if (values.size() != q->durations.size() ||
+        values.empty() || q->timePoints.size() != values.size())
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double firstStart = this->frameStartForInputSec(0);
+    const double lastEnd = this->frameEndForInputSec(values.size() - 1);
+    if (startTimeSec < firstStart - 1e-6 || endTimeSec > lastEnd + 1e-6)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    auto integrateLinearBridge = [](
+        double gapStart, double gapEnd,
+        double valueStart, double valueEnd,
+        double a, double b) -> double
+    {
+        if (!(gapEnd > gapStart) || !(b > a))
+        {
+            return 0.0;
+        }
+        const double span = gapEnd - gapStart;
+        auto primitive = [&](double t)
+        {
+            const double x = t - gapStart;
+            return valueStart * x +
+                0.5 * (valueEnd - valueStart) * x * x / span;
+        };
+        return primitive(b) - primitive(a);
+    };
+
+    double integral = 0.0;
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        const double frameStart = this->frameStartForInputSec(i);
+        const double frameEnd = this->frameEndForInputSec(i);
+
+        if (i > 0)
+        {
+            const double previousEnd = this->frameEndForInputSec(i - 1);
+            if (frameStart > previousEnd + 1e-9)
+            {
+                const double a = std::max(startTimeSec, previousEnd);
+                const double b = std::min(endTimeSec, frameStart);
+                if (b > a)
+                {
+                    if (!std::isfinite(values[i - 1]) || !std::isfinite(values[i]))
+                    {
+                        return std::numeric_limits<double>::quiet_NaN();
+                    }
+                    integral += integrateLinearBridge(
+                        previousEnd, frameStart,
+                        values[i - 1], values[i], a, b);
+                }
+            }
+        }
+
+        const double a = std::max(startTimeSec, frameStart);
+        const double b = std::min(endTimeSec, frameEnd);
+        if (b > a)
+        {
+            if (!std::isfinite(values[i]))
+            {
+                return std::numeric_limits<double>::quiet_NaN();
+            }
+            integral += values[i] * (b - a);
+        }
+
+        if (frameEnd >= endTimeSec)
+        {
+            break;
+        }
+    }
+
+    return integral;
+}
+
+double
+qSlicerDynamicPETModuleWidgetPrivate::
 initialModelPlasmaIntegralSec(
     const InputFunctionResult& result,
     double endTimeSec)
@@ -10608,6 +14316,12 @@ buildCurrentInputFunction(
         }
         else if (sourceProcessing == 3)
         {
+            const double measuredSourceEndSec = modelEndTimeSec;
+            const bool extendFengToPETSupport =
+                this->fengExtrapolationCheckBox->isChecked() &&
+                !this->PBIFOptionCheckBox->isChecked() &&
+                measuredSourceEndSec + 1e-6 < petEndTimeSec;
+
             vtkSlicerDynamicPETLogic* logic =
                 vtkSlicerDynamicPETLogic::SafeDownCast(q->logic());
             if (!logic)
@@ -10657,6 +14371,20 @@ buildCurrentInputFunction(
                 return false;
             }
 
+            if (extendFengToPETSupport)
+            {
+                result.supportFrameCount = q->durations.size();
+                modelEndTimeSec = petEndTimeSec;
+                result.fengExtrapolationApplied = true;
+                result.sourceMeasuredEndTimeSec = measuredSourceEndSec;
+                result.sourceModeledEndTimeSec = modelEndTimeSec;
+                std::fill(result.frameKeep.begin(), result.frameKeep.end(), true);
+                this->logToPythonConsole(
+                    QObject::tr("[SlicerDynamicPET IF] Feng extrapolation enabled: measured source support ends at %1 s; analytic model is extended to PET support at %2 s.")
+                        .arg(measuredSourceEndSec, 0, 'g', 8)
+                        .arg(modelEndTimeSec, 0, 'g', 8));
+            }
+
             for (size_t i = 0; i < result.supportFrameCount; ++i)
             {
                 result.frameWholeBlood[i] =
@@ -10666,8 +14394,7 @@ buildCurrentInputFunction(
                         result.fengParameters);
             }
 
-            const double supportEndSec =
-                this->frameEndForInputSec(result.supportFrameCount - 1);
+            const double supportEndSec = modelEndTimeSec;
             // Dense representation of the analytic Feng curve is independent
             // of the user-selected TCM integration step. The TCM backend may
             // subsequently sample this continuous representation more finely.
@@ -10929,6 +14656,12 @@ buildCurrentInputFunction(
         }
         else if (sourceProcessing == 3)
         {
+            const double measuredSourceEndSec = retainedIFEndSec;
+            const bool extendFengToPETSupport =
+                this->fengExtrapolationCheckBox->isChecked() &&
+                !this->PBIFOptionCheckBox->isChecked() &&
+                measuredSourceEndSec + 1e-6 < petEndTimeSec;
+
             if (sourceDomain == IFCurveDomain::ParentPlasma)
             {
                 if (errorMessage)
@@ -10969,6 +14702,19 @@ buildCurrentInputFunction(
                             .arg(QString::fromStdString(fengError));
                 }
                 return false;
+            }
+
+            if (extendFengToPETSupport)
+            {
+                result.supportFrameCount = q->timePoints.size();
+                modelEndTimeSec = petEndTimeSec;
+                result.fengExtrapolationApplied = true;
+                result.sourceMeasuredEndTimeSec = measuredSourceEndSec;
+                result.sourceModeledEndTimeSec = modelEndTimeSec;
+                this->logToPythonConsole(
+                    QObject::tr("[SlicerDynamicPET IF] Feng extrapolation enabled: measured source support ends at %1 s; analytic model is extended to PET support at %2 s.")
+                        .arg(measuredSourceEndSec, 0, 'g', 8)
+                        .arg(modelEndTimeSec, 0, 'g', 8));
             }
 
             processedPatientTimes.clear();
@@ -11583,6 +15329,20 @@ buildCurrentInputFunction(
             return false;
         }
 
+        result.parentFractionMeasuredEndTimeSec = this->parentFractionTimesSec.back();
+        result.parentFractionModeledEndTimeSec = processedParentTimes.back();
+        if (this->selectedParentFractionModel() != ParentFractionModel::Linear &&
+            result.parentFractionModeledEndTimeSec >
+                result.parentFractionMeasuredEndTimeSec + 1e-6)
+        {
+            result.parentFractionExtrapolationApplied = true;
+            this->logToPythonConsole(
+                QObject::tr("[SlicerDynamicPET parent fraction] Measured support ends at %1 s; %2 extrapolates the parent fraction to %3 s.")
+                    .arg(result.parentFractionMeasuredEndTimeSec, 0, 'g', 8)
+                    .arg(parentLabel)
+                    .arg(result.parentFractionModeledEndTimeSec, 0, 'g', 8));
+        }
+
         if (this->selectedParentFractionModel() == ParentFractionModel::Linear &&
             processedParentTimes.back() + 1e-6 < modelEndTimeSec)
         {
@@ -12031,6 +15791,10 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOI()
   {
     currentSelectedID = this->VOISelector->itemData(currentIndex).toString().toStdString();
   }
+  if (currentSelectedID.empty() && !q->plotMTGAVOI.empty())
+  {
+    currentSelectedID = q->plotMTGAVOI;
+  }
 
   this->VOISelector->blockSignals(true);  // Optional: prevent signal emission
   this->VOISelector->clear();
@@ -12081,6 +15845,10 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOIMTGA()
   if (currentIndex >= 0)
   {
     currentSelectedID = this->VOISelectorMTGA->itemData(currentIndex).toString().toStdString();
+  }
+  if (currentSelectedID.empty() && !q->plotTCMVOI.empty())
+  {
+    currentSelectedID = q->plotTCMVOI;
   }
 
   this->VOISelectorMTGA->blockSignals(true);  // Optional: prevent signal emission
@@ -17134,11 +20902,32 @@ void qSlicerDynamicPETModuleWidget::onSubjectHierarchyChanged() {
     return;  // Don't do anything if the module is not active
   }
   Q_D(qSlicerDynamicPETModuleWidget);
-  if (d->isTableBasedMode())
+  if (d->isTableBasedMode() || d->multiTimepointModeTransitionRunning)
   {
-    // Table mode is deliberately independent of the MRML patient/study tree.
+    // Table mode is independent of the MRML tree.  Mode transitions must also
+    // be atomic because clearTACdata() removes plot nodes and can synchronously
+    // emit Subject Hierarchy events.
     return;
   }
+
+  if (d->isMultiTimepointMode())
+  {
+    // Multi preparation and plotting legitimately create/remove many MRML
+    // nodes. Rebuilding the patient/acquisition/common-ROI UI for each of
+    // those events caused lost checkbox state, slow plotting, invalidated
+    // preparation caches, and re-entrant mode-switch crashes.
+    //
+    // The acquisition table already has explicit refresh points: entering
+    // Multi and opening "Select/Edit acquisitions".  If no patient is
+    // selected yet then refreshing the patient list is still useful (e.g.
+    // after a DICOM import), but an established Multi analysis is left alone.
+    if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+      d->populatePatientComboBox();
+    }
+    return;
+  }
+
   d->populatePatientComboBox();
 }
 
@@ -17173,7 +20962,7 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
     // inside vtkSegmentation::SegmentAdded/SegmentRemoved processing.
     QTimer::singleShot(0, this, [this, d]()
     {
-      if (d->isTableBasedMode())
+      if (d->isTableBasedMode() || d->isMultiTimepointMode())
       {
         return;
       }
@@ -17187,7 +20976,7 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   };
   this->SegWatcher->OnSegmentTACChanged = [this, d](const std::string& segmentID)
   {
-    if (d->isTableBasedMode())
+    if (d->isTableBasedMode() || d->isMultiTimepointMode())
     {
       return;
     }
@@ -17217,7 +21006,22 @@ void qSlicerDynamicPETModuleWidget::onPatChanged (int index) {
   d->resetAcquisitionTimingDisplay();
   this->resetPETSelection();
   this->patID = d->PatSelector->itemData(index).value<vtkIdType>();
-  d->populateStudyComboBox(this->patID);
+  if (d->isMultiTimepointMode())
+  {
+    this->stuID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    d->populateMultiTimepointAcquisitionTable();
+    if (this->patID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+    {
+      QTimer::singleShot(0, this, [d]()
+      {
+        d->showMultiTimepointSelectionDialog();
+      });
+    }
+  }
+  else
+  {
+    d->populateStudyComboBox(this->patID);
+  }
   if (this->patID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   {
     // No patient name is available: keep neutral, usable fallback names for
@@ -17826,6 +21630,11 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 void qSlicerDynamicPETModuleWidget::onSegmentsChanged()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
+  if (d->isMultiTimepointMode())
+  {
+    d->syncMultiTimepointSelectedSegments();
+    return;
+  }
   // std::vector<QString> selectedSegmentIDs;
   //
   // for (int i = 0; i < d->segmentCheckLayout->count(); ++i)
@@ -18079,6 +21888,14 @@ void qSlicerDynamicPETModuleWidget::enableTACbutton() {
     d->TACbutton->setEnabled(false);
     return;
   }
+  if (d->isMultiTimepointMode())
+  {
+    d->TACbutton->setEnabled(
+        d->multiTimepointSelectionValidated &&
+        d->multiTimepointPreparationValid &&
+        !this->segmentIDs.empty());
+    return;
+  }
   if (this->petID==vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID) {
     d->TACbutton->setEnabled(false);
     this->clearTACdata();
@@ -18226,6 +22043,35 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
     return;
   }
 
+  if (d->isMultiTimepointMode())
+  {
+    QString error;
+    if (!d->computeMultiTimepointTAC(&error))
+    {
+      if (!error.isEmpty() && error != tr("Multi-timepoint TAC extraction was cancelled."))
+      {
+        QMessageBox::warning(this, tr("Multi-timepoint TAC"), error);
+        d->logToPythonConsole(
+            tr("[SlicerDynamicPET multi-timepoint] TAC extraction failed: %1").arg(error));
+      }
+      return;
+    }
+
+    d->populatePlotSegmentCheckboxes();
+    d->rebuildTACStatisticUI();
+    d->populateIF();
+    d->populateTimeBarMTGA(true);
+    d->populateTimeBarMTGAImg(true);
+    d->updateInputFunctionStatus();
+
+    const bool tacReady =
+        !this->segmentTACs.empty() &&
+        !this->segmentTACsnames.empty();
+    d->setPostTACEnabled(tacReady);
+    d->updateParametricImagingAvailability();
+    return;
+  }
+
   if (this->durations.empty() || this->timePoints.empty()) {
     std::cerr << "Missing frame time information!" << std::endl;
     return;
@@ -18254,8 +22100,15 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   this->ProgressBar->show();
   // logic->computeTAC(this->ctID, this->petID, this->segID, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar);
   this->stopRequested = false;
+  using SinglePerfClock = std::chrono::steady_clock;
+  double singleFlattenMs = 0.0;
+  bool singleFlattenExecuted = false;
   if (this->PET_flatten_values.empty()) {
+    const auto flattenStart = SinglePerfClock::now();
     logic->Image2Flatten(this->petID, this->PET_flatten_values, this->PETdims, this->numberOfTimepoints, this->ProgressBar, this->stopButton, this->stopRequested);
+    singleFlattenMs = std::chrono::duration<double, std::milli>(
+        SinglePerfClock::now() - flattenStart).count();
+    singleFlattenExecuted = true;
   }
   if (this->stopRequested) {
     return;
@@ -18266,10 +22119,50 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
     // volumes for that dynamic segmentation. Keep normal TAC computation PET-only.
   }
 
+  double singleTacCallMs = 0.0;
   if (!segmentsToCompute.empty())
   {
+    const auto tacStart = SinglePerfClock::now();
     logic->TAC(this->sequencePETNode, this->segSequenceNode, segmentsToCompute, this->segmentTACs, this->segmentTACsnames, this->ProgressBar, this->stopButton, this->stopRequested);
+    singleTacCallMs = std::chrono::duration<double, std::milli>(
+        SinglePerfClock::now() - tacStart).count();
   }
+
+  if (this->sequencePETNode)
+  {
+    const char* logicSummary = this->sequencePETNode->GetAttribute(
+        "SlicerDynamicPET.TACPerfSummary");
+    const char* frameSummary = this->sequencePETNode->GetAttribute(
+        "SlicerDynamicPET.TACPerfFrames");
+
+    d->logToPythonConsole(tr(
+        "[SlicerDynamicPET PERF][SINGLE] Widget timing: Image2Flatten=%1 ms (%2); logic->TAC wall=%3 ms; requestedROIs=%4.")
+        .arg(singleFlattenMs, 0, 'f', 3)
+        .arg(singleFlattenExecuted ? tr("executed") : tr("cached/skipped"))
+        .arg(singleTacCallMs, 0, 'f', 3)
+        .arg(static_cast<int>(segmentsToCompute.size())));
+
+    if (logicSummary && *logicSummary)
+    {
+      d->logToPythonConsole(QString::fromUtf8(logicSummary));
+    }
+    if (frameSummary && *frameSummary)
+    {
+      d->logToPythonConsole(QString::fromUtf8(frameSummary));
+    }
+    this->sequencePETNode->RemoveAttribute("SlicerDynamicPET.TACPerfSummary");
+    this->sequencePETNode->RemoveAttribute("SlicerDynamicPET.TACPerfFrames");
+  }
+  else
+  {
+    d->logToPythonConsole(tr(
+        "[SlicerDynamicPET PERF][SINGLE] Widget timing: Image2Flatten=%1 ms (%2); logic->TAC wall=%3 ms; requestedROIs=%4; no PET sequence node available for stage summary.")
+        .arg(singleFlattenMs, 0, 'f', 3)
+        .arg(singleFlattenExecuted ? tr("executed") : tr("cached/skipped"))
+        .arg(singleTacCallMs, 0, 'f', 3)
+        .arg(static_cast<int>(segmentsToCompute.size())));
+  }
+
   this->ProgressBar->setValue(0);
   this->ProgressBar->setVisible(false);
   if (this->stopRequested) {
@@ -18281,8 +22174,8 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   d->populatePlotSegmentCheckboxes();
   d->rebuildTACStatisticUI();
   d->populateIF();
-  d->populateTimeBarMTGA();
-  d->populateTimeBarMTGAImg();
+  d->populateTimeBarMTGA(true);
+  d->populateTimeBarMTGAImg(true);
 
   // Rebuild timing-dependent IF support after TAC extraction so slider ranges
   // immediately reflect PBIF/external-IF coverage. No checkbox retoggle should
@@ -18328,7 +22221,14 @@ void qSlicerDynamicPETModuleWidget::onSelectAllbutton()
     }
   }
   d->SegmentCheckContents->blockSignals(false);
-  d->populateSegmentCheckboxes(this->segID);
+  if (d->isMultiTimepointMode())
+  {
+    d->syncMultiTimepointSelectedSegments();
+  }
+  else
+  {
+    d->populateSegmentCheckboxes(this->segID);
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onExcelPathChanged(const QString& path)
@@ -19018,6 +22918,8 @@ void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeri
 
 void qSlicerDynamicPETModuleWidget::onPlotbutton()
 {
+  using PlotClock = std::chrono::steady_clock;
+  const auto plotBuildStart = PlotClock::now();
   Q_D(qSlicerDynamicPETModuleWidget);
   this->ColNameToSegmentID.clear();
   this->MapPlotSeriesNodeIDToPlot.clear();
@@ -19071,6 +22973,7 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
       return;
     }
     d->enforceDistributionSelection();
+    d->updateDistributionFrameUI(false);
 
     std::string segmentID = d->lastPlotSegmentID;
     if (segmentID.empty() || this->segmentTACs.find(segmentID) == this->segmentTACs.end())
@@ -19435,7 +23338,8 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
       if (plotView)
       {
         QObject::connect(plotView, SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
-                         this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)));
+                         this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)),
+                         Qt::UniqueConnection);
 
         vtkSmartPointer<vtkChartXY> chart = plotView->chart();
         for (int i = 0; i < chart->GetNumberOfPlots(); ++i)
@@ -19448,6 +23352,17 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
       }
     }
   }
+
+  const double plotBuildMs =
+      std::chrono::duration<double, std::milli>(PlotClock::now() - plotBuildStart).count();
+  d->logToPythonConsole(
+      QObject::tr("[SlicerDynamicPET PERF][PLOT] mode=%1; curves=%2; statistics=%3; observations=%4; total=%5 ms.")
+          .arg(d->isMultiTimepointMode() ? QStringLiteral("MULTI") :
+               (d->isTableBasedMode() ? QStringLiteral("TABLE") : QStringLiteral("SINGLE")))
+          .arg(static_cast<int>(PlotSelectedIDs.size()))
+          .arg(static_cast<int>(PlotSelectedStats.size()))
+          .arg(static_cast<int>(this->timePoints.size()))
+          .arg(plotBuildMs, 0, 'f', 3));
 }
 
 void
@@ -19510,11 +23425,21 @@ void qSlicerDynamicPETModuleWidget::onVOISelectionChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
   std :: string segmentID = d->VOISelector->itemData(index).toString().toStdString();
-  this->plotTCMVOI=segmentID;
+  this->plotTCMVOI = segmentID;
   d->populateResultsTable(segmentID);
-  if (segmentID == "")
+
+  if (!d->syncingResultVOISelection)
   {
-    return;
+    d->syncingResultVOISelection = true;
+    const int peerIndex = d->VOISelectorMTGA->findData(QString::fromStdString(segmentID));
+    if (peerIndex >= 0)
+    {
+      QSignalBlocker blocker(d->VOISelectorMTGA);
+      d->VOISelectorMTGA->setCurrentIndex(peerIndex);
+      this->plotMTGAVOI = segmentID;
+      d->populateResultsMTGATable(segmentID);
+    }
+    d->syncingResultVOISelection = false;
   }
 }
 
@@ -19522,11 +23447,21 @@ void qSlicerDynamicPETModuleWidget::onVOIMTGASelectionChanged(int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
   std :: string segmentID = d->VOISelectorMTGA->itemData(index).toString().toStdString();
-  this->plotMTGAVOI=segmentID;
+  this->plotMTGAVOI = segmentID;
   d->populateResultsMTGATable(segmentID);
-  if (segmentID == "")
+
+  if (!d->syncingResultVOISelection)
   {
-    return;
+    d->syncingResultVOISelection = true;
+    const int peerIndex = d->VOISelector->findData(QString::fromStdString(segmentID));
+    if (peerIndex >= 0)
+    {
+      QSignalBlocker blocker(d->VOISelector);
+      d->VOISelector->setCurrentIndex(peerIndex);
+      this->plotTCMVOI = segmentID;
+      d->populateResultsTable(segmentID);
+    }
+    d->syncingResultVOISelection = false;
   }
 }
 
@@ -19560,7 +23495,7 @@ void qSlicerDynamicPETModuleWidget::onVOISelectAllbutton()
     }
   }
   d->VOICheckContents->blockSignals(false);
-  d->populateVOI(this->IFID);
+  this->onVOISegmentsChanged();
 }
 
 void qSlicerDynamicPETModuleWidget::onVOIMTGASelectAllbutton()
@@ -19593,7 +23528,7 @@ void qSlicerDynamicPETModuleWidget::onVOIMTGASelectAllbutton()
     }
   }
   d->VOIMTGACheckContents->blockSignals(false);
-  d->populateVOIMTGA(this->IFID);
+  this->onVOIMTGASegmentsChanged();
 }
 
 void qSlicerDynamicPETModuleWidget::onOLSclicked()
@@ -20163,7 +24098,8 @@ void qSlicerDynamicPETModuleWidget::enableFITMTGAImgbutton()
 void qSlicerDynamicPETModuleWidget::onVOISegmentsChanged()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  std::vector<std::string> VOIselectedSegmentIDs;
+  std::vector<std::string> selectedIDs;
+  QSet<QString> selectedSet;
 
   for (int i = 0; i < d->VOICheckLayout->count(); ++i)
   {
@@ -20171,19 +24107,49 @@ void qSlicerDynamicPETModuleWidget::onVOISegmentsChanged()
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
     if (checkbox && checkbox->isChecked())
     {
-      std :: string segmentID = checkbox->property("SegmentID").toString().toStdString();
-      VOIselectedSegmentIDs.push_back(segmentID);
+      const QString id = checkbox->property("SegmentID").toString();
+      selectedSet.insert(id);
+      selectedIDs.push_back(id.toStdString());
     }
   }
-  this->VOIsegmentIDs = VOIselectedSegmentIDs;
+  this->VOIsegmentIDs = selectedIDs;
+
+  if (!d->syncingVOICheckSelection)
+  {
+    d->syncingVOICheckSelection = true;
+    std::vector<std::string> peerIDs;
+    for (int i = 0; i < d->VOIMTGACheckLayout->count(); ++i)
+    {
+      QLayoutItem* item = d->VOIMTGACheckLayout->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (!checkbox)
+      {
+        continue;
+      }
+      const QString id = checkbox->property("SegmentID").toString();
+      const bool checked = selectedSet.contains(id);
+      {
+        QSignalBlocker blocker(checkbox);
+        checkbox->setChecked(checked);
+      }
+      if (checked)
+      {
+        peerIDs.push_back(id.toStdString());
+      }
+    }
+    this->VOIMTGAsegmentIDs = peerIDs;
+    d->syncingVOICheckSelection = false;
+  }
 
   this->enableFITbutton();
+  this->enableFITMTGAbutton();
 }
 
 void qSlicerDynamicPETModuleWidget::onVOIMTGASegmentsChanged()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  std::vector<std::string> VOIselectedSegmentIDs;
+  std::vector<std::string> selectedIDs;
+  QSet<QString> selectedSet;
 
   for (int i = 0; i < d->VOIMTGACheckLayout->count(); ++i)
   {
@@ -20191,12 +24157,41 @@ void qSlicerDynamicPETModuleWidget::onVOIMTGASegmentsChanged()
     QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
     if (checkbox && checkbox->isChecked())
     {
-      std :: string segmentID = checkbox->property("SegmentID").toString().toStdString();
-      VOIselectedSegmentIDs.push_back(segmentID);
+      const QString id = checkbox->property("SegmentID").toString();
+      selectedSet.insert(id);
+      selectedIDs.push_back(id.toStdString());
     }
   }
-  this->VOIMTGAsegmentIDs = VOIselectedSegmentIDs;
+  this->VOIMTGAsegmentIDs = selectedIDs;
 
+  if (!d->syncingVOICheckSelection)
+  {
+    d->syncingVOICheckSelection = true;
+    std::vector<std::string> peerIDs;
+    for (int i = 0; i < d->VOICheckLayout->count(); ++i)
+    {
+      QLayoutItem* item = d->VOICheckLayout->itemAt(i);
+      QCheckBox* checkbox = qobject_cast<QCheckBox*>(item->widget());
+      if (!checkbox)
+      {
+        continue;
+      }
+      const QString id = checkbox->property("SegmentID").toString();
+      const bool checked = selectedSet.contains(id);
+      {
+        QSignalBlocker blocker(checkbox);
+        checkbox->setChecked(checked);
+      }
+      if (checked)
+      {
+        peerIDs.push_back(id.toStdString());
+      }
+    }
+    this->VOIsegmentIDs = peerIDs;
+    d->syncingVOICheckSelection = false;
+  }
+
+  this->enableFITbutton();
   this->enableFITMTGAbutton();
 }
 
@@ -20501,6 +24496,41 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
             .arg(acquisitionStartSec, 0, 'g', 8));
   }
 
+  // Preserve the actual acquisition windows.  This is identical to the old
+  // cumulative schedule for a normal contiguous dynamic scan, but it also
+  // allows Table/Multi-timepoint observations to contain real temporal gaps.
+  std::vector<double> frameStartTimesSec(static_cast<size_t>(Nframe));
+  std::vector<double> frameEndTimesSec(static_cast<size_t>(Nframe));
+  bool hasTCMTemporalGaps = false;
+  for (size_t i = 0; i < static_cast<size_t>(Nframe); ++i)
+  {
+    frameStartTimesSec[i] = d->frameStartForInputSec(i);
+    frameEndTimesSec[i] = d->frameEndForInputSec(i);
+    if (!std::isfinite(frameStartTimesSec[i]) ||
+        !std::isfinite(frameEndTimesSec[i]) ||
+        !(frameEndTimesSec[i] > frameStartTimesSec[i]) ||
+        (i > 0 && frameStartTimesSec[i] < frameEndTimesSec[i - 1] - 1e-6))
+    {
+      QMessageBox::warning(
+          this,
+          tr("TCM timing"),
+          tr("The PET observation schedule contains invalid or overlapping frame intervals."));
+      return;
+    }
+    if (i > 0 && frameStartTimesSec[i] > frameEndTimesSec[i - 1] + 1e-6)
+    {
+      hasTCMTemporalGaps = true;
+    }
+  }
+
+  if (hasTCMTemporalGaps)
+  {
+    d->logToPythonConsole(
+        tr("[SlicerDynamicPET timing] TCM fit contains separated acquisition windows. "
+           "The compartment state and input function are propagated continuously through each gap; "
+           "no tissue residual is created where no PET observation exists."));
+  }
+
   const size_t requestedTCMEndCount =
       std::clamp<size_t>(
           static_cast<size_t>(d->TCMEndSlider->value()),
@@ -20559,14 +24589,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     const size_t fitFrameCount =
         std::min(maximumFitCount, tissueSupportCount);
 
-    // Keep the plotted observations consistent with the exact data used for
-    // AIC/BIC and fitting. Frames beyond retained IF/tissue support are not
-    // part of the fit and should not visually look like model residuals.
-    auto& fittedKeepMask = this->segmentkeep4TCMfits[segmentID];
-    for (size_t i = fitFrameCount; i < fittedKeepMask.size(); ++i)
-    {
-      fittedKeepMask[i] = false;
-    }
+    // Keep the original tissue-observation visibility mask for plotting.
+    // The selected TCM end controls fitting only; valid observations after
+    // that point remain visible as excluded/out-of-fit measurements.
 
     if (fitFrameCount < 2)
     {
@@ -20589,6 +24614,12 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     std::vector<std::vector<double>> framingFit(
         framing.begin(),
         framing.begin() + fitFrameCount);
+    std::vector<double> frameStartTimesFit(
+        frameStartTimesSec.begin(),
+        frameStartTimesSec.begin() + fitFrameCount);
+    std::vector<double> frameEndTimesFit(
+        frameEndTimesSec.begin(),
+        frameEndTimesSec.begin() + fitFrameCount);
     std::vector<double> weightFit(
         wgtVec[segmentID].begin(),
         wgtVec[segmentID].begin() + fitFrameCount);
@@ -20623,7 +24654,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -20655,7 +24688,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TdCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -20687,7 +24722,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TiCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -20719,7 +24756,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["1TidCM"],
         //                     Cp, framing, Nframe, Nvox, init_1tcm, lb_1tcm,
@@ -20751,7 +24790,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -20783,7 +24824,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TdCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -20815,7 +24858,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TiCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -20847,7 +24892,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                        ifResult.parentFractionValues.empty()
                            ? nullptr : &ifResult.parentFractionValues,
                        ifResult.plasmaIsParent,
-                       acquisitionStartSec
+                       acquisitionStartSec,
+                       &frameStartTimesFit,
+                       &frameEndTimesFit
                        );
         // logic->getFittedTCM(this->segmentTCMfits[segmentID]["2TidCM"],
         //                     Cp, framing, Nframe, Nvox, init_2tcm, lb_2tcm,
@@ -20934,7 +24981,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
             ifResult.nativeWholeBloodValues.empty()
                 ? nullptr
                 : &ifResult.nativeWholeBloodValues,
-            acquisitionStartSec);
+            acquisitionStartSec,
+            &frameStartTimesFit,
+            &frameEndTimesFit);
       }
       else
       {
@@ -20942,10 +24991,9 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         return;
       }
 
-      padFittedCurveToFullFrames(
-          this->segmentTCMfits[segmentID][modelID],
-          fitFrameCount,
-          static_cast<size_t>(Nframe));
+      // Diagnostic is reported on exactly the observations used by the optimizer.
+      // The plotted prediction is extended only afterwards, so fit diagnostics
+      // remain completely independent of the display/prediction support.
 
       // Diagnostic reported on exactly the observations used by the optimizer.
       // This makes it easy to distinguish a genuinely weighted-AIC preference
@@ -20985,6 +25033,106 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
                 .arg(unweightedSSE, 0, 'g', 8)
                 .arg(weightedSSE, 0, 'g', 8));
       }
+
+      const size_t predictionFrameCount =
+          std::min(ifSupportCount, static_cast<size_t>(Nframe));
+      std::vector<double> fullPrediction;
+      std::string predictionError;
+      bool predictionOK = false;
+
+      if (predictionFrameCount >= fitFrameCount && parameterIt != this->segmentTCM[segmentID].end())
+      {
+        // callTCM stores parameters that were fixed during optimization as NaN.
+        // Restore the model-definition fixed values before display-only forward
+        // prediction; fitted parameters themselves are never changed/refit.
+        TCMParameters predictionParams = parameterIt->second;
+        if (modelID == "1TCM" || modelID == "1TiCM" ||
+            modelID == "2TCM" || modelID == "2TiCM")
+        {
+          predictionParams.td = 0.0;
+        }
+        if (modelID == "1TiCM" || modelID == "1TidCM")
+        {
+          predictionParams.k2 = 0.0;
+        }
+        if (modelID == "2TiCM" || modelID == "2TidCM")
+        {
+          predictionParams.k4 = 0.0;
+        }
+        if (modelID == "Liver DBIF")
+        {
+          predictionParams.td = 0.0;
+        }
+
+        std::vector<std::vector<double>> cpPrediction(
+            Cp.begin(), Cp.begin() + predictionFrameCount);
+        std::vector<std::vector<double>> cwbPrediction(
+            Cwb.begin(), Cwb.begin() + predictionFrameCount);
+        std::vector<std::vector<double>> framingPrediction(
+            framing.begin(), framing.begin() + predictionFrameCount);
+        std::vector<double> frameStartPrediction(
+            frameStartTimesSec.begin(), frameStartTimesSec.begin() + predictionFrameCount);
+        std::vector<double> frameEndPrediction(
+            frameEndTimesSec.begin(), frameEndTimesSec.begin() + predictionFrameCount);
+
+        try
+        {
+          if (modelID == "Liver DBIF")
+          {
+            predictionOK = logic->PredictLiverTCM(
+                cwbPrediction, framingPrediction, predictionParams,
+                dk, timestep, fullPrediction, interpolationType,
+                ifResult.nativeWholeBloodTimesSec.empty() ? nullptr : &ifResult.nativeWholeBloodTimesSec,
+                ifResult.nativeWholeBloodValues.empty() ? nullptr : &ifResult.nativeWholeBloodValues,
+                acquisitionStartSec, &frameStartPrediction, &frameEndPrediction,
+                &predictionError);
+          }
+          else
+          {
+            const int predictionCompartments =
+                (!modelID.empty() && modelID[0] == '2') ? 2 : 1;
+            predictionOK = logic->PredictTCM(
+                cpPrediction, cwbPrediction, framingPrediction,
+                predictionParams, predictionCompartments, dk, timestep,
+                fullPrediction, interpolationType,
+                ifResult.nativePlasmaTimesSec.empty() ? nullptr : &ifResult.nativePlasmaTimesSec,
+                ifResult.nativePlasmaValues.empty() ? nullptr : &ifResult.nativePlasmaValues,
+                ifResult.nativeWholeBloodTimesSec.empty() ? nullptr : &ifResult.nativeWholeBloodTimesSec,
+                ifResult.nativeWholeBloodValues.empty() ? nullptr : &ifResult.nativeWholeBloodValues,
+                ifResult.parentFractionTimesSec.empty() ? nullptr : &ifResult.parentFractionTimesSec,
+                ifResult.parentFractionValues.empty() ? nullptr : &ifResult.parentFractionValues,
+                ifResult.plasmaIsParent, acquisitionStartSec,
+                &frameStartPrediction, &frameEndPrediction, &predictionError);
+          }
+        }
+        catch (const std::exception& e)
+        {
+          predictionOK = false;
+          predictionError = e.what();
+        }
+      }
+
+      if (!predictionOK && predictionFrameCount > fitFrameCount)
+      {
+        d->logToPythonConsole(
+            tr("[SlicerDynamicPET TCM] Could not extend %1 prediction beyond the fit end: %2")
+                .arg(QString::fromStdString(modelID))
+                .arg(QString::fromStdString(predictionError)));
+      }
+      else if (predictionOK && predictionFrameCount > fitFrameCount)
+      {
+        d->logToPythonConsole(
+            tr("[SlicerDynamicPET TCM] %1 fitted through frame %2; prediction propagated through IF-supported frame %3 without refitting.")
+                .arg(QString::fromStdString(modelID))
+                .arg(fitFrameCount)
+                .arg(predictionFrameCount));
+      }
+
+      replaceFittedCurveForPlot(
+          this->segmentTCMfits[segmentID][modelID],
+          fitFrameCount,
+          static_cast<size_t>(Nframe),
+          predictionOK ? &fullPrediction : nullptr);
     }
 
     const auto liverFitIt = this->segmentTCMfits[segmentID].find("Liver DBIF");
@@ -21886,18 +26034,63 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
   const size_t firstUsableIndex =
       std::min(ifResult.supportFrameStartIndex, static_cast<size_t>(Nframe));
 
-  // MTGA kernels work on elapsed acquisition time, not the absolute
-  // post-injection clock used for display. The selected frame defines the
-  // start of the regression (and, for Relative RE, the integral origin).
-  double timeOffset = 0.0;
-  for (size_t i = 0; i < startFrameIndex && i < durations.size(); ++i)
+  // Explicit observation schedule shared by all ROI MTGA methods.  For a
+  // standard contiguous dynamic scan this is numerically identical to the
+  // previous cumulative-duration clock.  With separated acquisitions, the
+  // real unobserved intervals are retained instead of collapsed.
+  std::vector<double> frameStartTimesSec(static_cast<size_t>(Nframe));
+  std::vector<double> frameEndTimesSec(static_cast<size_t>(Nframe));
+  std::vector<double> frameMidTimesSec(static_cast<size_t>(Nframe));
+  bool hasTemporalGaps = false;
+  for (size_t i = 0; i < static_cast<size_t>(Nframe); ++i)
   {
-      timeOffset += durations[i] / framingNorm;
+      frameStartTimesSec[i] = d->frameStartForInputSec(i);
+      frameEndTimesSec[i] = d->frameEndForInputSec(i);
+      frameMidTimesSec[i] = d->frameMidForInputSec(i);
+
+      if (!std::isfinite(frameStartTimesSec[i]) ||
+          !std::isfinite(frameEndTimesSec[i]) ||
+          !std::isfinite(frameMidTimesSec[i]) ||
+          !(frameEndTimesSec[i] > frameStartTimesSec[i]) ||
+          (i > 0 && frameStartTimesSec[i] < frameEndTimesSec[i - 1] - 1e-6))
+      {
+          QMessageBox::warning(
+              this,
+              tr("MTGA timing"),
+              tr("The PET observation schedule contains invalid or overlapping frame intervals."));
+          return;
+      }
+
+      if (i > 0 && frameStartTimesSec[i] > frameEndTimesSec[i - 1] + 1e-6)
+      {
+          hasTemporalGaps = true;
+      }
   }
-  if (startFrameIndex < durations.size())
+
+  if (hasTemporalGaps)
   {
-      timeOffset += 0.5 * durations[startFrameIndex] / framingNorm;
+    d->logToPythonConsole(
+        tr("[SlicerDynamicPET timing] MTGA fit contains separated acquisition windows; temporal gaps are preserved."));
+
+    const bool tissueIntegralModelSelected =
+        std::find(this->modelsMTGAID.begin(), this->modelsMTGAID.end(), "Logan") !=
+            this->modelsMTGAID.end() ||
+        std::find(this->modelsMTGAID.begin(), this->modelsMTGAID.end(), "RE") !=
+            this->modelsMTGAID.end() ||
+        std::find(this->modelsMTGAID.begin(), this->modelsMTGAID.end(), "Relative RE") !=
+            this->modelsMTGAID.end();
+    if (tissueIntegralModelSelected)
+    {
+      d->logToPythonConsole(
+          tr("[SlicerDynamicPET timing] Logan/RE tissue integrals bridge only the unobserved acquisition gaps "
+             "by linear interpolation between neighbouring tissue frame averages."));
+    }
   }
+
+  const double timeOffset =
+      startFrameIndex < frameMidTimesSec.size()
+      ? frameMidTimesSec[startFrameIndex] / framingNorm
+      : 0.0;
 
   double initialPlasmaIntegralNormalized = 0.0;
   const bool standardPatlakSelected =
@@ -21933,6 +26126,44 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
               ? ifResult.supportFrameCount
               : static_cast<size_t>(Nframe),
           static_cast<size_t>(Nframe));
+
+  // When a true acquisition gap exists, preferentially integrate the fully
+  // processed model plasma curve on its native clock. This preserves IF area
+  // through the unobserved interval. If that native representation is not
+  // available, the logic layer falls back to an explicit linear bridge
+  // between neighbouring plasma frame averages.
+  std::vector<double> plasmaIntegralAtMidSec;
+  if (hasTemporalGaps && ifSupportCount > 0)
+  {
+      const double integralOriginSec =
+          (d->acquisitionTiming.delayedAcquisition &&
+           ifResult.inputCoversFromInjection)
+          ? 0.0
+          : frameStartTimesSec.front();
+
+      plasmaIntegralAtMidSec.reserve(ifSupportCount);
+      bool nativeIntegralAvailable = true;
+      for (size_t i = 0; i < ifSupportCount; ++i)
+      {
+          const double integral =
+              d->integrateModelPlasmaOverInterval(
+                  ifResult, integralOriginSec, frameMidTimesSec[i]);
+          if (!std::isfinite(integral))
+          {
+              nativeIntegralAvailable = false;
+              break;
+          }
+          plasmaIntegralAtMidSec.push_back(integral);
+      }
+
+      if (!nativeIntegralAvailable)
+      {
+          plasmaIntegralAtMidSec.clear();
+          d->logToPythonConsole(
+              tr("[SlicerDynamicPET timing] Full native plasma integration across the acquisition gap was unavailable; "
+                 "MTGA will use the documented linear bridge between neighbouring plasma frame averages."));
+      }
+  }
 
   if (ifResult.frameKeep.size() == static_cast<size_t>(Nframe))
   {
@@ -22002,7 +26233,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
           }
 
           retainedTimes.push_back(
-              timePoints[i] - 0.5 * durations[i]);
+              frameMidTimesSec[i]);
           retainedValues.push_back(values[i]);
         }
 
@@ -22023,7 +26254,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
           }
 
           const double t =
-              timePoints[i] - 0.5 * durations[i];
+              frameMidTimesSec[i];
 
           values[i] = d->interpolateInputFunction(
               retainedTimes,
@@ -22044,11 +26275,11 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       continue;
     }
 
-    const size_t maximumFitCount =
-        std::min(requestedMTGAEndCount, ifSupportCount);
-
+    // Regression end controls the fitted subset only. Keep the full tissue/IF
+    // support available to the graphical transformation so plots can show
+    // observations outside the selected regression window.
     size_t tissueSupportCount = 0;
-    for (size_t i = maximumFitCount; i > 0; --i)
+    for (size_t i = ifSupportCount; i > 0; --i)
     {
       if (statsIt->second[i - 1].keep)
       {
@@ -22057,33 +26288,54 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
       }
     }
 
-    const size_t fitFrameCount =
-        std::min(maximumFitCount, tissueSupportCount);
+    const size_t modelSupportCount =
+        std::min(ifSupportCount, tissueSupportCount);
+    const size_t regressionEndCount =
+        std::min(requestedMTGAEndCount, modelSupportCount);
 
-    if (fitFrameCount < 2 ||
+    if (regressionEndCount < 2 ||
         startFrameIndex < firstUsableIndex ||
-        startFrameIndex >= fitFrameCount ||
-        fitFrameCount - startFrameIndex < 2)
+        startFrameIndex >= regressionEndCount ||
+        regressionEndCount - startFrameIndex < 2)
     {
       QMessageBox::warning(
           this,
           tr("MTGA fit range"),
-          tr("The selected MTGA start is outside the usable IF/tissue acquisition range."));
+          tr("The selected MTGA start/end range is outside the usable IF/tissue acquisition range."));
       continue;
     }
 
     auto tac_flatten = extractColumn(tacVOI);
-    tac_flatten.resize(fitFrameCount);
+    tac_flatten.resize(modelSupportCount);
 
     std::vector<double> cpFit(
         ifResult.frameModelPlasma.begin(),
-        ifResult.frameModelPlasma.begin() + fitFrameCount);
+        ifResult.frameModelPlasma.begin() + modelSupportCount);
     std::vector<double> framingFit(
         framing_flatten.begin(),
-        framing_flatten.begin() + fitFrameCount);
+        framing_flatten.begin() + modelSupportCount);
+    std::vector<double> frameStartTimesFit(
+        frameStartTimesSec.begin(),
+        frameStartTimesSec.begin() + modelSupportCount);
+    std::vector<double> frameEndTimesFit(
+        frameEndTimesSec.begin(),
+        frameEndTimesSec.begin() + modelSupportCount);
+    std::vector<double> plasmaIntegralFit;
+    const std::vector<double>* plasmaIntegralFitPtr = nullptr;
+    if (plasmaIntegralAtMidSec.size() >= modelSupportCount)
+    {
+        plasmaIntegralFit.assign(
+            plasmaIntegralAtMidSec.begin(),
+            plasmaIntegralAtMidSec.begin() + modelSupportCount);
+        plasmaIntegralFitPtr = &plasmaIntegralFit;
+    }
     std::vector<double> weightFit(
         wgtVec[segmentID].begin(),
-        wgtVec[segmentID].begin() + fitFrameCount);
+        wgtVec[segmentID].begin() + modelSupportCount);
+    for (size_t i = regressionEndCount; i < weightFit.size(); ++i)
+    {
+        weightFit[i] = 0.0;
+    }
 
     if (!reconstructRemovedTissueFrames(
             segmentID,
@@ -22109,7 +26361,10 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                       huber_tune,
                       tol,
                       max_iter,
-                      initialPlasmaIntegralNormalized
+                      initialPlasmaIntegralNormalized,
+                      &frameStartTimesFit,
+                      &frameEndTimesFit,
+                      plasmaIntegralFitPtr
                       );
       }
       else if (modelID == "Relative Patlak") {
@@ -22125,7 +26380,10 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                               huber_tune,
                               tol,
                               max_iter,
-                              firstUsableIndex);
+                              firstUsableIndex,
+                              &frameStartTimesFit,
+                              &frameEndTimesFit,
+                              plasmaIntegralFitPtr);
       }
       else if (modelID == "Logan") {
         logic->Logan(tac_flatten,
@@ -22139,7 +26397,10 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                      std,
                      huber_tune,
                      tol,
-                     max_iter
+                     max_iter,
+                     &frameStartTimesFit,
+                     &frameEndTimesFit,
+                     plasmaIntegralFitPtr
                      );
       }
       else if (modelID == "RE") {
@@ -22154,7 +26415,10 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                   std,
                   huber_tune,
                   tol,
-                  max_iter
+                  max_iter,
+                  &frameStartTimesFit,
+                  &frameEndTimesFit,
+                  plasmaIntegralFitPtr
                  );
       }
       else if (modelID == "Relative RE") {
@@ -22170,7 +26434,10 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
                           huber_tune,
                           tol,
                           max_iter,
-                          firstUsableIndex);
+                          firstUsableIndex,
+                          &frameStartTimesFit,
+                          &frameEndTimesFit,
+                          plasmaIntegralFitPtr);
       } else {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;
@@ -23258,101 +27525,103 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   }
 
   vtkMRMLScene* scene = this->mrmlScene();
-
-  // Get selected VOI for MTGA plot
   std::string selectedVOI = this->plotMTGAVOI;
 
-  // Get selected MTGA model from combo box
   QString modelName_qstr = d->MTGASelector->currentText();
   if (modelName_qstr.toStdString().empty())
     return;
   std::string modelName = modelName_qstr.toStdString();
 
-  // Check data availability
   auto voiIt = this->segmentMTGA.find(selectedVOI);
   if (voiIt == this->segmentMTGA.end())
     return;
-
   auto modelIt = voiIt->second.find(modelName);
   if (modelIt == voiIt->second.end())
     return;
 
   const MTGAParameters& params = modelIt->second;
-  if (params.x.empty() || params.y.empty() || params.fitted.empty())
+  const bool haveFullPlot =
+      !params.plotX.empty() &&
+      params.plotX.size() == params.plotY.size() &&
+      params.plotX.size() == params.plotFitted.size() &&
+      params.plotX.size() == params.plotFrame.size() &&
+      params.plotX.size() == params.plotIncluded.size();
+
+  const std::vector<double>& plotX = haveFullPlot ? params.plotX : params.x;
+  const std::vector<double>& plotY = haveFullPlot ? params.plotY : params.y;
+  const std::vector<double>& plotFit = haveFullPlot ? params.plotFitted : params.fitted;
+  const std::vector<int>& plotFrame = haveFullPlot ? params.plotFrame : params.frame;
+
+  if (plotX.empty() || plotY.size() != plotX.size() || plotFit.size() != plotX.size())
     return;
 
-  // Clear previous plot/chart/table
   this->RemoveExistingPlotChartAndTable();
-
-  // Create or get table
   vtkSmartPointer<vtkMRMLTableNode> tableNode = this->GetOrCreatePlotTable();
 
   vtkNew<vtkDoubleArray> xArray;
-  vtkNew<vtkDoubleArray> yArray;
+  vtkNew<vtkDoubleArray> includedArray;
+  vtkNew<vtkDoubleArray> excludedArray;
   vtkNew<vtkStringArray> labelArray;
   xArray->SetName("X");
-  yArray->SetName("Data");
+  includedArray->SetName("Data");
+  excludedArray->SetName("Excluded from regression");
   labelArray->SetName("ToolTipData");
-  for (int i=0;  i < params.x.size(); ++i) {
-    double xv = params.x[i];
-    double yv = params.y[i];
-    xArray->InsertNextValue(xv);
-    yArray->InsertNextValue(params.keep[i] ? yv : std::numeric_limits<double>::quiet_NaN());
-    const int frameIndex = params.frame[i] - 1;
+
+  for (size_t i = 0; i < plotX.size(); ++i)
+  {
+    const bool included = haveFullPlot
+        ? params.plotIncluded[i]
+        : (i < params.keep.size() ? params.keep[i] : true);
+    const int frameIndex =
+        i < plotFrame.size() ? plotFrame[i] - 1 : static_cast<int>(i);
+    bool originalObservationAvailable = true;
+    const auto statsIt = this->segmentTACs.find(selectedVOI);
+    if (statsIt != this->segmentTACs.end() &&
+        frameIndex >= 0 &&
+        frameIndex < static_cast<int>(statsIt->second.size()))
+    {
+      originalObservationAvailable = statsIt->second[static_cast<size_t>(frameIndex)].keep;
+    }
+
+    xArray->InsertNextValue(plotX[i]);
+    includedArray->InsertNextValue(
+        included && originalObservationAvailable
+        ? plotY[i]
+        : std::numeric_limits<double>::quiet_NaN());
+    excludedArray->InsertNextValue(
+        !included && originalObservationAvailable
+        ? plotY[i]
+        : std::numeric_limits<double>::quiet_NaN());
+
     std::ostringstream oss;
-    oss << "Frame: " << frameIndex
-        << ", Time(s): " << this->timePoints[frameIndex]
-        << ", Time(min): " << this->timePoints[frameIndex]/60.0;
+    oss << "Frame: " << frameIndex;
+    if (frameIndex >= 0 && frameIndex < static_cast<int>(this->timePoints.size()))
+    {
+      oss << ", Time(s): " << this->timePoints[frameIndex]
+          << ", Time(min): " << this->timePoints[frameIndex] / 60.0;
+    }
+    if (!originalObservationAvailable)
+    {
+      oss << ", observation removed";
+    }
+    else
+    {
+      oss << (included ? ", included in regression" : ", excluded from regression");
+    }
     labelArray->InsertNextValue(oss.str());
   }
   tableNode->AddColumn(xArray);
-  tableNode->AddColumn(yArray);
+  tableNode->AddColumn(includedArray);
+  tableNode->AddColumn(excludedArray);
   tableNode->AddColumn(labelArray);
 
-
-  // Create plot chart
   vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
 
-  // Fitted values as line plot
   vtkNew<vtkDoubleArray> fitArray;
   fitArray->SetName(modelName.c_str());
-  for (int ivs=0; ivs<params.fitted.size(); ++ivs) {
-    if (params.keep[ivs]) {
-      double fv = params.fitted[ivs];
-      fitArray->InsertNextValue(fv);
-    } else {
-      double nextValue = std::numeric_limits<double>::quiet_NaN();
-      double x1 = std::numeric_limits<double>::quiet_NaN();
-      for (int next_ivs = ivs+1; next_ivs<params.fitted.size(); ++next_ivs) {
-        if (params.keep[next_ivs])
-        {
-            x1 = params.x[next_ivs];
-            nextValue = params.fitted[next_ivs];
-        }
-      }
-      if (std::isnan(nextValue)) {
-        fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
-        continue;
-      }
-      double prevValue = std::numeric_limits<double>::quiet_NaN();
-      double x0 = std::numeric_limits<double>::quiet_NaN();
-      for (int prev_ivs = ivs-1; prev_ivs>=0; --prev_ivs) {
-        if (params.keep[prev_ivs])
-        {
-            x0 = params.x[prev_ivs];
-            prevValue = params.fitted[prev_ivs];
-        }
-      }
-      if (std::isnan(prevValue)) {
-        fitArray->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
-        continue;
-      }
-
-      double x  = params.x[ivs];
-      // Proper linear interpolation
-      double value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
-      fitArray->InsertNextValue(value);
-    }
+  for (double value : plotFit)
+  {
+    fitArray->InsertNextValue(value);
   }
   tableNode->AddColumn(fitArray);
 
@@ -23368,11 +27637,10 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
 
-  // Scatter series for measured values
   this->ColNameToSegmentID["Data"] = selectedVOI;
   vtkSmartPointer<vtkMRMLPlotSeriesNode> scatterSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
   scene->AddNode(scatterSeries);
-  scatterSeries->SetName("Data");
+  scatterSeries->SetName("Included in regression");
   scatterSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
   scatterSeries->SetAndObserveTableNodeID(tableNode->GetID());
   scatterSeries->SetXColumnName("X");
@@ -23381,21 +27649,34 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   scatterSeries->SetUniqueColor();
   scatterSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
   chartNode->AddAndObservePlotSeriesNodeID(scatterSeries->GetID());
+
+  this->ColNameToSegmentID["Excluded from regression"] = selectedVOI;
+  vtkSmartPointer<vtkMRMLPlotSeriesNode> excludedSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
+  scene->AddNode(excludedSeries);
+  excludedSeries->SetName("Excluded from regression");
+  excludedSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
+  excludedSeries->SetAndObserveTableNodeID(tableNode->GetID());
+  excludedSeries->SetXColumnName("X");
+  excludedSeries->SetYColumnName("Excluded from regression");
+  excludedSeries->SetLabelColumnName("ToolTipData");
+  excludedSeries->SetUniqueColor();
+  excludedSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
+  chartNode->AddAndObservePlotSeriesNodeID(excludedSeries->GetID());
+
   chartNode->SetTitle((modelName + " - " + this->segmentTACsnames[selectedVOI]).c_str());
-  if (modelName=="Patlak") {
+  if (modelName == "Patlak" || modelName == "Relative Patlak") {
     chartNode->SetXAxisTitle("intCp/Cp");
     chartNode->SetYAxisTitle("Ct/Cp");
-  } else if (modelName=="Logan") {
+  } else if (modelName == "Logan") {
     chartNode->SetXAxisTitle("intCp/Ct");
     chartNode->SetYAxisTitle("intCt/Ct");
-  } else if (modelName=="RE") {
+  } else if (modelName == "RE" || modelName == "Relative RE") {
     chartNode->SetXAxisTitle("intCp/Cp");
     chartNode->SetYAxisTitle("intCt/Cp");
   } else {
     std::cerr << "Unknown model: " << modelName << std::endl;
   }
 
-  // Show plot view
   auto* layoutNode = vtkMRMLLayoutNode::SafeDownCast(scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
   if (layoutNode)
     layoutNode->SetViewArrangement(vtkMRMLLayoutNode::SlicerLayoutConventionalPlotView);
@@ -23404,20 +27685,6 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
       scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
   if (plotViewNode) {
     plotViewNode->SetPlotChartNodeID(chartNode->GetID());
-    // qMRMLPlotWidget* plotWidget = nullptr;
-    // if (qSlicerApplication::application())
-    // {
-    //     qSlicerLayoutManager* layoutManager =
-    //         qSlicerApplication::application()->layoutManager();
-    //     qMRMLPlotWidget* plotWidget = nullptr;
-    //     plotWidget = layoutManager->plotWidget(0);
-    //     qMRMLPlotView* plotView = plotWidget->plotView();
-    //     if (plotView)
-    //     {
-    //       QObject::connect(plotView, SIGNAL(dataSelected(vtkStringArray*, vtkCollection*)),
-    //                        this, SLOT(onSelectedPoint(vtkStringArray*, vtkCollection*)));
-    //     }
-    // }
   }
 }
 

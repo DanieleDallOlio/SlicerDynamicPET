@@ -174,51 +174,85 @@
             </item>
             <item>
              <widget class="QWidget" name="ImageSelectionContainer" native="true">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
               <layout class="QVBoxLayout" name="ImageSelectionLayout">
                <property name="leftMargin"><number>0</number></property>
                <property name="topMargin"><number>0</number></property>
                <property name="rightMargin"><number>0</number></property>
                <property name="bottomMargin"><number>0</number></property>
-               <property name="spacing"><number>2</number></property>
+               <property name="spacing"><number>6</number></property>
                <item>
                 <widget class="QWidget" name="ImagePatientSelectionWidget" native="true">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
                  <layout class="QFormLayout" name="ImagePatientSelectionLayout">
-                  <property name="verticalSpacing"><number>2</number></property>
-                  <item row="0" column="0"><widget class="QLabel" name="label1"><property name="text"><string>Patient:</string></property></widget></item>
+                  <property name="horizontalSpacing"><number>8</number></property>
+                  <property name="verticalSpacing"><number>10</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="label1"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>Patient:</string></property></widget></item>
                   <item row="0" column="1"><widget class="QComboBox" name="PatSelector"><property name="toolTip"><string>Choose Patient.</string></property></widget></item>
                  </layout>
                 </widget>
                </item>
                <item>
                 <widget class="QWidget" name="SingleAcquisitionSelectionWidget" native="true">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
                  <layout class="QFormLayout" name="SingleAcquisitionSelectionLayout">
-                  <property name="verticalSpacing"><number>2</number></property>
-                  <item row="0" column="0"><widget class="QLabel" name="label2"><property name="text"><string>Study:</string></property></widget></item>
+                  <property name="horizontalSpacing"><number>8</number></property>
+                  <property name="verticalSpacing"><number>10</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="label2"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>Study:</string></property></widget></item>
                   <item row="0" column="1"><widget class="QComboBox" name="StuSelector"><property name="toolTip"><string>Choose Study.</string></property></widget></item>
-                  <item row="1" column="0"><widget class="QLabel" name="label3"><property name="text"><string>CT:</string></property></widget></item>
+                  <item row="1" column="0"><widget class="QLabel" name="label3"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>CT:</string></property></widget></item>
                   <item row="1" column="1"><widget class="QComboBox" name="CTSelector"><property name="toolTip"><string>Choose CT.</string></property></widget></item>
-                  <item row="2" column="0"><widget class="QLabel" name="label4"><property name="text"><string>PET:</string></property></widget></item>
+                  <item row="2" column="0"><widget class="QLabel" name="label4"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>PET:</string></property></widget></item>
                   <item row="2" column="1"><widget class="QComboBox" name="PETSelector"><property name="toolTip"><string>Choose PET.</string></property></widget></item>
                   <item row="3" column="1"><widget class="QLabel" name="AcquisitionTimingStatusLabel"><property name="visible"><bool>false</bool></property><property name="sizePolicy"><sizepolicy hsizetype="Preferred" vsizetype="Fixed"><horstretch>0</horstretch><verstretch>0</verstretch></sizepolicy></property><property name="toolTip"><string>Timing interpretation for the selected PET. For a delayed DICOM study, the displayed delay is injection-to-START-of-first-frame, not midpoint/end. Early-time means acquisition begins near t=0.</string></property><property name="text"><string>Acquisition timing: —</string></property></widget></item>
-                  <item row="4" column="0"><widget class="QLabel" name="labseg"><property name="text"><string>Segmentation:</string></property></widget></item>
+                  <item row="4" column="0"><widget class="QLabel" name="labseg"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>Segmentation:</string></property></widget></item>
                   <item row="4" column="1"><widget class="QComboBox" name="SegSelector"><property name="toolTip"><string>Choose Segmentation.</string></property></widget></item>
                  </layout>
                 </widget>
                </item>
                <item>
                 <widget class="QWidget" name="MultiTimepointMainSelectionWidget" native="true">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
                  <layout class="QFormLayout" name="MultiTimepointMainSelectionLayout">
-                  <property name="verticalSpacing"><number>2</number></property>
-                  <item row="0" column="0"><widget class="QLabel" name="MultiTimepointSelectionLabel"><property name="text"><string>Acquisitions:</string></property></widget></item>
+                  <property name="horizontalSpacing"><number>8</number></property>
+                  <property name="verticalSpacing"><number>10</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="MultiTimepointSelectionLabel"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>Acquisitions:</string></property></widget></item>
                   <item row="0" column="1"><widget class="QWidget" name="MultiTimepointSelectionRow" native="true"><layout class="QHBoxLayout" name="MultiTimepointSelectionRowLayout"><property name="leftMargin"><number>0</number></property><property name="topMargin"><number>0</number></property><property name="rightMargin"><number>0</number></property><property name="bottomMargin"><number>0</number></property><property name="spacing"><number>4</number></property><item><widget class="QPushButton" name="MultiTimepointSelectionButton"><property name="toolTip"><string>Choose PET acquisitions across all studies for the selected patient and assign one segmentation to each selected PET.</string></property><property name="text"><string>Select acquisitions...</string></property></widget></item><item><widget class="QLabel" name="MultiTimepointSelectionSummaryLabel"><property name="text"><string>None selected</string></property><property name="wordWrap"><bool>true</bool></property></widget></item></layout></widget></item>
                  </layout>
                 </widget>
                </item>
                <item>
                 <widget class="QWidget" name="SegmentSelectionWidget" native="true">
+                 <property name="sizePolicy">
+                  <sizepolicy hsizetype="Preferred" vsizetype="Maximum">
+                   <horstretch>0</horstretch>
+                   <verstretch>0</verstretch>
+                  </sizepolicy>
+                 </property>
                  <layout class="QFormLayout" name="SegmentSelectionLayout">
-                  <property name="verticalSpacing"><number>2</number></property>
-                  <item row="0" column="0"><widget class="QLabel" name="labsegments"><property name="text"><string>Segments:</string></property></widget></item>
+                  <property name="horizontalSpacing"><number>8</number></property>
+                  <property name="verticalSpacing"><number>8</number></property>
+                  <item row="0" column="0"><widget class="QLabel" name="labsegments"><property name="minimumSize"><size><width>95</width><height>0</height></size></property><property name="text"><string>Segments:</string></property></widget></item>
                   <item row="0" column="1"><widget class="QPushButton" name="segmentSelectAll"><property name="text"><string>Select/Deselect All</string></property></widget></item>
                   <item row="1" column="1"><widget class="QScrollArea" name="SegmentCheckScrollArea"><property name="widgetResizable"><bool>true</bool></property><property name="maximumHeight"><number>120</number></property><widget class="QWidget" name="SegmentCheckContents"><property name="styleSheet"><string notr="true">background-color: white;</string></property><layout class="QVBoxLayout" name="segmentCheckLayout"/></widget></widget></item>
                  </layout>

@@ -1601,6 +1601,10 @@ public:
   QSlider* segmentationFrameSlider{nullptr};
   QLineEdit* segmentationFrameInfoEdit{nullptr};
   bool updatingSegmentationFrameSlider{false};
+  // A Single <-> Multi transition represents a new displayed temporal context.
+  // Keep the Plot/Distribution frame selector pinned to the first observation
+  // the next time TAC-backed distribution data become available.
+  bool resetDistributionFrameToFirstPending{false};
   bool syncingVOICheckSelection{false};
 
   std::vector<vtkSmartPointer<SegmentationChangeWatcher>> multiSegWatchers;
@@ -3845,6 +3849,42 @@ setMultiTimepointMode(bool enabled)
     this->suvbwFactorValidated = false;
     this->resetAcquisitionTimingDisplay();
 
+    // Single and Multi are distinct temporal display contexts. Do not carry
+    // the Plot/Distribution or Advanced Segmentation observation selection
+    // across the mode boundary. Distribution may not have TAC data yet, so
+    // remember that its first usable refresh must also start at observation 1.
+    q->PlotSelectedFrame = -1;
+    q->PlotSelectedVOI.clear();
+    this->resetDistributionFrameToFirstPending = true;
+
+    if (this->distributionFrameSlider)
+    {
+        QSignalBlocker blocker(this->distributionFrameSlider);
+        this->distributionFrameSlider->setRange(1, 1);
+        this->distributionFrameSlider->setValue(1);
+        this->distributionFrameSlider->setEnabled(false);
+    }
+    if (this->distributionFrameInfoEdit)
+    {
+        this->distributionFrameInfoEdit->clear();
+    }
+
+    if (this->segmentationFrameSlider)
+    {
+        this->updatingSegmentationFrameSlider = true;
+        {
+            QSignalBlocker blocker(this->segmentationFrameSlider);
+            this->segmentationFrameSlider->setRange(1, 1);
+            this->segmentationFrameSlider->setValue(1);
+            this->segmentationFrameSlider->setEnabled(false);
+        }
+        this->updatingSegmentationFrameSlider = false;
+    }
+    if (this->segmentationFrameInfoEdit)
+    {
+        this->segmentationFrameInfoEdit->clear();
+    }
+
     for (QSlider* slider : {this->timeOffsetSlider, this->timeEndSlider, this->TCMEndSlider,
                             this->timeOffsetSliderImg, this->timeEndSliderImg, this->TCMEndSliderImg})
     {
@@ -3948,6 +3988,15 @@ setMultiTimepointMode(bool enabled)
                     vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
             {
                 q->onPETChanged(petIndex);
+
+                // The Segmentation frame slider is a display/navigation
+                // control. Reset the restored Single PET browser as well, so
+                // frame 1 in the slider and the actually displayed PET frame
+                // cannot disagree after leaving Multi.
+                if (q->sequenceBrowserPETNode && q->numberOfTimepoints > 0)
+                {
+                    q->sequenceBrowserPETNode->SetSelectedItemNumber(0);
+                }
             }
 
             const int segIndex = this->SegSelector ? this->SegSelector->currentIndex() : -1;
@@ -6683,7 +6732,14 @@ updateDistributionFrameUI(bool resetRange)
     const bool uninitializedRange =
         count > 1 && this->distributionFrameSlider->maximum() <= 1;
     int preferred = this->distributionFrameSlider->value();
-    if (resetRange || uninitializedRange || preferred < 1 || preferred > count)
+    if (this->resetDistributionFrameToFirstPending)
+    {
+        // A mode switch must always start Plot/Distribution navigation from
+        // the first observation, even if the previous mode had a selected
+        // plot point or the old slider range has not yet been rebuilt.
+        preferred = 1;
+    }
+    else if (resetRange || uninitializedRange || preferred < 1 || preferred > count)
     {
         preferred = count;
         if (!this->multiTimepointMode && q->sequenceBrowserPETNode)
@@ -6706,6 +6762,7 @@ updateDistributionFrameUI(bool resetRange)
         this->distributionFrameSlider->setMaximum(count);
         this->distributionFrameSlider->setValue(std::clamp(preferred, 1, count));
     }
+    this->resetDistributionFrameToFirstPending = false;
     this->updateDistributionFrameInfo();
 }
 
@@ -9975,8 +10032,8 @@ def DPE_export_parametric_map(
         }
 )PYTHON");
 
-  // Small Python bridge for dynamic RTSTRUCT import/export.  The DICOM work
-  // remains in the scripted dRTImporter/dRTExporter helpers; C++ only passes
+  // Small Python bridge for RTSTRUCT import/export. The DICOM work remains in
+  // the scripted dRTImporter/dRTExporter helpers; C++ only passes
   // MRML node IDs and displays the result.
   mainContext.evalScript(R"PYTHON(
 import importlib
@@ -9987,38 +10044,45 @@ import slicer
 
 def _DPE_load_dynamic_rt_module(module_name, file_name):
     errors = []
-    try:
-        return importlib.import_module(module_name)
-    except Exception as exc:
-        errors.append(str(exc))
+    # Support both historical flat installs and the current dRTImporterLib
+    # package layout used by dRTImporter.py.
+    for import_name in (module_name, 'dRTImporterLib.' + module_name):
+        try:
+            return importlib.import_module(import_name)
+        except Exception as exc:
+            errors.append(f'{import_name}: {exc}')
 
     candidates = []
 
-    # dRTExporter.py is installed next to dRTImporterPlugin.py.  Resolve the
-    # helper from that already-importable plugin first; this is more reliable
-    # than depending on the scripted module widget having been instantiated.
-    try:
-        importer_plugin = importlib.import_module('dRTImporterPlugin')
-        importer_plugin_path = getattr(importer_plugin, '__file__', '')
-        if importer_plugin_path:
-            candidates.append(
-                os.path.join(os.path.dirname(importer_plugin_path), file_name))
-    except Exception as exc:
-        errors.append(str(exc))
+    # dRTExporter.py is installed next to dRTImporterPlugin.py. Resolve the
+    # helper from either supported plugin import layout first.
+    for plugin_name in ('dRTImporterPlugin', 'dRTImporterLib.dRTImporterPlugin'):
+        try:
+            importer_plugin = importlib.import_module(plugin_name)
+            importer_plugin_path = getattr(importer_plugin, '__file__', '')
+            if importer_plugin_path:
+                candidates.append(
+                    os.path.join(os.path.dirname(importer_plugin_path), file_name))
+        except Exception as exc:
+            errors.append(f'{plugin_name}: {exc}')
 
     # Fallback for installations where the scripted module is known to Slicer
     # but its Python directory is not currently on sys.path.
     try:
         module_path = slicer.util.modulePath('dRTImporter')
         if module_path:
-            candidates.append(os.path.join(os.path.dirname(module_path), file_name))
+            module_dir = os.path.dirname(module_path)
+            candidates.append(os.path.join(module_dir, file_name))
+            candidates.append(os.path.join(module_dir, 'dRTImporterLib', file_name))
     except Exception as exc:
         errors.append(str(exc))
 
     module_object = getattr(slicer.modules, 'drtimporter', None)
     module_path = getattr(module_object, 'path', '') if module_object else ''
     if module_path:
-        candidates.append(os.path.join(os.path.dirname(module_path), file_name))
+        module_dir = os.path.dirname(module_path)
+        candidates.append(os.path.join(module_dir, file_name))
+        candidates.append(os.path.join(module_dir, 'dRTImporterLib', file_name))
 
     seen = set()
     for candidate in candidates:
@@ -10053,6 +10117,19 @@ def DPE_export_dynamic_rtstruct(segmentation_sequence_node_id, pet_sequence_node
         path = module.export_dynamic_rtstruct_from_node_ids(
             segmentation_sequence_node_id,
             pet_sequence_node_id,
+            reference_volume_node_id,
+            output_path,
+            overwrite=bool(overwrite),
+            show_progress=True)
+        return {'ok': True, 'path': path}
+    except Exception as exc:
+        return {'ok': False, 'error': str(exc) + '\n\n' + traceback.format_exc()}
+
+def DPE_export_static_rtstruct(segmentation_node_id, reference_volume_node_id, output_path, overwrite=False):
+    try:
+        module = _DPE_load_dynamic_rt_module('dRTExporter', 'dRTExporter.py')
+        path = module.export_static_rtstruct_from_node_ids(
+            segmentation_node_id,
             reference_volume_node_id,
             output_path,
             overwrite=bool(overwrite),
@@ -12197,11 +12274,21 @@ updateKineticModelAvailability()
                 if (tcmLayout)
                 {
                     enabled = inputValid && fullInput && result.hasWholeBlood;
-                    availability = enabled
-                        ? QObject::tr("Complete plasma and whole-blood input from injection is available. Delayed tissue acquisition is permitted, although late-only tissue data may reduce microparameter identifiability.")
-                        : (!result.hasWholeBlood
-                           ? QObject::tr("Compartment modeling requires total whole blood in addition to plasma. Provide/derive a compatible whole-blood input.")
-                           : QObject::tr("Compartment modeling requires a complete input function from injection. Use a full external IF or a PBIF that reconstructs the missing early input."));
+
+                    if (enabled && delayedTissue)
+                    {
+                        availability = result.inputCoverageReconstructedByPBIF
+                            ? QObject::tr("Delayed tissue acquisition: PBIF reconstructs plasma/whole-blood input from injection, so compartment modeling is available. A warning is shown before fitting because the unobserved early tissue response can weaken microparameter identifiability.")
+                            : QObject::tr("Delayed tissue acquisition: complete plasma/whole-blood input from injection is available, so compartment modeling is available. A warning is shown before fitting because the unobserved early tissue response can weaken microparameter identifiability.");
+                    }
+                    else
+                    {
+                        availability = enabled
+                            ? QObject::tr("Complete plasma and whole-blood input from injection is available.")
+                            : (!result.hasWholeBlood
+                               ? QObject::tr("Compartment modeling requires total whole blood in addition to plasma. Provide/derive a compatible whole-blood input.")
+                               : QObject::tr("Compartment modeling requires a complete input function from injection. Use a full external IF or a PBIF that reconstructs the missing early input."));
+                    }
                 }
                 else if (name == "Patlak")
                 {
@@ -12864,19 +12951,36 @@ updateSegmentationAdvancedUI()
         && q->segSequenceNode->GetNumberOfDataNodes() > 0
         && q->sequencePETNode
         && q->sequenceBrowserPETNode;
+    const bool hasPreparedMultiExport =
+        imageMode
+        && this->multiTimepointMode
+        && this->multiTimepointPreparationValid
+        && !this->preparedMultiTimepointAcquisitions.empty();
+    const bool hasRTStructExport =
+        hasDynamicSegmentation || hasPreparedMultiExport;
 
     this->SegmentationAdvancedCollapsibleButton->setVisible(imageMode);
     const bool editableSegmentationAvailable =
         singleHasSegmentation || multiHasPreparedSegmentation;
     this->PlotLiveSegEdit->setEnabled(editableSegmentationAvailable);
     this->OpenSegmentEditorButton->setEnabled(editableSegmentationAvailable);
-    this->DynamicRTStructDirectory->setEnabled(hasDynamicSegmentation);
-    this->DynamicRTStructFilename->setEnabled(hasDynamicSegmentation);
+    this->DynamicRTStructDirectory->setEnabled(hasRTStructExport);
+    this->DynamicRTStructFilename->setEnabled(hasRTStructExport);
+    this->SaveDynamicRTStructButton->setText(
+        hasPreparedMultiExport
+            ? QObject::tr("Save Multi RTSTRUCTs")
+            : QObject::tr("Save Dynamic RTSTRUCT"));
+    this->SaveDynamicRTStructButton->setToolTip(
+        hasPreparedMultiExport
+            ? QObject::tr(
+                "Save one RT Structure Set per prepared acquisition. Dynamic PET acquisitions use the temporal RTSTRUCT convention; static PET acquisitions use a conventional static RTSTRUCT. The filename field is used as the batch base name.")
+            : QObject::tr(
+                "Save the selected dynamic segmentation sequence as one temporal RT Structure Set."));
     const bool hasOutputPath =
         !this->DynamicRTStructDirectory->currentPath().trimmed().isEmpty()
         && !this->DynamicRTStructFilename->text().trimmed().isEmpty();
     this->SaveDynamicRTStructButton->setEnabled(
-        hasDynamicSegmentation && hasOutputPath);
+        hasRTStructExport && hasOutputPath);
 
     if (this->segmentationFrameLabel)
     {
@@ -17470,18 +17574,80 @@ updateMTGAOptimizationUI()
             !it->second.empty();
       };
 
-  const bool hasPatlak =
-      hasResult("Patlak");
+  InputFunctionResult currentInput;
+  QString ignoredInputError;
+  const bool inputValid =
+      this->buildCurrentInputFunction(
+          currentInput,
+          false,
+          &ignoredInputError);
+
+  // Delayed tissue acquisition remains a relative-MTGA comparison even when
+  // PBIF reconstructs a complete input from injection: PBIF can restore the
+  // missing INPUT history, but it cannot restore the unobserved early TISSUE
+  // response. The same relative pair is also used for any other partial-input
+  // configuration.
+  const bool relativeMode =
+      this->acquisitionTiming.delayedAcquisition ||
+      (inputValid &&
+       (!currentInput.inputCoversFromInjection ||
+        currentInput.supportFrameStartIndex > 0));
+
+  const std::string primaryModel =
+      relativeMode ? "Relative Patlak" : "Patlak";
+
+  const bool hasPrimary =
+      hasResult(primaryModel);
 
   const bool hasLogan =
-      hasResult("Logan");
+      !relativeMode && hasResult("Logan");
 
   const bool hasRE =
-      hasResult("RE");
+      !relativeMode && hasResult("RE");
+
+  const bool hasRelativeRE =
+      relativeMode && hasResult("Relative RE");
 
   const bool available =
-      hasPatlak &&
-      (hasLogan || hasRE);
+      hasPrimary &&
+      (relativeMode ? hasRelativeRE : (hasLogan || hasRE));
+
+  if (relativeMode)
+  {
+    this->MTGAOptimizationInfoLabelImg->setText(
+        QObject::tr(
+            "Compare Relative Patlak with Relative RE voxel by voxel. "
+            "For delayed/partial acquisitions the red channel contains relative Ki' "
+            "and the blue channel contains relative DV_T'."));
+    this->MTGAReversibleModelLabelImg->setText(
+        QObject::tr("Relative reversible model"));
+    this->MTGAChannelInfoLabelImg->setText(
+        QObject::tr(
+            "Ki' and DV_T' are relative quantitative maps for delayed/partial acquisitions. "
+            "Their initial display window/level is determined automatically by Slicer. "
+            "Adjust the display ranges in the Volumes module if desired, then refresh the RGB visualization."));
+    this->GenerateMTGAOptimizedImgButton->setText(
+        QObject::tr("Generate optimized Ki'/DV_T' + RGB"));
+    this->RefreshMTGARGBButtonImg->setText(
+        QObject::tr("Refresh RGB from Ki'/DV_T' display ranges"));
+  }
+  else
+  {
+    this->MTGAOptimizationInfoLabelImg->setText(
+        QObject::tr(
+            "Compare Patlak with a reversible model voxel by voxel. The selected "
+            "Patlak Ki contributes to the red channel and the selected reversible DV to the blue channel."));
+    this->MTGAReversibleModelLabelImg->setText(
+        QObject::tr("Reversible model"));
+    this->MTGAChannelInfoLabelImg->setText(
+        QObject::tr(
+            "Ki and DV are quantitative scalar maps. Their initial display window/level is determined automatically by Slicer. "
+            "Adjust the display ranges in the Volumes module if desired, then refresh the RGB visualization to apply the current Ki and DV display ranges."));
+    this->GenerateMTGAOptimizedImgButton->setText(
+        QObject::tr("Generate optimized Ki/DV + RGB"));
+    this->RefreshMTGARGBButtonImg->setText(
+        QObject::tr("Refresh RGB from Ki/DV display ranges"));
+  }
 
   this->MTGAOptimizationCollapsibleButtonImg
       ->setEnabled(available);
@@ -17511,20 +17677,33 @@ updateMTGAOptimizationUI()
   this->MTGAReversibleModelComboImg
       ->clear();
 
-  if (hasLogan)
+  if (relativeMode)
   {
-    this->MTGAReversibleModelComboImg
-        ->addItem(
-            "Logan",
-            "Logan");
+    if (hasRelativeRE)
+    {
+      this->MTGAReversibleModelComboImg
+          ->addItem(
+              "Relative RE",
+              "Relative RE");
+    }
   }
-
-  if (hasRE)
+  else
   {
-    this->MTGAReversibleModelComboImg
-        ->addItem(
-            "RE",
-            "RE");
+    if (hasLogan)
+    {
+      this->MTGAReversibleModelComboImg
+          ->addItem(
+              "Logan",
+              "Logan");
+    }
+
+    if (hasRE)
+    {
+      this->MTGAReversibleModelComboImg
+          ->addItem(
+              "RE",
+              "RE");
+    }
   }
 
   int restoredIndex =
@@ -17969,9 +18148,18 @@ refreshMTGAOptimizedRGB()
         QString::fromUtf8(
             kiNode->GetName());
 
-    rgbName.replace(
-        "MTGA Optimized Ki",
-        "MTGA Selection RGB");
+    if (rgbName.startsWith("MTGA Optimized KiPrime"))
+    {
+      rgbName.replace(
+          "MTGA Optimized KiPrime",
+          "MTGA Relative Selection RGB");
+    }
+    else
+    {
+      rgbName.replace(
+          "MTGA Optimized Ki",
+          "MTGA Selection RGB");
+    }
 
     vtkMRMLNode* createdNode =
         scene->AddNewNodeByClass(
@@ -18126,20 +18314,9 @@ generateMTGAOptimizedResult()
 
 
   // ------------------------------------------------------------------------
-  // Required fitted models
+  // Required fitted models. Delayed/partial acquisition uses the relative
+  // graphical pair; early complete acquisition keeps the standard pair.
   // ------------------------------------------------------------------------
-
-  auto patlakIt =
-      q->MTGAImgOutcomes.find(
-          "Patlak");
-
-  if (patlakIt ==
-          q->MTGAImgOutcomes.end() ||
-      patlakIt->second.empty())
-  {
-    return;
-  }
-
 
   QString reversibleQString =
       this->MTGAReversibleModelComboImg
@@ -18156,6 +18333,25 @@ generateMTGAOptimizedResult()
   const std::string reversibleModel =
       reversibleQString.toStdString();
 
+  const bool relativeMode =
+      reversibleModel == "Relative RE";
+
+  const std::string primaryModel =
+      relativeMode
+      ? "Relative Patlak"
+      : "Patlak";
+
+  auto primaryIt =
+      q->MTGAImgOutcomes.find(
+          primaryModel);
+
+  if (primaryIt ==
+          q->MTGAImgOutcomes.end() ||
+      primaryIt->second.empty())
+  {
+    return;
+  }
+
 
   auto reversibleIt =
       q->MTGAImgOutcomes.find(
@@ -18169,16 +18365,16 @@ generateMTGAOptimizedResult()
   }
 
 
-  const auto& patlak =
-      patlakIt->second;
+  const auto& primary =
+      primaryIt->second;
 
   const auto& reversible =
       reversibleIt->second;
 
 
-  if (patlak.size() !=
+  if (primary.size() !=
           reversible.size() ||
-      patlak.size() !=
+      primary.size() !=
           q->PET_flatten_values.size())
   {
     QMessageBox::warning(
@@ -18193,7 +18389,7 @@ generateMTGAOptimizedResult()
 
   std::cout
       << "[MTGA OPT] Cached models retrieved. "
-      << "Patlak voxels=" << patlak.size()
+      << primaryModel << " voxels=" << primary.size()
       << ", " << reversibleModel
       << " voxels=" << reversible.size()
       << std::endl;
@@ -18214,7 +18410,18 @@ generateMTGAOptimizedResult()
       this->MTGAVuongAlphaSpinBoxImg
           ->value();
 
+  const QString primaryQString =
+      QString::fromStdString(primaryModel);
+
+  const QString kiField =
+      relativeMode ? "KiPrime" : "Ki";
+
+  const QString dvField =
+      relativeMode ? "DVPrime" : "DV";
+
   QString optimizationSuffix =
+      primaryQString +
+      " vs " +
       reversibleQString +
       " - " +
       criterion;
@@ -18237,7 +18444,7 @@ generateMTGAOptimizedResult()
   // ------------------------------------------------------------------------
 
   const size_t numberOfVoxels =
-      patlak.size();
+      primary.size();
 
   this->MTGAOptimizedSelection.assign(
       numberOfVoxels,
@@ -18270,7 +18477,7 @@ generateMTGAOptimizedResult()
       };
 
 
-  size_t patlakSelectedCount = 0;
+  size_t primarySelectedCount = 0;
   size_t reversibleSelectedCount = 0;
   size_t nonSignificantCount = 0;
   size_t invalidCount = 0;
@@ -18306,7 +18513,7 @@ generateMTGAOptimizedResult()
             voxelIndex);
 
     const MTGAParameters& p =
-        patlak[v];
+        primary[v];
 
     const MTGAParameters& r =
         reversible[v];
@@ -18438,7 +18645,7 @@ generateMTGAOptimizedResult()
       this->MTGAOptimizedKiValues[v] =
           p.Ki;
 
-      ++patlakSelectedCount;
+      ++primarySelectedCount;
     }
     else
     {
@@ -18461,7 +18668,7 @@ generateMTGAOptimizedResult()
 
 
   const size_t selectedCount =
-      patlakSelectedCount +
+      primarySelectedCount +
       reversibleSelectedCount;
 
   if (selectedCount == 0)
@@ -18477,7 +18684,7 @@ generateMTGAOptimizedResult()
 
   std::cout
       << "[MTGA OPT] Selection pass COMPLETE. "
-      << "Patlak=" << patlakSelectedCount
+      << primaryModel << "=" << primarySelectedCount
       << ", reversible=" << reversibleSelectedCount
       << ", non-significant=" << nonSignificantCount
       << ", invalid=" << invalidCount
@@ -18489,7 +18696,8 @@ generateMTGAOptimizedResult()
       << "| reversible ="
       << reversibleQString
       << "| Vuong =" << useVuong
-      << "| Patlak =" << patlakSelectedCount
+      << "| primary =" << primaryQString
+      << "=" << primarySelectedCount
       << "| reversible ="
       << reversibleSelectedCount
       << "| non-significant ="
@@ -18525,7 +18733,7 @@ generateMTGAOptimizedResult()
     vtkMRMLScalarVolumeNode* kiNode =
         this->createMTGAOptimizedScalarVolume(
             this->MTGAOptimizedKiValues,
-            "MTGA Optimized Ki - " + optimizationSuffix,
+            "MTGA Optimized " + kiField + " - " + optimizationSuffix,
             refPETNode,
             shNode,
             q->petID);
@@ -18542,7 +18750,7 @@ generateMTGAOptimizedResult()
     vtkMRMLScalarVolumeNode* dvNode =
         this->createMTGAOptimizedScalarVolume(
             this->MTGAOptimizedDVValues,
-            "MTGA Optimized DV - " + optimizationSuffix,
+            "MTGA Optimized " + dvField + " - " + optimizationSuffix,
             refPETNode,
             shNode,
             q->petID);
@@ -18574,10 +18782,20 @@ generateMTGAOptimizedResult()
           }
 
           node->SetAttribute(
+              "SlicerDynamicPET.MTGA.PrimaryModel",
+              primaryQString
+                  .toUtf8()
+                  .constData());
+
+          node->SetAttribute(
               "SlicerDynamicPET.MTGA.ReversibleModel",
               reversibleQString
                   .toUtf8()
                   .constData());
+
+          node->SetAttribute(
+              "SlicerDynamicPET.MTGA.RelativeMode",
+              relativeMode ? "1" : "0");
 
           node->SetAttribute(
               "SlicerDynamicPET.MTGA.SelectionCriterion",
@@ -18687,7 +18905,7 @@ generateMTGAOptimizedResult()
 
       q->ProgressBar->setFormat(
           "Saving DICOM PMAP: "
-          "MTGA Optimized - Ki...");
+          "MTGA Optimized - " + kiField + "...");
 
       q->ProgressBar->setVisible(true);
 
@@ -18698,7 +18916,7 @@ generateMTGAOptimizedResult()
           this->MTGAOptimizedKiValues,
           "MTGA",
           "MTGAOptimized",
-          "Ki",
+          kiField.toStdString(),
           outputDirectory,
           7160,
           kiUnitCode,
@@ -18710,11 +18928,12 @@ generateMTGAOptimizedResult()
           q,
           QObject::tr("DICOM PMAP export"),
           QObject::tr(
-              "MTGA Optimized - Ki was not exported "
-              "because Framing Norm is %1 s.\n\n"
+              "MTGA Optimized - %1 was not exported "
+              "because Framing Norm is %2 s.\n\n"
               "Its physical unit cannot be represented "
               "honestly as seconds or minutes without "
               "rescaling the numerical values.")
+              .arg(kiField)
               .arg(framingNorm));
     }
 
@@ -18724,7 +18943,7 @@ generateMTGAOptimizedResult()
 
     q->ProgressBar->setFormat(
         "Saving DICOM PMAP: "
-        "MTGA Optimized - DV...");
+        "MTGA Optimized - " + dvField + "...");
 
     q->ProgressBar->setVisible(true);
 
@@ -18735,7 +18954,7 @@ generateMTGAOptimizedResult()
         this->MTGAOptimizedDVValues,
         "MTGA",
         "MTGAOptimized",
-        "DV",
+        dvField.toStdString(),
         outputDirectory,
         7161,
         "1",
@@ -22779,6 +22998,217 @@ void qSlicerDynamicPETModuleWidget::onSaveDynamicRTStruct()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  QString directory = d->DynamicRTStructDirectory->currentPath().trimmed();
+  QString fileName = d->DynamicRTStructFilename->text().trimmed();
+  if (directory.isEmpty() || fileName.isEmpty())
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save RTSTRUCT"),
+        tr("Choose an output directory and filename."));
+    return;
+  }
+
+  QDir outputDirectory(directory);
+  if (!outputDirectory.exists() && !QDir().mkpath(directory))
+  {
+    QMessageBox::warning(
+        this,
+        tr("Save RTSTRUCT"),
+        tr("The output directory could not be created:\n%1").arg(directory));
+    return;
+  }
+
+  // Multi export deliberately follows prepared acquisition provenance, not the
+  // merged observation timeline. Therefore N prepared acquisitions produce N
+  // RTSTRUCT files. Dynamic acquisitions retain the temporal dRT convention;
+  // static acquisitions are exported as ordinary non-temporal RTSTRUCTs.
+  if (d->isMultiTimepointMode())
+  {
+    if (!d->multiTimepointPreparationValid
+        || d->preparedMultiTimepointAcquisitions.empty())
+    {
+      QMessageBox::warning(
+          this,
+          tr("Save Multi RTSTRUCTs"),
+          tr("Prepare the selected Multi-timepoint acquisitions before exporting segmentations."));
+      d->updateSegmentationAdvancedUI();
+      return;
+    }
+
+    QString baseName = fileName;
+    if (baseName.endsWith(QStringLiteral(".dcm"), Qt::CaseInsensitive))
+    {
+      baseName.chop(4);
+    }
+    baseName = baseName.trimmed();
+    if (baseName.isEmpty())
+    {
+      baseName = QStringLiteral("RTSTRUCT");
+    }
+
+    struct PendingRTStructExport
+    {
+      int acquisitionIndex{-1};
+      bool dynamic{false};
+      QString acquisitionName;
+      QString segmentationNodeID;
+      QString segmentationSequenceNodeID;
+      QString petNodeID;
+      QString petSequenceNodeID;
+      QString outputPath;
+    };
+
+    std::vector<PendingRTStructExport> exports;
+    exports.reserve(d->preparedMultiTimepointAcquisitions.size());
+    QStringList existingPaths;
+
+    for (size_t acquisitionIndex = 0;
+         acquisitionIndex < d->preparedMultiTimepointAcquisitions.size();
+         ++acquisitionIndex)
+    {
+      const PreparedMultiTimepointAcquisition& acquisition =
+          d->preparedMultiTimepointAcquisitions[acquisitionIndex];
+
+      PendingRTStructExport pending;
+      pending.acquisitionIndex = static_cast<int>(acquisitionIndex);
+      pending.dynamic = acquisition.dynamic;
+      pending.acquisitionName = acquisition.petName;
+      pending.segmentationNodeID = acquisition.segmentationNodeID;
+      pending.segmentationSequenceNodeID = acquisition.segmentationSequenceNodeID;
+      pending.petNodeID = acquisition.petNodeID;
+      pending.petSequenceNodeID = acquisition.petSequenceNodeID;
+
+      const QString acquisitionTag = QStringLiteral("Acq%1_%2")
+          .arg(static_cast<int>(acquisitionIndex) + 1, 2, 10, QLatin1Char('0'))
+          .arg(acquisition.dynamic
+              ? QStringLiteral("Dynamic")
+              : QStringLiteral("Static"));
+      pending.outputPath = outputDirectory.filePath(
+          baseName + QStringLiteral("_") + acquisitionTag + QStringLiteral(".dcm"));
+
+      vtkMRMLScene* scene = this->mrmlScene();
+      vtkMRMLNode* petNode = scene
+          ? scene->GetNodeByID(pending.petNodeID.toUtf8().constData())
+          : nullptr;
+      vtkMRMLNode* segmentationNode = scene
+          ? scene->GetNodeByID(pending.segmentationNodeID.toUtf8().constData())
+          : nullptr;
+      if (!petNode || !segmentationNode)
+      {
+        QMessageBox::warning(
+            this,
+            tr("Save Multi RTSTRUCTs"),
+            tr("Prepared acquisition %1 ('%2') lost its PET or segmentation node. Re-prepare Multi-timepoint acquisitions before exporting.")
+                .arg(static_cast<int>(acquisitionIndex) + 1)
+                .arg(acquisition.petName));
+        return;
+      }
+      if (pending.dynamic)
+      {
+        vtkMRMLNode* petSequence = scene->GetNodeByID(
+            pending.petSequenceNodeID.toUtf8().constData());
+        vtkMRMLNode* segmentationSequence = scene->GetNodeByID(
+            pending.segmentationSequenceNodeID.toUtf8().constData());
+        if (!petSequence || !segmentationSequence)
+        {
+          QMessageBox::warning(
+              this,
+              tr("Save Multi RTSTRUCTs"),
+              tr("Prepared dynamic acquisition %1 ('%2') lost its PET or segmentation sequence. Re-prepare Multi-timepoint acquisitions before exporting.")
+                  .arg(static_cast<int>(acquisitionIndex) + 1)
+                  .arg(acquisition.petName));
+          return;
+        }
+      }
+
+      if (QFileInfo::exists(pending.outputPath))
+      {
+        existingPaths << pending.outputPath;
+      }
+      exports.push_back(std::move(pending));
+    }
+
+    if (!existingPaths.isEmpty())
+    {
+      QString existingText = existingPaths.mid(0, 6).join(QStringLiteral("\n"));
+      if (existingPaths.size() > 6)
+      {
+        existingText += tr("\n... and %1 more file(s)")
+            .arg(existingPaths.size() - 6);
+      }
+      const QMessageBox::StandardButton answer = QMessageBox::question(
+          this,
+          tr("Save Multi RTSTRUCTs"),
+          tr("The following batch output file(s) already exist:\n%1\n\nReplace the existing files and continue?")
+              .arg(existingText),
+          QMessageBox::Yes | QMessageBox::No,
+          QMessageBox::No);
+      if (answer != QMessageBox::Yes)
+      {
+        return;
+      }
+    }
+
+    PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
+    QStringList savedPaths;
+    for (const PendingRTStructExport& pending : exports)
+    {
+      QVariant resultVariant;
+      if (pending.dynamic)
+      {
+        resultVariant = mainContext.call(
+            "DPE_export_dynamic_rtstruct",
+            QVariantList{
+                pending.segmentationSequenceNodeID,
+                pending.petSequenceNodeID,
+                pending.petNodeID,
+                pending.outputPath,
+                true});
+      }
+      else
+      {
+        resultVariant = mainContext.call(
+            "DPE_export_static_rtstruct",
+            QVariantList{
+                pending.segmentationNodeID,
+                pending.petNodeID,
+                pending.outputPath,
+                true});
+      }
+
+      const QVariantMap result = resultVariant.toMap();
+      if (!result.value("ok").toBool())
+      {
+        QString partialText;
+        if (!savedPaths.isEmpty())
+        {
+          partialText = tr("\n\nAlready saved before the failure:\n%1")
+              .arg(savedPaths.join(QStringLiteral("\n")));
+        }
+        QMessageBox::warning(
+            this,
+            tr("Save Multi RTSTRUCTs"),
+            tr("RTSTRUCT export failed for acquisition %1 ('%2').\n\n%3%4")
+                .arg(pending.acquisitionIndex + 1)
+                .arg(pending.acquisitionName)
+                .arg(result.value("error").toString())
+                .arg(partialText));
+        return;
+      }
+      savedPaths << result.value("path").toString();
+    }
+
+    d->propagateOutputDirectory(directory);
+    QMessageBox::information(
+        this,
+        tr("Save Multi RTSTRUCTs"),
+        tr("Saved %1 acquisition-specific RTSTRUCT file(s):\n\n%2")
+            .arg(savedPaths.size())
+            .arg(savedPaths.join(QStringLiteral("\n"))));
+    return;
+  }
+
   if (!this->segSequenceNode
       || !this->sequencePETNode
       || !this->sequenceBrowserPETNode)
@@ -22791,30 +23221,10 @@ void qSlicerDynamicPETModuleWidget::onSaveDynamicRTStruct()
     return;
   }
 
-  QString directory = d->DynamicRTStructDirectory->currentPath().trimmed();
-  QString fileName = d->DynamicRTStructFilename->text().trimmed();
-  if (directory.isEmpty() || fileName.isEmpty())
-  {
-    QMessageBox::warning(
-        this,
-        tr("Save Dynamic RTSTRUCT"),
-        tr("Choose an output directory and filename."));
-    return;
-  }
   if (!fileName.endsWith(QStringLiteral(".dcm"), Qt::CaseInsensitive))
   {
     fileName += QStringLiteral(".dcm");
     d->DynamicRTStructFilename->setText(fileName);
-  }
-
-  QDir outputDirectory(directory);
-  if (!outputDirectory.exists() && !QDir().mkpath(directory))
-  {
-    QMessageBox::warning(
-        this,
-        tr("Save Dynamic RTSTRUCT"),
-        tr("The output directory could not be created:\n%1").arg(directory));
-    return;
   }
 
   const QString outputPath = outputDirectory.filePath(fileName);
@@ -25053,14 +25463,18 @@ void qSlicerDynamicPETModuleWidget::enableFITTCMImgbutton()
       return;
   }
 
+  InputFunctionResult ifResult;
   QString ifError;
 
-  if (!d->hasValidInputFunction(
-          &ifError,
-          true))
+  if (!d->buildCurrentInputFunction(
+          ifResult,
+          true,
+          &ifError) ||
+      !ifResult.inputCoversFromInjection)
   {
-      d->FITbuttonTCMImg->
-          setEnabled(false);
+      d->FITbuttonTCMImg->setEnabled(false);
+      d->FITbuttonTCMImg->setToolTip(
+          tr("Voxelwise TCM requires plasma and whole-blood input that covers injection onward. For a delayed acquisition, provide a full external IF or enable a PBIF template that reconstructs the missing early input."));
       return;
   }
 
@@ -25090,6 +25504,19 @@ void qSlicerDynamicPETModuleWidget::enableFITTCMImgbutton()
   {
     d->FITbuttonTCMImg->setEnabled(false);
     return;
+  }
+
+  if (d->acquisitionTiming.delayedAcquisition)
+  {
+    d->FITbuttonTCMImg->setToolTip(
+        ifResult.inputCoverageReconstructedByPBIF
+        ? tr("PBIF reconstructs the missing early input, so voxelwise TCM is available. A confirmation warning will be shown because the early tissue response was not observed and microparameter identifiability may be reduced.")
+        : tr("Complete input from injection is available, so voxelwise TCM is available for this delayed tissue acquisition. A confirmation warning will be shown because the early tissue response was not observed and microparameter identifiability may be reduced."));
+  }
+  else
+  {
+    d->FITbuttonTCMImg->setToolTip(
+        tr("Fit selected TCM models voxelwise and generate their parametric maps using the selected output options."));
   }
 
   d->FITbuttonTCMImg->setEnabled(true);

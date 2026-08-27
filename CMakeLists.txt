@@ -8,40 +8,20 @@ project(SlicerDynamicPET)
 include(CheckCXXSourceCompiles)
 
 # Check if AVX512 is supported by trying to compile a simple intrinsic
-set(CMAKE_REQUIRED_FLAGS "-mavx512f")
-check_cxx_source_compiles("
-#include <immintrin.h>
-int main() {
-    __m512i a = _mm512_set1_epi32(1);
-    __m512i b = _mm512_set1_epi32(2);
-    __m512i c = _mm512_add_epi32(a,b);
-    return _mm512_reduce_add_epi32(c);
-}" HAVE_AVX512F)
+if(MSVC)
 
-if (MSVC)
-  # Base optimization flags for MSVC
-  set(EXTRA_OPT_FLAGS "/O2 /fp:fast /arch:AVX2")
+  set(
+    CMAKE_CXX_FLAGS_RELEASE
+    "${CMAKE_CXX_FLAGS_RELEASE} /O2 /fp:fast /arch:AVX2"
+  )
 
-  if (HAVE_AVX512F)
-    message(STATUS "Enabling AVX512 for MSVC build")
-    set(EXTRA_OPT_FLAGS "${EXTRA_OPT_FLAGS} /arch:AVX512")
-  else()
-    message(STATUS "Enabling AVX2 for MSVC build")
-    set(EXTRA_OPT_FLAGS "${EXTRA_OPT_FLAGS} /arch:AVX2")
-  endif()
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${EXTRA_OPT_FLAGS}")
+  set(
+    CMAKE_CXX_FLAGS_RELEASE
+    "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math -funroll-loops"
+  )
 
-elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU")
-  # Base optimization flags for GCC/Clang
-  set(EXTRA_OPT_FLAGS "-O3 -march=native -ffast-math -funroll-loops -flto")
-
-  if (HAVE_AVX512F)
-    message(STATUS "Enabling AVX512 for GCC/Clang build")
-    set(EXTRA_OPT_FLAGS "${EXTRA_OPT_FLAGS} -mavx512f")
-  endif()
-
-  set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${EXTRA_OPT_FLAGS}")
 endif()
 
 # -----------------------------------------------------------------------------
@@ -107,9 +87,23 @@ option(
 
 set(SLICERDYNAMICPET_HAVE_OPENMP OFF)
 
+set(
+  OPENMP_FOUNDINT
+  FALSE
+  CACHE INTERNAL "OPENMP_FOUND"
+  FORCE
+)
+
+set(
+  OPENMP_LIBRARIES
+  ""
+  CACHE INTERNAL "OpenMP library target"
+  FORCE
+)
+
 if(SLICERDYNAMICPET_ENABLE_OPENMP)
 
-  find_package(OpenMP QUIET COMPONENTS CXX)
+  find_package(OpenMP 2.0 QUIET COMPONENTS CXX)
 
   if(OpenMP_CXX_FOUND)
 
@@ -257,7 +251,7 @@ elseif (CMAKE_BUILD_TYPE STREQUAL "Release")
   endforeach(FLAG)
 endif()
 message(STATUS ""                                                                    )
-message(STATUS "   OpenMP support : ${OPENMP_FOUND}"                                 )
+message(STATUS "   OpenMP support : ${SLICERDYNAMICPET_HAVE_OPENMP}"                 )
 message(STATUS ""                                                                    )
 
 # -----------------------------------------------------------------------------

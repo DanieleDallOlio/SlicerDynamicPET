@@ -15,12 +15,6 @@
 
 ==============================================================================*/
 
-#ifdef _WIN32
-#define PY_SSIZE_T_CLEAN
-#include <Python.h>
-#endif
-
-
 // DynamicPET Logic includes
 #include <vtkSlicerDynamicPETLogic.h>
 

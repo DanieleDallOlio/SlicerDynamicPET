@@ -15,10 +15,10 @@
 
 ==============================================================================*/
 
-#ifdef _WIN32
+#ifndef PY_SSIZE_T_CLEAN
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
 #endif
+#include <PythonQt.h>
 
 
 // Qt includes
@@ -1367,6 +1367,7 @@ public:
   bool isTableBasedMode() const { return this->tableBasedMode; }
   void initializeMultiTimepointUI();
   void setMultiTimepointMode(bool enabled);
+  void scheduleSingleModeAcquisitionRefresh();
   bool isMultiTimepointMode() const { return this->multiTimepointMode; }
   void populateMultiTimepointAcquisitionTable();
   void updateMultiTimepointSelectionStatus();
@@ -3802,6 +3803,60 @@ invalidateMultiTimepointDerivedState()
 //-----------------------------------------------------------------------------
 void
 qSlicerDynamicPETModuleWidgetPrivate::
+scheduleSingleModeAcquisitionRefresh()
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+
+    // Selector repopulation restores values with signals blocked. Re-run the
+    // Single acquisition callbacks on the next event-loop turn so PET display,
+    // segmentation display, and the legacy watcher all match those values.
+    QTimer::singleShot(0, q, [this, q]()
+    {
+        if (this->multiTimepointMode || this->tableBasedMode)
+        {
+            return;
+        }
+
+        const int ctIndex = this->CTSelector ? this->CTSelector->currentIndex() : -1;
+        if (ctIndex >= 0 &&
+            this->CTSelector->itemData(ctIndex).value<vtkIdType>() !=
+                vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            q->onCTChanged(ctIndex);
+        }
+
+        const int petIndex = this->PETSelector ? this->PETSelector->currentIndex() : -1;
+        if (petIndex >= 0 &&
+            this->PETSelector->itemData(petIndex).value<vtkIdType>() !=
+                vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            q->onPETChanged(petIndex);
+
+            // The Segmentation frame slider is a display/navigation control.
+            // Keep its restored frame 1 synchronized with the PET browser.
+            if (q->sequenceBrowserPETNode && q->numberOfTimepoints > 0)
+            {
+                q->sequenceBrowserPETNode->SetSelectedItemNumber(0);
+            }
+        }
+
+        const int segIndex = this->SegSelector ? this->SegSelector->currentIndex() : -1;
+        if (segIndex >= 0 &&
+            this->SegSelector->itemData(segIndex).value<vtkIdType>() !=
+                vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+        {
+            q->onSegChanged(segIndex);
+        }
+        else
+        {
+            this->updateSegmentationAdvancedUI();
+        }
+    });
+}
+
+//-----------------------------------------------------------------------------
+void
+qSlicerDynamicPETModuleWidgetPrivate::
 setMultiTimepointMode(bool enabled)
 {
     Q_Q(qSlicerDynamicPETModuleWidget);
@@ -3963,54 +4018,7 @@ setMultiTimepointMode(bool enabled)
 
     if (!enabled)
     {
-        // The selectors above restore their visible values while signals are
-        // blocked. Re-run the Single acquisition callbacks after the mode
-        // transition so the PET browser, segmentation sequence, display state,
-        // and legacy watcher are rebuilt without forcing a patient reload.
-        QTimer::singleShot(0, q, [this, q]()
-        {
-            if (this->multiTimepointMode || this->tableBasedMode)
-            {
-                return;
-            }
-
-            const int ctIndex = this->CTSelector ? this->CTSelector->currentIndex() : -1;
-            if (ctIndex >= 0 &&
-                this->CTSelector->itemData(ctIndex).value<vtkIdType>() !=
-                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-            {
-                q->onCTChanged(ctIndex);
-            }
-
-            const int petIndex = this->PETSelector ? this->PETSelector->currentIndex() : -1;
-            if (petIndex >= 0 &&
-                this->PETSelector->itemData(petIndex).value<vtkIdType>() !=
-                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-            {
-                q->onPETChanged(petIndex);
-
-                // The Segmentation frame slider is a display/navigation
-                // control. Reset the restored Single PET browser as well, so
-                // frame 1 in the slider and the actually displayed PET frame
-                // cannot disagree after leaving Multi.
-                if (q->sequenceBrowserPETNode && q->numberOfTimepoints > 0)
-                {
-                    q->sequenceBrowserPETNode->SetSelectedItemNumber(0);
-                }
-            }
-
-            const int segIndex = this->SegSelector ? this->SegSelector->currentIndex() : -1;
-            if (segIndex >= 0 &&
-                this->SegSelector->itemData(segIndex).value<vtkIdType>() !=
-                    vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
-            {
-                q->onSegChanged(segIndex);
-            }
-            else
-            {
-                this->updateSegmentationAdvancedUI();
-            }
-        });
+        this->scheduleSingleModeAcquisitionRefresh();
     }
 }
 
@@ -7580,6 +7588,12 @@ setTableBasedMode(bool enabled)
 
         // The subject hierarchy may have changed while table mode was active.
         q->onSubjectHierarchyChanged();
+
+        // A Multi -> Table transition intentionally cancels the Single refresh
+        // scheduled while Multi is being left. Now that Table is also being
+        // left, perform the same PET/segmentation display and watcher rebuild as
+        // the direct Multi -> Single path.
+        this->scheduleSingleModeAcquisitionRefresh();
     }
 
     // Both source choices are valid in either mode: source 0 is an image
@@ -8875,7 +8889,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   }
 
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  mainContext.evalScript(R"PYTHON(
+  QString dpePythonScript;
+  dpePythonScript += QString::fromUtf8(R"DPEPY1(
 try:
     import pandas as pd
 except ImportError:
@@ -9173,6 +9188,9 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         median_col = find_col(lookup, ["Median"])
         peak_col = find_col(lookup, ["Peak", "SUVpeak"])
         max_col = find_col(lookup, ["Max", "Maximum", "SUVmax"])
+  )DPEPY1");
+
+  dpePythonScript += QString::fromUtf8(R"DPEPY2(
         generic_value_col = find_col(lookup, ["Value", "TAC", "Activity", "Concentration", "Radioactivity", "SUVbw", "SUV"])
 
         stat_columns = {}
@@ -9471,10 +9489,11 @@ def DPE_export_parametric_map(
                 "error":
                     "Temporary parametric volume node was not found."
             }
+  )DPEPY2");
 
-        # ------------------------------------------------------------
+  dpePythonScript += QString::fromUtf8(R"DPEPY3(
+
         # 2. Separate spatial construction sources from provenance.
-        # ------------------------------------------------------------
 
         geometry_uid_list = str(
             geometry_instance_uids
@@ -9766,7 +9785,9 @@ def DPE_export_parametric_map(
             ],
             dtype=np.float64
         )
+  )DPEPY3");
 
+  dpePythonScript += QString::fromUtf8(R"DPEPY4(
         # highdicom's Volume array axes are:
         #
         #   axis 0 = slice  = K
@@ -10030,7 +10051,9 @@ def DPE_export_parametric_map(
                 + "\n\n"
                 + traceback.format_exc()
         }
-)PYTHON");
+  )DPEPY4");
+
+  mainContext.evalScript(dpePythonScript);
 
   // Small Python bridge for RTSTRUCT import/export. The DICOM work remains in
   // the scripted dRTImporter/dRTExporter helpers; C++ only passes

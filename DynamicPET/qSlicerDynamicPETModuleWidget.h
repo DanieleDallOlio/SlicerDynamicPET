@@ -20,7 +20,7 @@
 
 #ifdef _WIN32
 #define PY_SSIZE_T_CLEAN
-#include <Python.h>
+#include <PythonQt.h>
 #endif
 
 // Slicer includes

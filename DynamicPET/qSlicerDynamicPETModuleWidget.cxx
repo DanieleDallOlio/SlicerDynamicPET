@@ -1567,6 +1567,11 @@ public:
   // selectors while Multi mode is being entered/exited. Multi preparation and
   // plotting create/remove MRML nodes, so mode teardown must be atomic.
   bool multiTimepointModeTransitionRunning{false};
+  // Subject Hierarchy item creation/reparenting can emit several synchronous
+  // events before a newly added node has reached its final study parent.
+  // Coalesce those events and rebuild the Single-mode selectors once on the
+  // next event-loop turn.
+  bool subjectHierarchyRefreshQueued{false};
   QSet<QString> multiTimepointCommonSegmentNames;
   QString multiTimepointReferenceMetadataNodeID;
   QString lastMultiTimepointValidationLog;
@@ -7301,6 +7306,12 @@ loadTableWorkbook(
         newState.segmentDisplayOrder.push_back(segmentID);
         this->tableSigma[segmentID] = std::move(sigmaByStat);
     }
+
+    // Keep Table mode consistent with Single and Multi: all user-facing ROI
+    // lists use one case-insensitive A->Z display order. Synthetic table::N
+    // IDs and the imported TAC data remain unchanged.
+    newState.segmentDisplayOrder =
+        sortedSegmentIDs(newState.segmentTACsnames);
 
     if (newState.segmentTACs.empty() ||
         newState.timePoints.empty() ||
@@ -22116,7 +22127,32 @@ void qSlicerDynamicPETModuleWidget::onSubjectHierarchyChanged() {
     return;
   }
 
-  d->populatePatientComboBox();
+  // A segmentation (or another study child) can be announced by Subject
+  // Hierarchy before Slicer has finished assigning/reparenting its hierarchy
+  // item. Rebuilding synchronously can therefore miss a node that has just
+  // been added while this module is open. Coalesce the event burst and refresh
+  // once after Slicer has completed the current MRML/Subject Hierarchy update.
+  if (d->subjectHierarchyRefreshQueued)
+  {
+    return;
+  }
+  d->subjectHierarchyRefreshQueued = true;
+
+  QTimer::singleShot(0, this, [this]()
+  {
+    Q_D(qSlicerDynamicPETModuleWidget);
+    d->subjectHierarchyRefreshQueued = false;
+
+    if (!this->IsActive ||
+        d->isTableBasedMode() ||
+        d->isMultiTimepointMode() ||
+        d->multiTimepointModeTransitionRunning)
+    {
+      return;
+    }
+
+    d->populatePatientComboBox();
+  });
 }
 
 void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
@@ -26125,10 +26161,17 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
 
     if (fitFrameCount < 2)
     {
+      const auto nameIt = segmentTACsnames.find(segmentID);
+      const QString roiName =
+          nameIt != segmentTACsnames.end()
+          ? QString::fromStdString(nameIt->second)
+          : QString::fromStdString(segmentID);
+
       QMessageBox::warning(
           this,
           tr("TCM fit range"),
-          tr("At least two retained tissue/IF frames are required for TCM fitting."));
+          tr("ROI '%1': At least two retained tissue/IF frames are required for TCM fitting.")
+              .arg(roiName));
       continue;
     }
 
@@ -27828,10 +27871,17 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         startFrameIndex >= regressionEndCount ||
         regressionEndCount - startFrameIndex < 2)
     {
+      const auto nameIt = segmentTACsnames.find(segmentID);
+      const QString roiName =
+          nameIt != segmentTACsnames.end()
+          ? QString::fromStdString(nameIt->second)
+          : QString::fromStdString(segmentID);
+
       QMessageBox::warning(
           this,
           tr("MTGA fit range"),
-          tr("The selected MTGA start/end range is outside the usable IF/tissue acquisition range."));
+          tr("ROI '%1': The selected MTGA start/end range is outside the usable IF/tissue acquisition range.")
+              .arg(roiName));
       continue;
     }
 

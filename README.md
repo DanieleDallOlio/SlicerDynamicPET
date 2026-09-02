@@ -351,7 +351,7 @@ license notices. In particular:
 - **3D Slicer** retains its own software license;
 - **SlicerRT** retains its own software license.
 
-See [LICENSE](LICENSE) and the license files of bundled components for details.
+See [LICENSE.txt](LICENSE.txt) and the license files of bundled components for details.
 
 ---
 

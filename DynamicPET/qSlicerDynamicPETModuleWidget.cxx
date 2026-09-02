@@ -8983,7 +8983,8 @@ def DPE_get_highdicom():
     return hd
 
 
-hd = DPE_get_highdicom()
+# highdicom is loaded lazily by DPE_export_parametric_map().
+# Do not force installation/version resolution merely by opening the module.
 
 try:
     import numpy as np
@@ -9380,71 +9381,171 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
 
 def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     """
-    filepath: str - full path to xlsx
-    sheet_data_dict: dict[str, list[list[str]]] - sheet name to 2D table
+    Save ROI-wise TCM parameter tables.
+
+    sheet_data_dict: dict[str, list[dict]]
+        Sheet name -> one dictionary per fitted model.
     """
+    columns = [
+        "Model", "K1", "k2", "k3", "k4", "ka", "fA", "vb", "td",
+        "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "BoundHits",
+    ]
+
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "K1", "k2", "k3", "k4", "ka", "fA", "vb", "td", "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "BoundHits"]]
+            if not data:
+                continue
+
+            # reindex() keeps the output schema stable and writes a blank column
+            # if an optional value is absent instead of raising KeyError.
+            df = pd.DataFrame(data).reindex(columns=columns)
             df.to_excel(writer, sheet_name=sheet, index=False)
+
 
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
     """
-    filepath: str - full path to xlsx
-    sheet_data_dict: dict[str, list[list[str]]] - sheet name to 2D table
+    Save ROI-wise MTGA parameter tables using the compact Ki / DV schema.
+
+    Relative Patlak stores Ki' in Ki and Relative RE stores DV' in DV. The
+    Model column preserves the semantic distinction. KiPrime / DVPrime are
+    accepted only for backward compatibility with an older C++ bridge.
     """
+    columns = ["Model", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"]
+
+    def numeric_or_nan(value):
+        # PythonQt converts an invalid/default QVariant() to [] in this path.
+        # Parameter columns must remain scalar numeric columns, so treat such
+        # bridge placeholders (and any other non-scalar value) as missing.
+        if value is None or isinstance(value, (list, tuple, dict, set)):
+            return np.nan
+        try:
+            return float(value)
+        except (TypeError, ValueError, OverflowError):
+            return np.nan
+
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            df = pd.DataFrame(data)[["Model", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"]]
+            if not data:
+                continue
+
+            df = pd.DataFrame(data)
+            model = (df["Model"].astype(str)
+                     if "Model" in df.columns
+                     else pd.Series("", index=df.index, dtype=object))
+
+            # Sanitize the compact columns first. This also makes the writer
+            # robust to legacy QVariant() -> [] placeholders.
+            ki = (df["Ki"].map(numeric_or_nan)
+                  if "Ki" in df.columns
+                  else pd.Series(np.nan, index=df.index, dtype=float))
+            dv = (df["DV"].map(numeric_or_nan)
+                  if "DV" in df.columns
+                  else pd.Series(np.nan, index=df.index, dtype=float))
+
+            # Backward compatibility only: older bridges exposed the relative
+            # values as KiPrime / DVPrime. Coalesce those scalar values without
+            # ever assigning [] into a float64 pandas column.
+            if "KiPrime" in df.columns:
+                ki_prime = df["KiPrime"].map(numeric_or_nan)
+                mask = model.eq("Relative Patlak") & ki_prime.notna()
+                ki.loc[mask] = ki_prime.loc[mask]
+
+            if "DVPrime" in df.columns:
+                dv_prime = df["DVPrime"].map(numeric_or_nan)
+                mask = model.eq("Relative RE") & dv_prime.notna()
+                dv.loc[mask] = dv_prime.loc[mask]
+
+            df["Ki"] = ki.astype(float)
+            df["DV"] = dv.astype(float)
+
+            for column in ["Intercept", "R2", "AIC", "MASE"]:
+                if column in df.columns:
+                    df[column] = df[column].map(numeric_or_nan).astype(float)
+
+            df = df.reindex(columns=columns)
             df.to_excel(writer, sheet_name=sheet, index=False)
+
 
 def DPE_generic_save_multisheet_excel(filepath, sheet_data_dict):
     """
-    filepath: str - full path to xlsx
-    sheet_data_dict: dict[str, list[dict]] - sheet name to list of row dicts
+    Save generic ROI-wise fitted curves (currently TCM).
+
+    sheet_data_dict: dict[str, list[dict]]
+        Sheet name -> one dictionary per time point.
     """
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
             if not data:
-                continue  # skip empty sheets
+                continue
 
-            # Create DataFrame from list of dicts — columns inferred automatically
             df = pd.DataFrame(data)
 
-            # Optional: ensure "Time(s)" is first column if present
+            # Keep time first, then the TAC column(s), followed by all remaining
+            # frame metadata and fitted-model columns in their existing order.
             if "Time(s)" in df.columns:
-                taccols = [x for x in df.columns if "TAC" in x]
-                if len(taccols)>0:
-                  cols = ["Time(s)"] + taccols + [c for c in df.columns if not np.isin(c, ["Time(s)"]+taccols)]
-                else:
-                  cols = ["Time(s)"] + [c for c in df.columns if c != "Time(s)"]
+                taccols = [c for c in df.columns if "TAC" in str(c)]
+                first = ["Time(s)"] + taccols
+                cols = first + [c for c in df.columns if c not in first]
                 df = df[cols]
 
             df.to_excel(writer, sheet_name=sheet, index=False)
 
+
 def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     """
-    filepath: str - full path to xlsx
-    sheet_data_dict: dict[str, list[dict]] - sheet name to list of row dicts
+    Save ROI-wise MTGA graphical coordinates and fitted lines.
+
+    Supports both standard and relative graphical methods. Known models are
+    written in a stable order; any future model exposing the same *_x, *_y,
+    *_fitted triplet is retained automatically afterwards.
     """
+    preferred_models = [
+        "Patlak",
+        "Relative Patlak",
+        "Logan",
+        "RE",
+        "Relative RE",
+    ]
+
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
             if not data:
-                continue  # skip empty sheets
+                continue
 
-            # Create DataFrame from list of dicts — columns inferred automatically
             df = pd.DataFrame(data)
-
-            # Optional: ensure "Time(s)" is first column if present
             cols = []
-            if "Patlak_x" in df.columns:
-              cols += ["Patlak_x", "Patlak_y", "Patlak_fitted"]
-            if "Logan_x" in df.columns:
-              cols += ["Logan_x", "Logan_y", "Logan_fitted"]
-            if "RE_x" in df.columns:
-              cols += ["RE_x", "RE_y", "RE_fitted"]
-            if len(cols)>0:
-              df = df[cols]
+
+            def append_model_triplet(model_name):
+                triplet = [
+                    f"{model_name}_x",
+                    f"{model_name}_y",
+                    f"{model_name}_fitted",
+                ]
+                if all(column in df.columns for column in triplet):
+                    cols.extend(triplet)
+
+            for model_name in preferred_models:
+                append_model_triplet(model_name)
+
+            # Preserve future/unknown MTGA model triplets rather than silently
+            # dropping them just because this writer has not been updated yet.
+            known = set(cols)
+            for column in df.columns:
+                column = str(column)
+                if not column.endswith("_x") or column in known:
+                    continue
+                model_name = column[:-2]
+                triplet = [
+                    f"{model_name}_x",
+                    f"{model_name}_y",
+                    f"{model_name}_fitted",
+                ]
+                if all(name in df.columns for name in triplet):
+                    cols.extend(name for name in triplet if name not in known)
+                    known.update(triplet)
+
+            if cols:
+                df = df[cols]
 
             df.to_excel(writer, sheet_name=sheet, index=False)
 
@@ -23929,26 +24030,12 @@ QVariantMap qSlicerDynamicPETModuleWidget::MTGAParamsToPythonDict()
     {
       QVariantMap row;
       row["Model"] = QString::fromStdString(modelName);
-      if (modelName == "Relative Patlak")
-      {
-        row["KiPrime"] = params.Ki;
-        row["Ki"] = QVariant();
-      }
-      else
-      {
-        row["Ki"] = params.Ki;
-        row["KiPrime"] = QVariant();
-      }
-      if (modelName == "Relative RE")
-      {
-        row["DVPrime"] = params.DV;
-        row["DV"] = QVariant();
-      }
-      else
-      {
-        row["DV"] = params.DV;
-        row["DVPrime"] = QVariant();
-      }
+      // Keep the Excel/Python bridge compact. MTGAParameters already stores
+      // the relative Patlak slope in Ki and the relative RE slope in DV; the
+      // model name supplies the prime semantics (Ki' / DV'). Avoid QVariant()
+      // placeholders here because PythonQt converts them to [] rather than NaN.
+      row["Ki"] = params.Ki;
+      row["DV"] = params.DV;
       row["Intercept"] = params.Intercept;
       row["R2"]   = params.R2;
       row["AIC"]   = params.AIC;
@@ -24014,7 +24101,10 @@ QVariantMap qSlicerDynamicPETModuleWidget::fittedTCMtoPythonDict()
         }
         else
         {
-          row[QString::fromStdString(modelName)] = QVariant(); // blank cell
+          // PythonQt converts QVariant() to [] in this bridge. Use a numeric
+          // NaN so pandas/Excel receive a true blank numeric cell instead.
+          row[QString::fromStdString(modelName)] =
+              std::numeric_limits<double>::quiet_NaN();
         }
       }
       rowList.append(row);

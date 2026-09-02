@@ -47,7 +47,7 @@ set(
 
 set(
   EXTENSION_DESCRIPTION
-  "Dynamic PET analysis for 3D Slicer, including DICOM import as volume sequences, time-activity curve extraction, kinetic modeling, and voxel-wise parametric imaging."
+  "Dynamic PET analysis for 3D Slicer, including PET DICOM import, time-activity curve extraction, kinetic modeling, parametric imaging, and dynamic RT Structure Set support."
 )
 
 set(
@@ -62,7 +62,7 @@ set(
 
 set(
   EXTENSION_DEPENDS
-  "NA"
+  "SlicerRT"
 )
 
 set(

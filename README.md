@@ -370,6 +370,10 @@ University of Bologna
 SlicerDynamicPET is built on the 3D Slicer platform and its MRML, DICOM,
 Sequences, segmentation, plotting, and visualization infrastructure.
 
+Thanks to the **Nuclear Medicine team at the Sant'Orsola Hospital in Bologna** for their support, feedback,
+and testing throughout the development of SlicerDynamicPET, and especially to
+**Irene Brusa**.
+
 Dynamic RT Structure Set functionality integrates with the SlicerRT
 infrastructure.
 

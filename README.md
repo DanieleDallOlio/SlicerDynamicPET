@@ -269,7 +269,7 @@ by falling back to serial implementations.
 ## Screenshots
 
 <p align="center">
-  <img src="Screenshots/DynamicPET-main.png" alt="DynamicPET module" width="850">
+  <img src="DynamicPET/Screenshots/DynamicPET-main.png" alt="DynamicPET module" width="850">
 </p>
 
 Useful additional screenshots for the project documentation may show:

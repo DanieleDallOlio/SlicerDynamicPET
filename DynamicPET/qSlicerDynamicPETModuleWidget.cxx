@@ -96,6 +96,10 @@ inline char* strptime(
 namespace
 {
 
+// Release builds keep the Python console quiet during normal operation.
+// Set to true locally when detailed performance/diagnostic tracing is needed.
+constexpr bool kEnableDeveloperConsoleMessages = false;
+
 enum class IFCurveDomain
 {
   WholeBlood = 0,
@@ -13911,6 +13915,26 @@ void
 qSlicerDynamicPETModuleWidgetPrivate::
 logToPythonConsole(const QString& message) const
 {
+    if (!kEnableDeveloperConsoleMessages)
+    {
+        // Routine timing, performance, fit-QC and state messages were useful
+        // during development but are too noisy for a release. Keep only
+        // actionable warnings/errors in the Python console. User-facing
+        // information continues to be presented by the existing labels and
+        // message boxes.
+        const QString upper = message.toUpper();
+        const bool actionable =
+            upper.contains(QStringLiteral("WARNING")) ||
+            upper.contains(QStringLiteral("ERROR")) ||
+            upper.contains(QStringLiteral("FAILED")) ||
+            upper.contains(QStringLiteral("FAILURE")) ||
+            upper.contains(QStringLiteral("CRITICAL"));
+        if (!actionable)
+        {
+            return;
+        }
+    }
+
     PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
     mainContext.call(
         "DPE_console_message",
@@ -23666,10 +23690,14 @@ void qSlicerDynamicPETModuleWidget::RemoveExistingPlotChartAndTable()
     {
       vtkMRMLNode* node = vtkMRMLNode::SafeDownCast(
           tableNodes->GetItemAsObject(i));
-      if (node && node->GetName() &&
-          QString::fromUtf8(node->GetName()).startsWith("DynamicPET.ErrorTable."))
+      if (node && node->GetName())
       {
-        removeNodes.push_back(node);
+        const QString nodeName = QString::fromUtf8(node->GetName());
+        if (nodeName.startsWith("DynamicPET.ErrorTable.") ||
+            nodeName.startsWith("DynamicPET.LineTable."))
+        {
+          removeNodes.push_back(node);
+        }
       }
     }
     tableNodes->Delete();
@@ -24755,9 +24783,22 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
       std::string colErrName = colName + " Error";
       statErrArray->SetName(colErrName.c_str());
 
-      vtkNew<vtkDoubleArray> statArrayLine;
-      std::string statArrayLineName = colName + " Line";
-      statArrayLine->SetName(statArrayLineName.c_str());
+      // Keep the selectable observation series and the visual connecting line
+      // separate. Excluded observations remain NaN in statArray (so they have
+      // no marker and stay excluded from fitting), while the line table contains
+      // retained finite observations only. VTK then connects adjacent retained
+      // observations directly, bridging any excluded interior frames without
+      // inventing a synthetic value at the excluded frame time.
+      vtkSmartPointer<vtkMRMLTableNode> lineTable =
+          vtkSmartPointer<vtkMRMLTableNode>::New();
+      lineTable->SetName(
+          (std::string("DynamicPET.LineTable.") + segmentID + "." + statName).c_str());
+      scene->AddNode(lineTable);
+
+      vtkNew<vtkDoubleArray> lineX;
+      vtkNew<vtkDoubleArray> lineY;
+      lineX->SetName("X");
+      lineY->SetName("Y");
 
       for (int ivs=0; ivs<this->segmentTACs[segmentID].size(); ++ivs)
       {
@@ -24767,20 +24808,14 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
           if (statName == "Mean")
           {
             value = vs.mean;
-            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
-            //   statErrArray->InsertNextValue(vs.stddev);
           }
           else if (statName == "Median")
           {
             value = vs.median;
-            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
-            //   statErrArray->InsertNextValue(vs.iqr);
           }
           else if (statName == "Peak")
           {
             value = vs.peak;
-            // if (d->PlotErrorCheckbox && d->PlotErrorCheckbox->isChecked())
-            //   statErrArray->InsertNextValue(vs.iqr);
           }
           else if (statName == "VoxelCount") value = vs.count;
           else if (statName == "Min")        value = vs.min;
@@ -24791,77 +24826,35 @@ void qSlicerDynamicPETModuleWidget::onPlotbutton()
           value = convertPlotActivity(value, statName);
         }
 
+        // Full-length array used only by the selectable scatter markers.
+        // Excluded observations stay absent from the plot and selection.
         statArray->InsertNextValue(value);
-        // Line points
-        if (!std::isnan(value)) {
-          statArrayLine->InsertNextValue(value);
-        } else {
-          double nextValue = std::numeric_limits<double>::quiet_NaN();
-          double x1 = std::numeric_limits<double>::quiet_NaN();
-          for (int next_ivs = ivs+1; next_ivs<this->timePoints.size(); ++next_ivs) {
-            const VoxelStatistics& vsNext = this->segmentTACs[segmentID][next_ivs];
-            if (vsNext.keep)
-            {
-                x1 = plotTimeSec(static_cast<size_t>(next_ivs));
-                if (statName == "Mean") nextValue = vsNext.mean;
-                else if (statName == "Median") nextValue = vsNext.median;
-                else if (statName == "Peak") nextValue = vsNext.peak;
-                else if (statName == "VoxelCount") nextValue = vsNext.count;
-                else if (statName == "Min") nextValue = vsNext.min;
-                else if (statName == "Max") nextValue = vsNext.max;
-                else if (statName == "VolumePET") nextValue = vsNext.volume_cm3;
-                nextValue = convertPlotActivity(nextValue, statName);
-                break;
-            }
-          }
-          if (std::isnan(nextValue)) {
-            statArrayLine->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
-            continue;
-          }
-          double prevValue = std::numeric_limits<double>::quiet_NaN();
-          double x0 = std::numeric_limits<double>::quiet_NaN();
-          for (int prev_ivs = ivs-1; prev_ivs>=0; --prev_ivs) {
-            const VoxelStatistics& vsPrev = this->segmentTACs[segmentID][prev_ivs];
-            if (vsPrev.keep)
-            {
-                x0 = plotTimeSec(static_cast<size_t>(prev_ivs));
-                if (statName == "Mean") prevValue = vsPrev.mean;
-                else if (statName == "Median") prevValue = vsPrev.median;
-                else if (statName == "Peak") prevValue = vsPrev.peak;
-                else if (statName == "VoxelCount") prevValue = vsPrev.count;
-                else if (statName == "Min") prevValue = vsPrev.min;
-                else if (statName == "Max") prevValue = vsPrev.max;
-                else if (statName == "VolumePET") prevValue = vsPrev.volume_cm3;
-                prevValue = convertPlotActivity(prevValue, statName);
-                break;
-            }
-          }
-          if (std::isnan(prevValue)) {
-            statArrayLine->InsertNextValue(std::numeric_limits<double>::quiet_NaN());
-            continue;
-          }
 
-          double x  = plotTimeSec(static_cast<size_t>(ivs));
-          // Proper linear interpolation
-          value = prevValue + ((x - x0) / (x1 - x0)) * (nextValue - prevValue);
-          statArrayLine->InsertNextValue(value);
+        // Plot-only continuous line: retained finite observations only.
+        // Skipping an excluded interior observation makes VTK draw the straight
+        // segment between its nearest retained neighbors.
+        if (vs.keep && std::isfinite(value))
+        {
+          lineX->InsertNextValue(
+              plotTimeSec(static_cast<size_t>(ivs)) / 60.0);
+          lineY->InsertNextValue(value);
         }
-
       }
 
       tableNode->AddColumn(statArray);
-      tableNode->AddColumn(statArrayLine);
       // if (statErrArray->GetNumberOfTuples() > 0)
       //   tableNode->AddColumn(statErrArray);
+
+      lineTable->AddColumn(lineX);
+      lineTable->AddColumn(lineY);
 
       vtkSmartPointer<vtkMRMLPlotSeriesNode> lineSeries = vtkSmartPointer<vtkMRMLPlotSeriesNode>::New();
       scene->AddNode(lineSeries);
       lineSeries->SetName("");
       lineSeries->SetPlotType(vtkMRMLPlotSeriesNode::PlotTypeScatter);
-      lineSeries->SetAndObserveTableNodeID(tableNode->GetID());
-      lineSeries->SetXColumnName("Time (min)");
-      lineSeries->SetYColumnName(statArrayLineName.c_str());
-      lineSeries->SetLabelColumnName("ToolTipLabelTAC");
+      lineSeries->SetAndObserveTableNodeID(lineTable->GetID());
+      lineSeries->SetXColumnName("X");
+      lineSeries->SetYColumnName("Y");
       lineSeries->SetUniqueColor();
       lineSeries->SetMarkerStyle(vtkMRMLPlotSeriesNode::MarkerStyleNone);
       chartNode->AddAndObservePlotSeriesNodeID(lineSeries->GetID());
@@ -26778,7 +26771,7 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       if (!predictionOK && predictionFrameCount > fitFrameCount)
       {
         d->logToPythonConsole(
-            tr("[SlicerDynamicPET TCM] Could not extend %1 prediction beyond the fit end: %2")
+            tr("[SlicerDynamicPET TCM] WARNING: Could not extend %1 prediction beyond the fit end: %2")
                 .arg(QString::fromStdString(modelID))
                 .arg(QString::fromStdString(predictionError)));
       }
@@ -29012,12 +29005,19 @@ void qSlicerDynamicPETModuleWidget::onPlotTCMbutton()
   // Create or get table
   vtkSmartPointer<vtkMRMLTableNode> tableNode = this->GetOrCreatePlotTable();
 
-  // Add time column (convert to minutes)
+  // Add time column on the same post-injection clock used by TCM fitting.
+  // For ordinary full acquisitions this is identical to timePoints. For
+  // delayed acquisitions frameEndForInputSec() adds the injection-to-scan
+  // offset (unless the imported table is already post-injection).
   vtkNew<vtkDoubleArray> timeArray;
   timeArray->SetName("Time (min)");
+  std::vector<double> tcmPlotTimesSec;
+  tcmPlotTimesSec.reserve(this->timePoints.size());
   for (size_t i = 0; i < this->timePoints.size(); ++i)
   {
-    timeArray->InsertNextValue(this->timePoints[i] / 60.0);
+    const double frameEndSec = d->frameEndForInputSec(i);
+    tcmPlotTimesSec.push_back(frameEndSec);
+    timeArray->InsertNextValue(frameEndSec / 60.0);
   }
   tableNode->AddColumn(timeArray);
 
@@ -29057,10 +29057,12 @@ void qSlicerDynamicPETModuleWidget::onPlotTCMbutton()
           keepvoi[i]
           ? toDisplayValue(tacvoi[i][0])
           : std::numeric_limits<double>::quiet_NaN());
+      const double frameEndSec =
+          i < tcmPlotTimesSec.size() ? tcmPlotTimesSec[i] : d->frameEndForInputSec(i);
       std::ostringstream oss;
       oss << "Frame: " << i
-          << ", Time(s): " << this->timePoints[i]
-          << ", Time(min): " << this->timePoints[i]/60.0;
+          << ", Time(s): " << frameEndSec
+          << ", Time(min): " << frameEndSec / 60.0;
       labelArray->InsertNextValue(oss.str());
   }
   tableNode->AddColumn(tacArray);

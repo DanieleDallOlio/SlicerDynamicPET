@@ -68,6 +68,9 @@
 namespace
 {
 
+// Keep routine diagnostic stdout disabled in release builds.
+constexpr bool kEnableDeveloperConsoleMessages = false;
+
   using DynamicPETDiagnosticClock = std::chrono::steady_clock;
 
   double DynamicPETElapsedMs(
@@ -288,11 +291,22 @@ namespace
       const std::string& interpolationType,
       long int& numberOfSamples)
   {
+      const double supportScaleSec =
+          std::max(
+              1.0,
+              std::max(
+                  std::abs(endTimeSec),
+                  std::max(
+                      timesSec.empty() ? 0.0 : std::abs(timesSec.front()),
+                      timesSec.empty() ? 0.0 : std::abs(timesSec.back()))));
+      const double supportToleranceSec =
+          std::max(1e-6, 1e-12 * supportScaleSec);
+
       if (timesSec.size() < 2 ||
           timesSec.size() != values.size() ||
           timeStepSec <= 0.0 ||
-          timesSec.front() > 0.0 ||
-          timesSec.back() < endTimeSec)
+          timesSec.front() > supportToleranceSec ||
+          timesSec.back() + supportToleranceSec < endTimeSec)
       {
           throw std::invalid_argument(
               "Invalid explicit input-function sampling.");
@@ -328,8 +342,8 @@ namespace
               (static_cast<double>(i) + 0.5) *
               timeStepSec;
 
-          if (t < timesSec.front() ||
-              t > timesSec.back())
+          if (t < timesSec.front() - supportToleranceSec ||
+              t > timesSec.back() + supportToleranceSec)
           {
               delete[] output;
 
@@ -338,11 +352,16 @@ namespace
                   "would be required.");
           }
 
+          // Clamp only floating-point boundary noise. This deliberately does
+          // not turn a genuinely short input function into an extrapolated one.
+          const double sampleTime =
+              std::min(timesSec.back(), std::max(timesSec.front(), t));
+
           const auto upper =
               std::upper_bound(
                   timesSec.begin(),
                   timesSec.end(),
-                  t);
+                  sampleTime);
 
           if (upper == timesSec.end())
           {
@@ -375,7 +394,7 @@ namespace
           }
           else if (interpolationType == "pchip")
           {
-              output[i] = EvaluatePchip(timesSec, values, pchipSlope, t);
+              output[i] = EvaluatePchip(timesSec, values, pchipSlope, sampleTime);
           }
           else
           {
@@ -396,7 +415,7 @@ namespace
                       0.0,
                       y1 +
                       (y2 - y1) *
-                      (t - t1) /
+                      (sampleTime - t1) /
                       (t2 - t1));
           }
       }
@@ -6353,19 +6372,22 @@ CreatePETBodySupportMask(
             usedOtsuFallback;
     }
 
-    std::cout
-        << "PET body-support threshold = "
-        << threshold
-        << " ("
-        << (usedOtsuFallback
-                ? "log-Otsu fallback"
-                : "multiscale log-histogram")
-        << ", "
-        << (durationWeighted
-                ? "duration-weighted sum"
-                : "unweighted sum")
-        << ")"
-        << std::endl;
+    if (kEnableDeveloperConsoleMessages)
+    {
+        std::cout
+            << "PET body-support threshold = "
+            << threshold
+            << " ("
+            << (usedOtsuFallback
+                    ? "log-Otsu fallback"
+                    : "multiscale log-histogram")
+            << ", "
+            << (durationWeighted
+                    ? "duration-weighted sum"
+                    : "unweighted sum")
+            << ")"
+            << std::endl;
+    }
 
     // ------------------------------------------------------------------
     // 3. Obtain PET physical geometry.
@@ -8625,13 +8647,16 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     const int Nfit =
         static_cast<int>(fitVoxelIndices.size());
 
-    std::cout
-        << "TCM fitting: "
-        << Nfit << " / " << Nvox
-        << " voxels eligible for fitting; "
-        << (Nvox - Nfit)
-        << " excluded by the common voxel mask."
-        << std::endl;
+    if (kEnableDeveloperConsoleMessages)
+    {
+        std::cout
+            << "TCM fitting: "
+            << Nfit << " / " << Nvox
+            << " voxels eligible for fitting; "
+            << (Nvox - Nfit)
+            << " excluded by the common voxel mask."
+            << std::endl;
+    }
 
     if (Nfit == 0)
     {
@@ -8761,7 +8786,9 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
                 continue;
             }
 
-            if (v == 0 || v == 99 || v == 999 || v == 9999) {
+            if (kEnableDeveloperConsoleMessages &&
+                (v == 0 || v == 99 || v == 999 || v == 9999))
+            {
               std::cout
                 << "v=" << v
                 << " loops=" << stx.n_loops
@@ -8833,7 +8860,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
         }
     }
 
-    if (guardHitCount.load() > 0)
+    if (kEnableDeveloperConsoleMessages && guardHitCount.load() > 0)
     {
         std::cout
             << "TCM fitting: "
@@ -8843,7 +8870,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             << std::endl;
     }
 
-    if (boundHitVoxelCount.load() > 0)
+    if (kEnableDeveloperConsoleMessages && boundHitVoxelCount.load() > 0)
     {
         std::cout
             << "TCM fitting: "

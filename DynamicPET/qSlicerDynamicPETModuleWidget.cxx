@@ -100,6 +100,15 @@ namespace
 // Set to true locally when detailed performance/diagnostic tracing is needed.
 constexpr bool kEnableDeveloperConsoleMessages = false;
 
+struct ParametricDisplayPreset
+{
+  bool valid{false};
+  double minimum{0.0};
+  double maximum{1.0};
+  std::string colorNodeID{"vtkMRMLColorTableNodeFileViridis.txt"};
+  std::string rangePolicy{"Fallback"};
+};
+
 enum class IFCurveDomain
 {
   WholeBlood = 0,
@@ -1712,6 +1721,23 @@ public:
 
   void generateTCMOptimizedResult();
   void removeTCMOptimizedSceneNodes();
+
+  ParametricDisplayPreset computeParametricDisplayPreset(
+      const std::vector<double>& values,
+      const std::string& field,
+      bool ignoreZeroValues = false) const;
+
+  void applyParametricDisplayPreset(
+      vtkMRMLScalarVolumeNode* node,
+      const std::vector<double>& values,
+      const std::string& field,
+      bool ignoreZeroValues = false);
+
+  vtkMRMLScalarVolumeNode* findParametricResultNode(
+      const std::string& method,
+      const std::string& modelID,
+      const std::string& field,
+      vtkMRMLScalarVolumeNode* sourceNode) const;
 
   void outputMTGAParametricResult(
       const std::string& modelID,
@@ -8933,59 +8959,60 @@ import slicer
 def DPE_console_message(message):
     print(message)
 
-DPE_HIGHDICOM_REQUIRED_VERSION = "0.28.1"
-
-
 def DPE_get_highdicom():
+    """Reuse an existing highdicom installation without replacing it.
+
+    Slicer has a shared Python environment.  Upgrading/reinstalling an
+    already-installed package from one extension can break another extension
+    in the same process, so SlicerDynamicPET only installs highdicom when the
+    package itself is completely absent.
+    """
     try:
-        installed_version = (
-            importlib.metadata.version("highdicom")
-        )
-    except importlib.metadata.PackageNotFoundError:
-        installed_version = None
-
-    if installed_version != DPE_HIGHDICOM_REQUIRED_VERSION:
-
-        highdicom_already_loaded = any(
-            name == "highdicom"
-            or name.startswith("highdicom.")
-            for name in sys.modules
-        )
-
-        slicer.util.pip_install(
-            "--upgrade --force-reinstall --no-deps "
-            "highdicom=="
-            + DPE_HIGHDICOM_REQUIRED_VERSION
-        )
-
-        importlib.invalidate_caches()
-
-        # If another highdicom version was already imported,
-        # replacing files on disk does not safely replace the
-        # Python classes already resident in this Slicer process.
-        if highdicom_already_loaded:
+        import highdicom as hd
+    except ModuleNotFoundError as exc:
+        if exc.name != "highdicom":
             raise RuntimeError(
-                "SlicerDynamicPET installed highdicom "
-                + DPE_HIGHDICOM_REQUIRED_VERSION
-                + ", but another highdicom version was already "
-                  "loaded in this Slicer session.\n\n"
-                  "Please restart Slicer once."
-            )
+                "The installed highdicom package could not be imported because "
+                f"Python module '{exc.name}' is unavailable. SlicerDynamicPET "
+                "did not modify the Python environment."
+            ) from exc
 
-    import highdicom as hd
-
-    if hd.__version__ != DPE_HIGHDICOM_REQUIRED_VERSION:
+        try:
+            slicer.util.pip_install("--no-deps highdicom")
+            importlib.invalidate_caches()
+            import highdicom as hd
+        except Exception as install_exc:
+            raise RuntimeError(
+                "highdicom is not installed and its minimal installation failed. "
+                "SlicerDynamicPET did not upgrade or replace existing Python "
+                "packages. Original error: " + str(install_exc)
+            ) from install_exc
+    except Exception as exc:
         raise RuntimeError(
-            "SlicerDynamicPET requires highdicom "
-            + DPE_HIGHDICOM_REQUIRED_VERSION
-            + ", but Python loaded version "
-            + str(hd.__version__)
-            + " from:\n"
-            + str(hd.__file__)
+            "The existing highdicom installation could not be imported. "
+            "SlicerDynamicPET did not replace or upgrade it. Original error: "
+            + str(exc)
+        ) from exc
+
+    required_api = {
+        "pm.ParametricMap": getattr(getattr(hd, "pm", None), "ParametricMap", None),
+        "pm.RealWorldValueMapping": getattr(getattr(hd, "pm", None), "RealWorldValueMapping", None),
+        "sr.CodedConcept": getattr(getattr(hd, "sr", None), "CodedConcept", None),
+        "UID": getattr(hd, "UID", None),
+        "PixelMeasuresSequence": getattr(hd, "PixelMeasuresSequence", None),
+        "PlaneOrientationSequence": getattr(hd, "PlaneOrientationSequence", None),
+        "PlanePositionSequence": getattr(hd, "PlanePositionSequence", None),
+    }
+    missing = [name for name, value in required_api.items() if value is None]
+    if missing:
+        version = str(getattr(hd, "__version__", "unknown"))
+        raise RuntimeError(
+            "The installed highdicom version (" + version + ") does not provide "
+            "the Parametric Map API required by SlicerDynamicPET: "
+            + ", ".join(missing) + ". The package was left unchanged."
         )
 
     return hd
-
 
 # highdicom is loaded lazily by DPE_export_parametric_map().
 # Do not force installation/version resolution merely by opening the module.
@@ -9554,26 +9581,19 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 # --------------------------------------------------------------------------
-# DICOM PM spatial-source cache.
+# DICOM Parametric Map export.
 #
-# Only one PET source is retained. A different geometry UID set
-# automatically replaces the previous cache.
+# The exporter is deliberately independent of slicer.dicomDatabase.  The
+# original source files may have been moved, the scene may have been restored
+# elsewhere, or the PET may have been loaded by dPETImporter without retaining
+# a database entry.  Spatial geometry comes from the loaded MRML volume and
+# patient/study/series provenance comes from metadata persisted in the scene.
 # --------------------------------------------------------------------------
-
-_DPE_PMAP_SOURCE_CACHE = {
-    "key": None,
-    "source_images": None,
-}
-
-
-def DPE_clear_parametric_map_source_cache():
-    _DPE_PMAP_SOURCE_CACHE["key"] = None
-    _DPE_PMAP_SOURCE_CACHE["source_images"] = None
 
 def DPE_export_parametric_map(
     volume_node_id,
-    geometry_instance_uids,
-    all_instance_uids,
+    source_provenance_json,
+    source_metadata,
     output_path,
     series_description,
     series_number,
@@ -9585,589 +9605,841 @@ def DPE_export_parametric_map(
     unit_meaning,
     derivation_details
 ):
+    import copy
+    import inspect
+    import json
     import os
     import numpy as np
     import slicer
     import vtk
-    hd = DPE_get_highdicom()
+    from pydicom.dataset import Dataset
+    from pydicom.sequence import Sequence
 
     try:
-        # ------------------------------------------------------------
-        # 1. Retrieve temporary Slicer parametric volume
-        # ------------------------------------------------------------
-        volume_node = slicer.mrmlScene.GetNodeByID(
-            str(volume_node_id)
-        )
+        hd = DPE_get_highdicom()
 
+        # ------------------------------------------------------------
+        # 1. Retrieve the temporary Slicer parametric volume and the
+        #    source provenance captured by dPETImporter at load time.
+        # ------------------------------------------------------------
+        volume_node = slicer.mrmlScene.GetNodeByID(str(volume_node_id))
         if volume_node is None:
             return {
                 "ok": False,
-                "error":
-                    "Temporary parametric volume node was not found."
+                "error": "Temporary parametric volume node was not found."
             }
-  )DPEPY2");
 
-  dpePythonScript += QString::fromUtf8(R"DPEPY3(
-
-        # 2. Separate spatial construction sources from provenance.
-
-        geometry_uid_list = str(
-            geometry_instance_uids
-        ).split()
-
-        all_uid_list = str(
-            all_instance_uids
-        ).split()
-
-        if not geometry_uid_list:
+        try:
+            provenance = json.loads(str(source_provenance_json or ""))
+        except Exception as exc:
             return {
                 "ok": False,
                 "error":
-                    "Source PET geometry UID list is empty."
+                    "Could not parse dPET.DICOM.FrameReferences: " + str(exc)
             }
 
-        if not all_uid_list:
+        if not isinstance(provenance, dict):
+            return {
+                "ok": False,
+                "error": "dPET.DICOM.FrameReferences is not a JSON object."
+            }
+
+        try:
+            provenance_schema = int(provenance.get("schemaVersion", 0))
+        except Exception:
+            provenance_schema = 0
+
+        if provenance_schema < 2:
             return {
                 "ok": False,
                 "error":
-                    "Source PET provenance UID list is empty."
+                    "Exact PMAP source mapping requires dPET DICOM provenance "
+                    "schema 2 or newer. Re-import the PET with the current "
+                    "dPETImporter."
             }
 
+        provenance_frames = provenance.get("frames") or []
+        if not provenance_frames:
+            return {
+                "ok": False,
+                "error": "The persisted PET provenance contains no frames."
+            }
 
-        # ------------------------------------------------------------
-        # 3. Read only the DICOM objects needed to define spatial
-        # geometry.
-        #
-        # Classic PET:
-        #   one temporal frame -> one complete slice stack.
-        #
-        # Enhanced PET:
-        #   one temporal frame -> one multiframe DICOM object.
-        #
-        # These objects are cached and reused by every parameter map
-        # exported from this PET.
-        # ------------------------------------------------------------
+        # PythonQt normally converts QVariantMap to dict. Be defensive for
+        # older bridges that expose a mapping-compatible object instead.
+        try:
+            metadata = dict(source_metadata or {})
+        except Exception:
+            metadata = {}
 
-        source_cache_key = tuple(
-            geometry_uid_list
-        )
-
-        if (
-            _DPE_PMAP_SOURCE_CACHE["key"]
-                == source_cache_key
-            and
-            _DPE_PMAP_SOURCE_CACHE["source_images"]
-                is not None
-        ):
-            source_images = (
-                _DPE_PMAP_SOURCE_CACHE[
-                    "source_images"
-                ]
+        def normalize_meta_key(key):
+            return "".join(
+                character.lower()
+                for character in str(key)
+                if character.isalnum()
             )
 
-        else:
-
-            source_paths = []
-            seen_paths = set()
-
-            for uid in geometry_uid_list:
-
-                path = (
-                    slicer.dicomDatabase
-                    .fileForInstance(uid)
-                )
-
-                if (
-                    path
-                    and os.path.isfile(path)
-                    and path not in seen_paths
-                ):
-                    seen_paths.add(path)
-                    source_paths.append(path)
-
-            if not source_paths:
-                return {
-                    "ok": False,
-                    "error":
-                        "Could not resolve the PET spatial "
-                        "reference DICOM instances from the "
-                        "Slicer DICOM database."
-                }
-
-            # Metadata only: source pixel values are not required
-            # to construct the derived parametric volume.
-            import pydicom
-
-            source_images = [
-                pydicom.dcmread(
-                    path,
-                    stop_before_pixels=True
-                )
-                for path in source_paths
-            ]
-
-            _DPE_PMAP_SOURCE_CACHE["key"] = (
-                source_cache_key
-            )
-
-            _DPE_PMAP_SOURCE_CACHE[
-                "source_images"
-            ] = source_images
-
-
-        # ------------------------------------------------------------
-        # Spatial source type.
-        # ------------------------------------------------------------
-
-        source_is_multiframe = [
-            int(
-                getattr(
-                    source,
-                    "NumberOfFrames",
-                    1
-                )
-            ) > 1
-            for source in source_images
-        ]
-
-        has_multiframe_sources = any(
-            source_is_multiframe
-        )
-
-        has_singleframe_sources = any(
-            not value
-            for value in source_is_multiframe
-        )
-
-        if (
-            has_multiframe_sources
-            and has_singleframe_sources
-        ):
-            return {
-                "ok": False,
-                "error":
-                    "PET spatial reference contains a mixture "
-                    "of single-frame and multiframe DICOM images."
-            }
-
-        # ------------------------------------------------------------
-        # Validate spatial source datasets.
-        # ------------------------------------------------------------
-
-        if (
-            has_multiframe_sources
-            and len(source_images) != 1
-        ):
-            return {
-                "ok": False,
-                "error":
-                    "Enhanced PET spatial reference must contain "
-                    "exactly one multiframe DICOM instance."
-            }
-
-
-        # ------------------------------------------------------------
-        # Normalize mandatory Type-2 patient/study attributes.
-        #
-        # Type 2 attributes must exist, but may legitimately have
-        # an empty value when unknown.
-        # ------------------------------------------------------------
-
-        required_type2_attributes = {
-            "PatientName": "",
-            "PatientID": "",
-            "PatientBirthDate": "",
-            "PatientSex": "",
-            "StudyDate": "",
-            "StudyTime": "",
-            "ReferringPhysicianName": "",
-            "StudyID": "",
-            "AccessionNumber": "",
+        normalized_metadata = {
+            normalize_meta_key(key): value
+            for key, value in metadata.items()
         }
 
-        for source in source_images:
-            for attribute_name, empty_value in \
-                    required_type2_attributes.items():
+        def meta(*keys, default=""):
+            for key in keys:
+                value = metadata.get(key, None)
+                if value is None:
+                    value = normalized_metadata.get(
+                        normalize_meta_key(key), None)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+            return default
 
-                if not hasattr(source, attribute_name):
-                    setattr(
-                        source,
-                        attribute_name,
-                        empty_value
-                    )
+        study_instance_uid = str(
+            provenance.get("studyInstanceUID")
+            or meta("StudyInstanceUID", "DICOM.StudyInstanceUID")
+            or ""
+        ).strip()
+        series_instance_uid = str(
+            provenance.get("seriesInstanceUID")
+            or meta("SeriesInstanceUID", "DICOM.SeriesInstanceUID")
+            or ""
+        ).strip()
+        frame_of_reference_uid = str(
+            provenance.get("frameOfReferenceUID")
+            or meta("FrameOfReferenceUID", "DICOM.FrameOfReferenceUID")
+            or ""
+        ).strip()
 
-
-        first_source = source_images[0]
-
-
-        required_type1_attributes = [
-            "StudyInstanceUID",
-            "SeriesInstanceUID",
-            "SOPInstanceUID",
-            "SOPClassUID",
+        missing_context = [
+            name
+            for name, value in (
+                ("StudyInstanceUID", study_instance_uid),
+                ("SeriesInstanceUID", series_instance_uid),
+                ("FrameOfReferenceUID", frame_of_reference_uid),
+            )
+            if not value
         ]
-
-        for attribute_name in required_type1_attributes:
-            if (
-                not hasattr(first_source, attribute_name)
-                or not str(
-                    getattr(
-                        first_source,
-                        attribute_name
-                    )
-                ).strip()
-            ):
-                return {
-                    "ok": False,
-                    "error":
-                        "Source PET is missing mandatory DICOM "
-                        "attribute "
-                        + attribute_name
-                        + "."
-                }
-
-
-        if not hasattr(
-                first_source,
-                "FrameOfReferenceUID"
-        ):
+        if missing_context:
             return {
                 "ok": False,
                 "error":
-                    "Source PET does not contain "
-                    "FrameOfReferenceUID."
+                    "The persisted PET provenance is missing: "
+                    + ", ".join(missing_context)
+                    + ". Re-import the PET with the current dPETImporter."
             }
 
-
-        frame_of_reference_uid = str(
-            first_source.FrameOfReferenceUID
-        )
-
-
-        # All geometry source images must share the same
-        # patient coordinate system.
-        for source in source_images:
-
-            if (
-                hasattr(source, "FrameOfReferenceUID")
-                and
-                str(source.FrameOfReferenceUID)
-                    != frame_of_reference_uid
-            ):
-                return {
-                    "ok": False,
-                    "error":
-                        "PET spatial reference contains more than "
-                        "one FrameOfReferenceUID."
-                }
-
-
-        constructor_source_images = source_images
         # ------------------------------------------------------------
-        # 4. Get parametric values from Slicer
-        #
-        # Slicer NumPy ordering:
-        #   [K, J, I] == [slice, row, column]
+        # 2. Parametric values and exact geometry from the loaded MRML node.
         # ------------------------------------------------------------
         pixel_array = (
             slicer.util.arrayFromVolume(volume_node)
             .copy()
             .astype(np.float32)
         )
-
         if pixel_array.ndim != 3:
             return {
                 "ok": False,
-                "error":
-                    "Parametric map is not a 3D scalar volume."
+                "error": "Parametric map is not a 3D scalar volume."
             }
 
-        # ------------------------------------------------------------
-        # 5. Construct KJI -> RAS affine from Slicer's IJK -> RAS
-        # ------------------------------------------------------------
         ijk_to_ras_vtk = vtk.vtkMatrix4x4()
-
-        volume_node.GetIJKToRASMatrix(
-            ijk_to_ras_vtk
-        )
-
+        volume_node.GetIJKToRASMatrix(ijk_to_ras_vtk)
         ijk_to_ras = np.array(
             [
-                [
-                    ijk_to_ras_vtk.GetElement(r, c)
-                    for c in range(4)
-                ]
+                [ijk_to_ras_vtk.GetElement(r, c) for c in range(4)]
                 for r in range(4)
             ],
-            dtype=np.float64
-        )
-  )DPEPY3");
-
-  dpePythonScript += QString::fromUtf8(R"DPEPY4(
-        # highdicom's Volume array axes are:
-        #
-        #   axis 0 = slice  = K
-        #   axis 1 = row    = J
-        #   axis 2 = column = I
-        #
-        # Slicer's matrix columns are I, J, K.
-        kji_to_ras = np.eye(
-            4,
-            dtype=np.float64
+            dtype=np.float64,
         )
 
-        kji_to_ras[:3, 0] = ijk_to_ras[:3, 2]
-        kji_to_ras[:3, 1] = ijk_to_ras[:3, 1]
-        kji_to_ras[:3, 2] = ijk_to_ras[:3, 0]
-        kji_to_ras[:3, 3] = ijk_to_ras[:3, 3]
+        i_vector_ras = ijk_to_ras[:3, 0]
+        j_vector_ras = ijk_to_ras[:3, 1]
+        k_vector_ras = ijk_to_ras[:3, 2]
+        spacing_i = float(np.linalg.norm(i_vector_ras))
+        spacing_j = float(np.linalg.norm(j_vector_ras))
+        spacing_k = float(np.linalg.norm(k_vector_ras))
+        if min(spacing_i, spacing_j, spacing_k) <= 0.0:
+            return {
+                "ok": False,
+                "error": "Loaded PET geometry contains a zero voxel spacing."
+            }
 
-        # highdicom accepts the source affine convention explicitly
-        # and converts RAS -> DICOM LPS internally.
-        parametric_volume = hd.Volume(
-            array=pixel_array,
-            affine=kji_to_ras,
+        ras_to_lps_3 = np.diag([-1.0, -1.0, 1.0])
+        i_direction_lps = ras_to_lps_3 @ (i_vector_ras / spacing_i)
+        j_direction_lps = ras_to_lps_3 @ (j_vector_ras / spacing_j)
+        image_orientation_patient = np.concatenate(
+            [i_direction_lps, j_direction_lps]
+        ).tolist()
+
+        plane_positions = []
+        plane_position_values = []
+        origin_ras = ijk_to_ras[:3, 3]
+        for k in range(pixel_array.shape[0]):
+            position_ras = origin_ras + float(k) * k_vector_ras
+            position_lps = (ras_to_lps_3 @ position_ras).tolist()
+            plane_position_values.append(position_lps)
+            plane_positions.append(
+                hd.PlanePositionSequence(
+                    coordinate_system="PATIENT",
+                    image_position=position_lps,
+                )
+            )
+
+        plane_orientation = hd.PlaneOrientationSequence(
             coordinate_system="PATIENT",
-            frame_of_reference_uid=
-                frame_of_reference_uid,
-            from_reference_convention="RAS"
+            image_orientation=image_orientation_patient,
         )
+        pixel_measures = hd.PixelMeasuresSequence(
+            pixel_spacing=[spacing_j, spacing_i],
+            slice_thickness=spacing_k,
+            spacing_between_slices=spacing_k,
+        )
+
+        number_of_slices = int(pixel_array.shape[0])
+        position_tolerance_mm = 1.0e-2
+        orientation_tolerance = 1.0e-5
 
         # ------------------------------------------------------------
-        # 6. Real-world quantity definition
+        # 3. Normalize persisted source provenance.
+        #
+        # Two source layouts are supported without reopening DICOM files:
+        #
+        #   CLASSIC_SOP_PER_K
+        #       One SOP instance per Slicer K slice.  dPETImporter has
+        #       verified the exact spatial mapping, so per-PM-frame source
+        #       references can be retained exactly.
+        #
+        #   SINGLE_SOP_VOLUME
+        #       One multiframe/3D SOP instance owns the whole spatial volume
+        #       for each temporal frame.  The importer retains the exact SOP
+        #       identity, but not a SOP-frame-number <-> Slicer-K mapping.
+        #       This is sufficient for honest instance-level provenance; the
+        #       PM geometry itself comes from the loaded MRML volume.
+        # ------------------------------------------------------------
+        source_mode = None
+        source_frames = []
+
+        for temporal_index, frame_record in enumerate(provenance_frames):
+            if not isinstance(frame_record, dict):
+                return {
+                    "ok": False,
+                    "error":
+                        "Invalid source-provenance frame record at temporal "
+                        f"index {temporal_index}."
+                }
+
+            mapping_name = str(frame_record.get("spatialMapping") or "")
+            verified = bool(frame_record.get("spatialOrderVerified", False))
+            instances = frame_record.get("instances") or []
+
+            if mapping_name == "CLASSIC_SOP_PER_K":
+                frame_mode = "classic"
+                if not verified:
+                    return {
+                        "ok": False,
+                        "error":
+                            "The importer did not verify the one-SOP-per-K "
+                            "mapping for temporal frame "
+                            f"{temporal_index + 1}."
+                    }
+                if len(instances) != number_of_slices:
+                    return {
+                        "ok": False,
+                        "error":
+                            "Persisted source slice count does not match the "
+                            "loaded PET K dimension for temporal frame "
+                            f"{temporal_index + 1}: "
+                            f"{len(instances)} vs {number_of_slices}."
+                    }
+
+                seen_uids = set()
+                normalized_instances = []
+                for k, instance in enumerate(instances):
+                    if not isinstance(instance, dict):
+                        return {
+                            "ok": False,
+                            "error":
+                                "Invalid source-instance record for temporal "
+                                f"frame {temporal_index + 1}, slice K={k}."
+                        }
+
+                    sop_uid = str(
+                        instance.get("sopInstanceUID") or "").strip()
+                    sop_class_uid = str(
+                        instance.get("sopClassUID") or "").strip()
+                    if (
+                        not sop_uid
+                        or not sop_class_uid
+                        or sop_uid in seen_uids
+                    ):
+                        return {
+                            "ok": False,
+                            "error":
+                                "Missing or duplicate SOP identity for temporal "
+                                f"frame {temporal_index + 1}, slice K={k}."
+                        }
+                    seen_uids.add(sop_uid)
+
+                    try:
+                        source_position = np.asarray(
+                            instance.get("imagePositionPatient"),
+                            dtype=np.float64,
+                        )
+                        source_orientation = np.asarray(
+                            instance.get("imageOrientationPatient"),
+                            dtype=np.float64,
+                        )
+                    except Exception:
+                        source_position = np.empty((0,), dtype=np.float64)
+                        source_orientation = np.empty((0,), dtype=np.float64)
+
+                    if source_position.shape != (3,):
+                        return {
+                            "ok": False,
+                            "error":
+                                "ImagePositionPatient is missing for temporal "
+                                f"frame {temporal_index + 1}, slice K={k}."
+                        }
+                    if source_orientation.shape != (6,):
+                        return {
+                            "ok": False,
+                            "error":
+                                "ImageOrientationPatient is missing for temporal "
+                                f"frame {temporal_index + 1}, slice K={k}."
+                        }
+
+                    target_position = np.asarray(
+                        plane_position_values[k], dtype=np.float64)
+                    if float(np.max(np.abs(
+                            source_position - target_position))) > position_tolerance_mm:
+                        return {
+                            "ok": False,
+                            "error":
+                                "Persisted source position does not match the "
+                                "loaded PET geometry for temporal frame "
+                                f"{temporal_index + 1}, slice K={k}."
+                        }
+
+                    target_orientation = np.asarray(
+                        image_orientation_patient, dtype=np.float64)
+                    if float(np.max(np.abs(
+                            source_orientation - target_orientation))) > orientation_tolerance:
+                        return {
+                            "ok": False,
+                            "error":
+                                "Persisted source orientation does not match the "
+                                "loaded PET geometry for temporal frame "
+                                f"{temporal_index + 1}, slice K={k}."
+                        }
+
+                    normalized_instances.append(instance)
+
+            elif mapping_name == "SINGLE_SOP_VOLUME":
+                frame_mode = "single_sop_volume"
+                if len(instances) != 1 or not isinstance(instances[0], dict):
+                    return {
+                        "ok": False,
+                        "error":
+                            "A single-SOP PET temporal frame must contain exactly "
+                            "one persisted source instance; temporal frame "
+                            f"{temporal_index + 1} does not."
+                    }
+
+                instance = instances[0]
+                sop_uid = str(
+                    instance.get("sopInstanceUID") or "").strip()
+                sop_class_uid = str(
+                    instance.get("sopClassUID") or "").strip()
+                if not sop_uid or not sop_class_uid:
+                    return {
+                        "ok": False,
+                        "error":
+                            "Missing SOP identity for single-SOP temporal frame "
+                            f"{temporal_index + 1}."
+                    }
+                normalized_instances = [instance]
+
+            else:
+                return {
+                    "ok": False,
+                    "error":
+                        "Unsupported or unavailable persisted PET spatial "
+                        "provenance for temporal frame "
+                        f"{temporal_index + 1}: "
+                        + (mapping_name or "unspecified")
+                        + "."
+                }
+
+            if source_mode is None:
+                source_mode = frame_mode
+            elif source_mode != frame_mode:
+                return {
+                    "ok": False,
+                    "error":
+                        "The dynamic PET contains mixed source representations "
+                        "across temporal frames, which is not supported for "
+                        "metadata-only PMAP export."
+                }
+
+            source_frames.append(normalized_instances)
+
+        # ------------------------------------------------------------
+        # 4. Build the metadata-only stack used by highdicom to construct
+        #    the PM geometry.
+        #
+        # For classic PET these are the verified real source SOPs.  For a
+        # single multiframe/3D SOP, older highdicom releases still expect one
+        # spatial source item per output plane during construction.  In that
+        # case create construction-only single-frame PET metadata with unique
+        # temporary UIDs.  They are never written as provenance and a final
+        # recursive check below guarantees that none survive in the saved PM.
+        # ------------------------------------------------------------
+        construction_sources = []
+        synthetic_construction_uids = set()
+        first_temporal_frame = source_frames[0]
+
+        patient_study = provenance.get("patientStudy") or {}
+        if not isinstance(patient_study, dict):
+            patient_study = {}
+
+        def source_meta_value(attribute_name):
+            value = patient_study.get(attribute_name, None)
+            if value is None or not str(value).strip():
+                value = meta(attribute_name, default="")
+            return str(value or "")
+
+        def make_construction_source(
+            sop_class_uid,
+            sop_instance_uid,
+            image_position_patient,
+            instance_number,
+        ):
+            source = Dataset()
+            source.SOPClassUID = str(sop_class_uid)
+            source.SOPInstanceUID = str(sop_instance_uid)
+            source.StudyInstanceUID = str(study_instance_uid)
+            source.SeriesInstanceUID = str(series_instance_uid)
+            source.FrameOfReferenceUID = str(frame_of_reference_uid)
+            source.Modality = "PT"
+            source.Rows = int(pixel_array.shape[1])
+            source.Columns = int(pixel_array.shape[2])
+            source.ImageOrientationPatient = list(image_orientation_patient)
+            source.ImagePositionPatient = list(image_position_patient)
+            source.PixelSpacing = [spacing_j, spacing_i]
+            source.SliceThickness = spacing_k
+            source.SpacingBetweenSlices = spacing_k
+            source.SamplesPerPixel = 1
+            source.PhotometricInterpretation = "MONOCHROME2"
+            source.BitsAllocated = 16
+            source.BitsStored = 16
+            source.HighBit = 15
+            source.PixelRepresentation = 0
+            source.LossyImageCompression = "00"
+            source.InstanceNumber = int(instance_number)
+
+            for attribute_name in (
+                "PatientName",
+                "PatientID",
+                "PatientBirthDate",
+                "PatientSex",
+                "StudyDate",
+                "StudyTime",
+                "ReferringPhysicianName",
+                "StudyID",
+                "AccessionNumber",
+            ):
+                setattr(
+                    source,
+                    attribute_name,
+                    source_meta_value(attribute_name),
+                )
+
+            position_reference = meta("PositionReferenceIndicator")
+            if position_reference:
+                source.PositionReferenceIndicator = position_reference
+
+            return source
+
+        if source_mode == "classic":
+            for k, instance in enumerate(first_temporal_frame):
+                instance_number = str(
+                    instance.get("instanceNumber") or "").strip()
+                try:
+                    numeric_instance_number = int(instance_number)
+                except Exception:
+                    numeric_instance_number = k + 1
+
+                construction_sources.append(
+                    make_construction_source(
+                        instance["sopClassUID"],
+                        instance["sopInstanceUID"],
+                        instance["imagePositionPatient"],
+                        numeric_instance_number,
+                    )
+                )
+        else:
+            # Construction-only: force a simple single-frame PET SOP class so
+            # highdicom treats each item as one spatial plane.  The real source
+            # SOP class/UIDs are restored below at the provenance level.
+            classic_pet_sop_class_uid = "1.2.840.10008.5.1.4.1.1.128"
+            for k, position in enumerate(plane_position_values):
+                temporary_uid = str(hd.UID())
+                synthetic_construction_uids.add(temporary_uid)
+                construction_sources.append(
+                    make_construction_source(
+                        classic_pet_sop_class_uid,
+                        temporary_uid,
+                        position,
+                        k + 1,
+                    )
+                )
+
+        # ------------------------------------------------------------
+        # 5. Real-world quantity definition.
         # ------------------------------------------------------------
         quantity = hd.sr.CodedConcept(
             value=str(quantity_code),
             scheme_designator="99SDPET",
-            meaning=str(quantity_meaning)
+            meaning=str(quantity_meaning),
         )
-
         unit = hd.sr.CodedConcept(
             value=str(unit_code),
             scheme_designator="UCUM",
-            meaning=str(unit_meaning)
+            meaning=str(unit_meaning),
         )
 
-        finite_values = pixel_array[
-            np.isfinite(pixel_array)
-        ]
-
+        finite_values = pixel_array[np.isfinite(pixel_array)]
         if finite_values.size == 0:
             return {
                 "ok": False,
-                "error":
-                    "Parametric map contains no finite values."
+                "error": "Parametric map contains no finite values."
             }
-
-        value_min = float(
-            finite_values.min()
-        )
-
-        value_max = float(
-            finite_values.max()
-        )
-
-        # Avoid a degenerate mapping range.
+        value_min = float(finite_values.min())
+        value_max = float(finite_values.max())
         if value_max <= value_min:
             value_max = value_min + 1.0e-12
 
         mapping = hd.pm.RealWorldValueMapping(
             lut_label=str(quantity_code)[:16],
-            lut_explanation=
-                str(quantity_meaning)[:64],
-            value_range=(
-                value_min,
-                value_max
-            ),
+            lut_explanation=str(quantity_meaning)[:64],
+            unit=unit,
+            value_range=(value_min, value_max),
+            slope=1.0,
+            intercept=0.0,
             quantity_definition=quantity,
-            unit=unit
         )
 
-        # ------------------------------------------------------------
-        # 7. Display window
-        # ------------------------------------------------------------
-        window_width = max(
-            value_max - value_min,
-            1.0e-12
-        )
+        # The Real World Value Mapping above describes the full quantitative
+        # pixel range. Window/level is visualization metadata and intentionally
+        # uses the robust patient-specific display range computed in C++.
+        display_min = value_min
+        display_max = value_max
+        try:
+            candidate_min = float(
+                meta("SlicerDynamicPET.DisplayWindowMin", default=value_min)
+            )
+            candidate_max = float(
+                meta("SlicerDynamicPET.DisplayWindowMax", default=value_max)
+            )
+            if (
+                np.isfinite(candidate_min)
+                and np.isfinite(candidate_max)
+                and candidate_max > candidate_min
+            ):
+                display_min = candidate_min
+                display_max = candidate_max
+        except Exception:
+            pass
 
-        window_center = (
-            value_min + value_max
-        ) / 2.0
+        window_width = max(display_max - display_min, 1.0e-12)
+        window_center = (display_min + display_max) / 2.0
 
         # ------------------------------------------------------------
-        # 8. Construct standards-based DICOM PM
-        #
-        # highdicom uses Volume geometry to match the PM frames
-        # against source DICOM frames/images.
+        # 6. Construct PM using the verified real source stack.
         # ------------------------------------------------------------
-        pm = hd.pm.ParametricMap(
-            source_images=constructor_source_images,
-
-            pixel_array=parametric_volume,
-
+        pm_kwargs = dict(
+            source_images=construction_sources,
+            pixel_array=pixel_array,
             series_instance_uid=hd.UID(),
-
             series_number=int(series_number),
-
             sop_instance_uid=hd.UID(),
-
             instance_number=1,
-
             manufacturer="SlicerDynamicPET",
-
-            manufacturer_model_name=
-                "SlicerDynamicPET",
-
+            manufacturer_model_name="SlicerDynamicPET",
             software_versions="development",
-
-            device_serial_number=
-                "SlicerDynamicPET",
-
+            device_serial_number="SlicerDynamicPET",
             contains_recognizable_visual_features=False,
+            real_world_value_mappings=[mapping],
+            pixel_measures=pixel_measures,
+            plane_orientation=plane_orientation,
+            plane_positions=plane_positions,
+            series_description=str(series_description)[:64],
+        )
 
-            real_world_value_mappings=[
-                mapping
-            ],
-
-            voi_lut_transformations=[
+        pm_parameters = inspect.signature(hd.pm.ParametricMap).parameters
+        if "voi_lut_transformations" in pm_parameters:
+            # Quantitative kinetic maps commonly have sub-unit windows. DICOM
+            # LINEAR requires WindowWidth >= 1, while LINEAR_EXACT permits any
+            # positive width and maps exactly [center-width/2, center+width/2].
+            pm_kwargs["voi_lut_transformations"] = [
                 hd.VOILUTTransformation(
-                    window_center=
-                        window_center,
-                    window_width=
-                        window_width
+                    window_center=window_center,
+                    window_width=window_width,
+                    voi_lut_function="LINEAR_EXACT",
                 )
-            ],
+            ]
+        elif "window_center" in pm_parameters and "window_width" in pm_parameters:
+            pm_kwargs["window_center"] = window_center
+            pm_kwargs["window_width"] = window_width
 
-            series_description=
-                str(series_description)[:64]
-        )
+        pm = hd.pm.ParametricMap(**pm_kwargs)
+
+        # Older highdicom APIs expose only window_center/window_width and may
+        # create the VOI transform with the default LINEAR function. Normalize
+        # every emitted W/L transform to LINEAR_EXACT so sub-unit kinetic-map
+        # windows remain DICOM-conformant.
+        if hasattr(pm, "WindowCenter") and hasattr(pm, "WindowWidth"):
+            pm.VOILUTFunction = "LINEAR_EXACT"
+        for shared_group in getattr(pm, "SharedFunctionalGroupsSequence", []):
+            for voi_item in getattr(shared_group, "FrameVOILUTSequence", []):
+                if (
+                    hasattr(voi_item, "WindowCenter")
+                    and hasattr(voi_item, "WindowWidth")
+                ):
+                    voi_item.VOILUTFunction = "LINEAR_EXACT"
+        for per_frame_group in getattr(pm, "PerFrameFunctionalGroupsSequence", []):
+            for voi_item in getattr(per_frame_group, "FrameVOILUTSequence", []):
+                if (
+                    hasattr(voi_item, "WindowCenter")
+                    and hasattr(voi_item, "WindowWidth")
+                ):
+                    voi_item.VOILUTFunction = "LINEAR_EXACT"
 
         # ------------------------------------------------------------
-        # Enhanced dynamic PET:
+        # 7. Finalize source provenance.
         #
-        # highdicom required one multiframe instance for geometric
-        # PM construction, but the kinetic result was derived from
-        # ALL temporal Enhanced PET instances.
+        # Classic PET: preserve exact per-plane derivation references using
+        # the importer-verified SOP[k] mapping across all temporal frames.
         #
-        # Record all of those source SOP instances at image level.
+        # Single-SOP volume PET: exact ReferencedFrameNumber mapping was not
+        # persisted, so do not invent it.  DICOM permits the Type-2 Derivation
+        # Image Sequence to contain zero items.  Overall provenance is retained
+        # below by referencing every contributing temporal SOP instance in its
+        # entirety (without ReferencedFrameNumber).
         # ------------------------------------------------------------
+        per_frame_groups = list(
+            getattr(pm, "PerFrameFunctionalGroupsSequence", []) or [])
+        if len(per_frame_groups) != number_of_slices:
+            return {
+                "ok": False,
+                "error":
+                    "Constructed PM frame count does not match the loaded PET "
+                    f"K dimension: {len(per_frame_groups)} vs {number_of_slices}."
+            }
 
-        # ------------------------------------------------------------
-        # Record ALL temporal PET source SOP instances as provenance.
-        #
-        # These DICOM files do not need to be opened. Their SOP
-        # Instance UIDs are already retained on the Slicer sequence.
-        # ------------------------------------------------------------
+        if source_mode == "classic":
+            matched_k_indices = set()
+            for output_frame_index, functional_group in enumerate(
+                    per_frame_groups):
+                position_sequence = getattr(
+                    functional_group, "PlanePositionSequence", None)
+                if not position_sequence or len(position_sequence) == 0:
+                    return {
+                        "ok": False,
+                        "error":
+                            "Constructed PM frame is missing PlanePositionSequence "
+                            f"at output frame {output_frame_index + 1}."
+                    }
 
-        from pydicom.dataset import Dataset
-        from pydicom.sequence import Sequence
+                try:
+                    output_position = np.asarray(
+                        position_sequence[0].ImagePositionPatient,
+                        dtype=np.float64,
+                    )
+                except Exception:
+                    return {
+                        "ok": False,
+                        "error":
+                            "Could not read PM plane position at output frame "
+                            f"{output_frame_index + 1}."
+                    }
 
-        source_sop_class_uid = str(
-            first_source.SOPClassUID
-        )
+                distances = [
+                    float(np.max(np.abs(
+                        output_position
+                        - np.asarray(position, dtype=np.float64))))
+                    for position in plane_position_values
+                ]
+                k = int(np.argmin(distances))
+                if (
+                    distances[k] > position_tolerance_mm
+                    or k in matched_k_indices
+                ):
+                    return {
+                        "ok": False,
+                        "error":
+                            "Could not establish a unique PM-frame to Slicer-K "
+                            f"mapping for output frame {output_frame_index + 1}."
+                    }
+                matched_k_indices.add(k)
 
+                derivation_sequence = getattr(
+                    functional_group, "DerivationImageSequence", None)
+                if (
+                    derivation_sequence is None
+                    or len(derivation_sequence) == 0
+                    or not getattr(
+                        derivation_sequence[0], "SourceImageSequence", None)
+                ):
+                    return {
+                        "ok": False,
+                        "error":
+                            "highdicom did not establish the expected source-image "
+                            "derivation relationship for PM slice "
+                            f"K={k}."
+                    }
+
+                source_reference_template = copy.deepcopy(
+                    derivation_sequence[0].SourceImageSequence[0])
+                temporal_references = []
+                for temporal_instances in source_frames:
+                    instance = temporal_instances[k]
+                    reference = copy.deepcopy(source_reference_template)
+                    reference.ReferencedSOPClassUID = str(
+                        instance["sopClassUID"])
+                    reference.ReferencedSOPInstanceUID = str(
+                        instance["sopInstanceUID"])
+                    if hasattr(reference, "ReferencedFrameNumber"):
+                        del reference.ReferencedFrameNumber
+                    reference.SpatialLocationsPreserved = "YES"
+                    temporal_references.append(reference)
+
+                derivation_sequence[0].SourceImageSequence = Sequence(
+                    temporal_references)
+
+            if len(matched_k_indices) != number_of_slices:
+                return {
+                    "ok": False,
+                    "error":
+                        "Not every PM plane could be mapped to one Slicer K slice."
+                }
+
+        else:
+            # We know which temporal SOP instances contributed, but not which
+            # internal source frame corresponds to a particular output K plane.
+            # Keep the required Type-2 Derivation Image Sequence present and
+            # empty rather than writing a false ReferencedFrameNumber mapping.
+            for functional_group in per_frame_groups:
+                functional_group.DerivationImageSequence = Sequence([])
+
+        # Image/series-level references contain every unique real contributing
+        # source SOP.  For multiframe sources the absence of
+        # ReferencedFrameNumber intentionally means the entire SOP instance.
         source_references = []
+        series_references = []
+        seen_source_uids = set()
+        for temporal_instances in source_frames:
+            for instance in temporal_instances:
+                source_uid = str(instance["sopInstanceUID"])
+                if source_uid in seen_source_uids:
+                    continue
+                seen_source_uids.add(source_uid)
 
-        for source_uid in all_uid_list:
+                source_class_uid = str(instance["sopClassUID"])
 
-            reference = Dataset()
+                image_reference = Dataset()
+                image_reference.ReferencedSOPClassUID = source_class_uid
+                image_reference.ReferencedSOPInstanceUID = source_uid
+                source_references.append(image_reference)
 
-            reference.ReferencedSOPClassUID = (
-                source_sop_class_uid
-            )
+                series_reference = Dataset()
+                series_reference.ReferencedSOPClassUID = source_class_uid
+                series_reference.ReferencedSOPInstanceUID = source_uid
+                series_references.append(series_reference)
 
-            reference.ReferencedSOPInstanceUID = (
-                str(source_uid)
-            )
+        pm.SourceImageSequence = Sequence(source_references)
 
-            source_references.append(
-                reference
-            )
+        referenced_series = Dataset()
+        referenced_series.SeriesInstanceUID = str(series_instance_uid)
+        referenced_series.ReferencedInstanceSequence = Sequence(series_references)
+        pm.ReferencedSeriesSequence = Sequence([referenced_series])
 
-        pm.SourceImageSequence = Sequence(
-            source_references
-        )
+        # Construction-only UIDs must never escape into the written object.
+        if synthetic_construction_uids:
+            def contains_synthetic_uid(dataset):
+                for element in dataset:
+                    if element.VR == "SQ":
+                        for item in element.value:
+                            if contains_synthetic_uid(item):
+                                return True
+                    elif element.VR == "UI":
+                        value = element.value
+                        if isinstance(value, str):
+                            values = [value]
+                        else:
+                            try:
+                                values = list(value)
+                            except Exception:
+                                values = [value]
+                        for uid_value in values:
+                            if str(uid_value) in synthetic_construction_uids:
+                                return True
+                return False
 
-        # Keep model provenance human-readable.
+            if contains_synthetic_uid(pm):
+                return {
+                    "ok": False,
+                    "error":
+                        "A construction-only source UID remained in the final "
+                        "Parametric Map. Export was aborted."
+                }
+
         derivation_parts = [
             str(method_meaning),
             "methodCode=" + str(method_code),
             "quantity=" + str(quantity_meaning),
         ]
-
         details = str(derivation_details).strip()
-
         if details:
             derivation_parts.append(details)
-
-        pm.DerivationDescription = (
-            "; ".join(derivation_parts)
-        )[:1024]
+        pm.DerivationDescription = "; ".join(derivation_parts)[:1024]
 
         # ------------------------------------------------------------
-        # 9. Write PM file
+        # 8. Write PM file.
         # ------------------------------------------------------------
-        output_path = os.path.abspath(
-            str(output_path)
-        )
-
-        os.makedirs(
-            os.path.dirname(output_path),
-            exist_ok=True
-        )
-
+        output_path = os.path.abspath(str(output_path))
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
         if os.path.isfile(output_path):
             os.remove(output_path)
 
-        pm.save_as(
-            output_path,
-            enforce_file_format=True
-        )
-
+        pm.save_as(output_path, enforce_file_format=True)
         if not os.path.isfile(output_path):
             return {
                 "ok": False,
                 "error":
-                    "Parametric Map construction completed "
-                    "but no DICOM file was written."
+                    "Parametric Map construction completed but no DICOM file "
+                    "was written."
             }
 
         return {
             "ok": True,
-
-            "path":
-                output_path,
-
-            "geometry_source_count":
-                len(source_images),
-
-            "provenance_source_count":
-                len(all_uid_list),
-
-            "source_sop_class":
-                str(first_source.SOPClassUID),
-
-            "pm_frames":
-                int(pm.NumberOfFrames),
-
-            "study_uid":
-                str(pm.StudyInstanceUID),
-
-            "frame_of_reference_uid":
-                str(pm.FrameOfReferenceUID)
+            "path": output_path,
+            "temporal_source_frames": len(source_frames),
+            "source_provenance_mode": source_mode,
+            "spatial_source_slices": number_of_slices,
+            "provenance_source_count": len(seen_source_uids),
+            "pm_frames": int(pm.NumberOfFrames),
+            "study_uid": str(pm.StudyInstanceUID),
+            "frame_of_reference_uid": str(pm.FrameOfReferenceUID),
         }
 
     except Exception as exc:
         import traceback
-
         return {
             "ok": False,
-            "error":
-                str(exc)
-                + "\n\n"
-                + traceback.format_exc()
+            "error": str(exc) + "\n\n" + traceback.format_exc(),
         }
-  )DPEPY4");
+  )DPEPY2");
 
   mainContext.evalScript(dpePythonScript);
 
@@ -17929,6 +18201,413 @@ updateMTGAOptimizationUI()
       ->setEnabled(rgbReady);
 }
 
+ParametricDisplayPreset
+qSlicerDynamicPETModuleWidgetPrivate::
+computeParametricDisplayPreset(
+    const std::vector<double>& values,
+    const std::string& field,
+    bool ignoreZeroValues) const
+{
+  ParametricDisplayPreset preset;
+
+  if (values.empty())
+  {
+    return preset;
+  }
+
+  const bool useFitMask =
+      this->parametricVoxelMask.size() == values.size();
+
+  std::vector<double> validValues;
+  validValues.reserve(values.size());
+
+  for (size_t index = 0; index < values.size(); ++index)
+  {
+    if (useFitMask && this->parametricVoxelMask[index] == 0)
+    {
+      continue;
+    }
+
+    const double value = values[index];
+    if (!std::isfinite(value))
+    {
+      continue;
+    }
+
+    if (ignoreZeroValues && value == 0.0)
+    {
+      continue;
+    }
+
+    validValues.push_back(value);
+  }
+
+  // Be defensive for imported/legacy situations where the fit mask is not
+  // available. The display calculation must never prevent image creation.
+  if (validValues.empty() && useFitMask)
+  {
+    for (double value : values)
+    {
+      if (!std::isfinite(value))
+      {
+        continue;
+      }
+      if (ignoreZeroValues && value == 0.0)
+      {
+        continue;
+      }
+      validValues.push_back(value);
+    }
+  }
+
+  if (validValues.empty())
+  {
+    return preset;
+  }
+
+  std::sort(validValues.begin(), validValues.end());
+
+  const auto percentile =
+      [&validValues](double fraction) -> double
+      {
+        if (validValues.empty())
+        {
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+
+        fraction = std::max(0.0, std::min(1.0, fraction));
+        const double position =
+            fraction * static_cast<double>(validValues.size() - 1);
+        const size_t lower =
+            static_cast<size_t>(std::floor(position));
+        const size_t upper =
+            static_cast<size_t>(std::ceil(position));
+
+        if (lower == upper)
+        {
+          return validValues[lower];
+        }
+
+        const double weight = position - static_cast<double>(lower);
+        return validValues[lower] * (1.0 - weight)
+             + validValues[upper] * weight;
+      };
+
+  const auto makeNonDegenerate =
+      [](double& minimum, double& maximum)
+      {
+        if (!std::isfinite(minimum) || !std::isfinite(maximum))
+        {
+          return false;
+        }
+
+        if (maximum <= minimum)
+        {
+          const double scale =
+              std::max({1.0, std::abs(minimum), std::abs(maximum)});
+          const double epsilon = 1.0e-6 * scale;
+          minimum -= 0.5 * epsilon;
+          maximum += 0.5 * epsilon;
+        }
+        return maximum > minimum;
+      };
+
+  // Blood-volume fraction has a meaningful physical display domain. Keep it
+  // fixed at [0,1] as an explicit SlicerDynamicPET policy. Other metrics,
+  // including R2, retain patient-specific robust display scaling.
+  if (field == "vb")
+  {
+    preset.valid = true;
+    preset.minimum = 0.0;
+    preset.maximum = 1.0;
+    preset.colorNodeID = "vtkMRMLColorTableNodeFileViridis.txt";
+    preset.rangePolicy = "Physical[0,1]";
+    return preset;
+  }
+
+  const bool errorOrCriterion =
+      field == "AIC" ||
+      field == "BIC" ||
+      field == "MASE" ||
+      field == "chi2";
+
+  preset.colorNodeID =
+      errorOrCriterion
+      ? "vtkMRMLColorTableNodeFileMagma.txt"
+      : "vtkMRMLColorTableNodeFileViridis.txt";
+
+  // Time delay has a meaningful zero and direction, so preserve a symmetric
+  // zero-centered display. Regression intercept is treated this way only when
+  // the fitted population actually spans both signs.
+  const bool spansZero = validValues.front() < 0.0 && validValues.back() > 0.0;
+  const bool signedDisplay = field == "td" || (field == "Intercept" && spansZero);
+
+  if (signedDisplay)
+  {
+    preset.colorNodeID = "vtkMRMLColorTableNodeFileDivergingBlueRed.txt";
+
+    std::vector<double> absValues;
+    absValues.reserve(validValues.size());
+    for (double value : validValues)
+    {
+      absValues.push_back(std::abs(value));
+    }
+    std::sort(absValues.begin(), absValues.end());
+
+    const auto absPercentile =
+        [&absValues](double fraction) -> double
+        {
+          fraction = std::max(0.0, std::min(1.0, fraction));
+          const double position =
+              fraction * static_cast<double>(absValues.size() - 1);
+          const size_t lower = static_cast<size_t>(std::floor(position));
+          const size_t upper = static_cast<size_t>(std::ceil(position));
+          if (lower == upper)
+          {
+            return absValues[lower];
+          }
+          const double weight = position - static_cast<double>(lower);
+          return absValues[lower] * (1.0 - weight)
+               + absValues[upper] * weight;
+        };
+
+    const double q25 = percentile(0.25);
+    const double q75 = percentile(0.75);
+    const double centralWidth = std::max(0.0, q75 - q25);
+
+    const std::array<std::pair<double, const char*>, 3> candidates = {{
+        {0.99, "SymmetricP99Abs"},
+        {0.98, "SymmetricP98Abs"},
+        {0.95, "SymmetricP95Abs"}
+    }};
+
+    double halfRange = 0.0;
+    const char* selectedPolicy = "SymmetricP95Abs";
+    for (size_t candidateIndex = 0;
+         candidateIndex < candidates.size();
+         ++candidateIndex)
+    {
+      halfRange = absPercentile(candidates[candidateIndex].first);
+      if (!(halfRange > 0.0) || !std::isfinite(halfRange))
+      {
+        continue;
+      }
+
+      const double occupancy = centralWidth / (2.0 * halfRange);
+      selectedPolicy = candidates[candidateIndex].second;
+      if (occupancy >= 0.20 || candidateIndex + 1 == candidates.size())
+      {
+        break;
+      }
+    }
+
+    if (!(halfRange > 0.0) || !std::isfinite(halfRange))
+    {
+      halfRange = std::max(std::abs(validValues.front()),
+                           std::abs(validValues.back()));
+    }
+
+    preset.minimum = -halfRange;
+    preset.maximum = halfRange;
+    preset.rangePolicy = selectedPolicy;
+    preset.valid = makeNonDegenerate(preset.minimum, preset.maximum);
+    return preset;
+  }
+
+  // Quantitative sequential maps: start conservatively and tighten only when
+  // the central 50% of fitted voxels occupies too little of the color range.
+  // This protects k4/DV-type long tails while avoiding needless saturation.
+  const double q25 = percentile(0.25);
+  const double q75 = percentile(0.75);
+  const double centralWidth = std::max(0.0, q75 - q25);
+
+  struct CandidateRange
+  {
+    double lowFraction;
+    double highFraction;
+    const char* label;
+  };
+
+  const std::array<CandidateRange, 3> candidates = {{
+      {0.01, 0.99, "P1-P99"},
+      {0.02, 0.98, "P2-P98"},
+      {0.05, 0.95, "P5-P95"}
+  }};
+
+  for (size_t candidateIndex = 0;
+       candidateIndex < candidates.size();
+       ++candidateIndex)
+  {
+    double minimum = percentile(candidates[candidateIndex].lowFraction);
+    double maximum = percentile(candidates[candidateIndex].highFraction);
+
+    if (!makeNonDegenerate(minimum, maximum))
+    {
+      continue;
+    }
+
+    const double occupancy =
+        centralWidth / std::max(maximum - minimum, 1.0e-12);
+
+    preset.minimum = minimum;
+    preset.maximum = maximum;
+    preset.rangePolicy = candidates[candidateIndex].label;
+    preset.valid = true;
+
+    if (occupancy >= 0.20 || candidateIndex + 1 == candidates.size())
+    {
+      break;
+    }
+  }
+
+  if (!preset.valid)
+  {
+    preset.minimum = validValues.front();
+    preset.maximum = validValues.back();
+    preset.rangePolicy = "FiniteMinMaxFallback";
+    preset.valid = makeNonDegenerate(preset.minimum, preset.maximum);
+  }
+
+  return preset;
+}
+
+void qSlicerDynamicPETModuleWidgetPrivate::
+applyParametricDisplayPreset(
+    vtkMRMLScalarVolumeNode* node,
+    const std::vector<double>& values,
+    const std::string& field,
+    bool ignoreZeroValues)
+{
+  if (!node)
+  {
+    return;
+  }
+
+  ParametricDisplayPreset preset =
+      this->computeParametricDisplayPreset(
+          values,
+          field,
+          ignoreZeroValues);
+
+  if (!preset.valid)
+  {
+    return;
+  }
+
+  node->CreateDefaultDisplayNodes();
+
+  vtkMRMLScalarVolumeDisplayNode* displayNode =
+      vtkMRMLScalarVolumeDisplayNode::SafeDownCast(
+          node->GetDisplayNode());
+
+  if (!displayNode)
+  {
+    return;
+  }
+
+  displayNode->AutoWindowLevelOff();
+  displayNode->SetWindowLevelMinMax(
+      preset.minimum,
+      preset.maximum);
+  displayNode->InterpolateOn();
+  displayNode->InvertDisplayScalarRangeOff();
+  displayNode->SetWindowMappingMethod(
+      vtkMRMLScalarVolumeDisplayNode::
+          GetWindowMappingMethodFromString("Linear"));
+  displayNode->ApplyThresholdOff();
+  displayNode->AutoThresholdOff();
+  displayNode->SetAndObserveColorNodeID(
+      preset.colorNodeID.c_str());
+
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.RangePolicy",
+      preset.rangePolicy.c_str());
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.WindowMin",
+      QString::number(preset.minimum, 'g', 16)
+          .toUtf8().constData());
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.WindowMax",
+      QString::number(preset.maximum, 'g', 16)
+          .toUtf8().constData());
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.ColorNodeID",
+      preset.colorNodeID.c_str());
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.Mapping",
+      "Linear");
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.Interpolate",
+      "1");
+  node->SetAttribute(
+      "SlicerDynamicPET.Display.Threshold",
+      "0");
+}
+
+vtkMRMLScalarVolumeNode*
+qSlicerDynamicPETModuleWidgetPrivate::
+findParametricResultNode(
+    const std::string& method,
+    const std::string& modelID,
+    const std::string& field,
+    vtkMRMLScalarVolumeNode* sourceNode) const
+{
+  if (!sourceNode || !sourceNode->GetID())
+  {
+    return nullptr;
+  }
+
+  vtkMRMLScene* scene = sourceNode->GetScene();
+  if (!scene)
+  {
+    return nullptr;
+  }
+
+  const int numberOfVolumes =
+      scene->GetNumberOfNodesByClass("vtkMRMLScalarVolumeNode");
+
+  for (int index = 0; index < numberOfVolumes; ++index)
+  {
+    vtkMRMLScalarVolumeNode* candidate =
+        vtkMRMLScalarVolumeNode::SafeDownCast(
+            scene->GetNthNodeByClass(
+                index,
+                "vtkMRMLScalarVolumeNode"));
+
+    if (!candidate)
+    {
+      continue;
+    }
+
+    const char* resultType =
+        candidate->GetAttribute("SlicerDynamicPET.ResultType");
+    const char* candidateMethod =
+        candidate->GetAttribute("SlicerDynamicPET.Method");
+    const char* candidateModel =
+        candidate->GetAttribute("SlicerDynamicPET.Model");
+    const char* candidateField =
+        candidate->GetAttribute("SlicerDynamicPET.Parameter");
+    const char* sourceNodeID =
+        candidate->GetAttribute("SlicerDynamicPET.SourceNodeID");
+
+    if (resultType &&
+        candidateMethod &&
+        candidateModel &&
+        candidateField &&
+        sourceNodeID &&
+        std::string(resultType) == "ParametricMap" &&
+        std::string(candidateMethod) == method &&
+        std::string(candidateModel) == modelID &&
+        std::string(candidateField) == field &&
+        std::string(sourceNodeID) == sourceNode->GetID())
+    {
+      return candidate;
+    }
+  }
+
+  return nullptr;
+}
+
 vtkMRMLScalarVolumeNode*
 qSlicerDynamicPETModuleWidgetPrivate::
 createMTGAOptimizedScalarVolume(
@@ -18902,6 +19581,12 @@ generateMTGAOptimizedResult()
         << (kiNode ? kiNode->GetID() : "NULL")
         << std::endl;
 
+    this->applyParametricDisplayPreset(
+        kiNode,
+        this->MTGAOptimizedKiValues,
+        kiField.toStdString(),
+        true);
+
     std::cout
         << "[MTGA OPT] Creating optimized DV scalar volume..."
         << std::endl;
@@ -18918,6 +19603,12 @@ generateMTGAOptimizedResult()
         << "[MTGA OPT] DV node created: "
         << (dvNode ? dvNode->GetID() : "NULL")
         << std::endl;
+
+    this->applyParametricDisplayPreset(
+        dvNode,
+        this->MTGAOptimizedDVValues,
+        dvField.toStdString(),
+        true);
 
     if (kiNode)
     {
@@ -20248,6 +20939,12 @@ generateTCMOptimizedResult()
 
       setMetadata(node);
 
+      this->applyParametricDisplayPreset(
+          node,
+          optimizedValues.at(field),
+          field,
+          true);
+
       this->TCMOptimizedNodeIDs
           .push_back(
               node->GetID());
@@ -20332,6 +21029,8 @@ generateTCMOptimizedResult()
             0.0,
             8.0);
 
+        displayNode->InterpolateOff();
+        displayNode->ApplyThresholdOff();
         displayNode->SetAndObserveColorNodeID(
             "vtkMRMLColorTableNodeLabels");
       }
@@ -20528,6 +21227,21 @@ outputMTGAParametricResult(
         refPETNode,
         shNode,
         refPetID);
+
+    for (const std::string& field : fields)
+    {
+      vtkMRMLScalarVolumeNode* node =
+          this->findParametricResultNode(
+              "MTGA",
+              modelID,
+              field,
+              refPETNode);
+
+      this->applyParametricDisplayPreset(
+          node,
+          logic->ExtractParameter(resultIt->second, field),
+          field);
+    }
   }
 
   if (this->MTGASaveDICOMCheckBoxImg->isChecked())
@@ -20710,151 +21424,221 @@ exportParametricMapDICOM(
     return false;
   }
 
+  const bool optimizedSparseMap =
+      modelID == "MTGAOptimized" ||
+      modelID == "TCMOptimized";
+
+  const ParametricDisplayPreset displayPreset =
+      this->computeParametricDisplayPreset(
+          values,
+          field,
+          optimizedSparseMap);
+
   // ------------------------------------------------------------------------
-  // Find DICOM source instance UIDs.
+  // DICOM source provenance captured by dPETImporter at load time.
   //
-  // Prefer the first actual PET sequence frame, because the displayed
-  // proxy node may or may not carry the original DICOM attributes.
+  // PMAP export is deliberately independent of slicer.dicomDatabase and the
+  // continued presence of the original source files.  Classic slice stacks
+  // may retain an exact SOP-per-K mapping; single multiframe/3D SOP sources are
+  // referenced honestly at whole-instance level without inventing frame IDs.
   // ------------------------------------------------------------------------
 
-  QStringList geometryUIDList;
-  QStringList allSourceUIDList;
+  vtkMRMLNode* sourceMetadataNode =
+      q->sequencePETNode
+      ? static_cast<vtkMRMLNode*>(q->sequencePETNode)
+      : static_cast<vtkMRMLNode*>(refPETNode);
 
-  QSet<QString> geometryUIDSet;
-  QSet<QString> allSourceUIDSet;
+  QString frameReferencesText =
+      nodeAttributeText(sourceMetadataNode, "dPET.DICOM.FrameReferences");
 
-  // ------------------------------------------------------------------------
-  // We need two different source sets:
-  //
-  // geometryUIDList:
-  //   DICOM instances for ONE temporal PET frame only.
-  //   Classic PET   -> complete slice stack for one time point.
-  //   Enhanced PET  -> one multiframe SOP instance.
-  //
-  // allSourceUIDList:
-  //   every unique SOP Instance UID that contributed to the
-  //   dynamic kinetic fit. These are provenance references only.
-  // ------------------------------------------------------------------------
-
-  if (q->sequencePETNode)
+  if (frameReferencesText.isEmpty() && sourceMetadataNode != refPETNode)
   {
-    const int numberOfFrames =
-        q->sequencePETNode->GetNumberOfDataNodes();
-
-    for (int frameIndex = 0;
-         frameIndex < numberOfFrames;
-         ++frameIndex)
-    {
-      vtkMRMLNode* frameNode =
-          q->sequencePETNode->GetNthDataNode(
-              frameIndex);
-
-      if (!frameNode)
-      {
-        continue;
-      }
-
-      const char* attr =
-          frameNode->GetAttribute(
-              "DICOM.instanceUIDs");
-
-      if (!attr)
-      {
-        continue;
-      }
-
-      const QStringList frameUIDs =
-          QString::fromUtf8(attr)
-              .split(
-                  QRegularExpression("\\s+"),
-                  Qt::SkipEmptyParts);
-
-      if (frameUIDs.isEmpty())
-      {
-        continue;
-      }
-
-      // First valid dynamic frame becomes the spatial
-      // reference set used by highdicom.
-      if (geometryUIDList.isEmpty())
-      {
-        for (const QString& uid : frameUIDs)
-        {
-          if (!geometryUIDSet.contains(uid))
-          {
-            geometryUIDSet.insert(uid);
-            geometryUIDList.append(uid);
-          }
-        }
-      }
-
-      // All temporal source SOPs are retained as provenance.
-      for (const QString& uid : frameUIDs)
-      {
-        if (!allSourceUIDSet.contains(uid))
-        {
-          allSourceUIDSet.insert(uid);
-          allSourceUIDList.append(uid);
-        }
-      }
-    }
+    frameReferencesText =
+        nodeAttributeText(refPETNode, "dPET.DICOM.FrameReferences");
   }
 
+  QJsonParseError provenanceParseError;
+  const QJsonDocument provenanceDocument =
+      QJsonDocument::fromJson(
+          frameReferencesText.toUtf8(),
+          &provenanceParseError);
 
-  // Fallback if sequence frames do not retain source references.
-  if (geometryUIDList.isEmpty())
-  {
-    const char* attr =
-        refPETNode->GetAttribute(
-            "DICOM.instanceUIDs");
-
-    if (attr)
-    {
-      const QStringList proxyUIDs =
-          QString::fromUtf8(attr)
-              .split(
-                  QRegularExpression("\\s+"),
-                  Qt::SkipEmptyParts);
-
-      for (const QString& uid : proxyUIDs)
-      {
-        if (!geometryUIDSet.contains(uid))
-        {
-          geometryUIDSet.insert(uid);
-          geometryUIDList.append(uid);
-        }
-
-        if (!allSourceUIDSet.contains(uid))
-        {
-          allSourceUIDSet.insert(uid);
-          allSourceUIDList.append(uid);
-        }
-      }
-    }
-  }
-
-
-  const QString geometryInstanceUIDs =
-      geometryUIDList.join(" ");
-
-  const QString allInstanceUIDs =
-      allSourceUIDList.join(" ");
-
-  if (geometryInstanceUIDs.isEmpty() ||
-      allInstanceUIDs.isEmpty())
+  if (frameReferencesText.isEmpty() ||
+      provenanceParseError.error != QJsonParseError::NoError ||
+      !provenanceDocument.isObject())
   {
     QMessageBox::warning(
         q,
         QObject::tr("DICOM PMAP export"),
         QObject::tr(
-            "The source PET does not contain "
-            "DICOM.instanceUIDs.\n\n"
-            "A standards-based DICOM Parametric Map needs "
-            "the original DICOM patient/study context, "
-            "therefore this map was not exported."));
-
+            "The selected PET does not contain valid persisted DICOM frame "
+            "provenance (dPET.DICOM.FrameReferences).\n\n"
+            "Re-import it with the current dPETImporter. PMAP export will not "
+            "reopen the original DICOM files or query the DICOM database."));
     return false;
   }
+
+  const QJsonObject provenanceRoot = provenanceDocument.object();
+  const int provenanceSchema =
+      provenanceRoot.value(QStringLiteral("schemaVersion")).toInt(0);
+  if (provenanceSchema < 2)
+  {
+    QMessageBox::warning(
+        q,
+        QObject::tr("DICOM PMAP export"),
+        QObject::tr(
+            "The selected PET contains legacy DICOM provenance.\n\n"
+            "Metadata-only PMAP export requires provenance schema 2 or newer. "
+            "Re-import the PET with the current dPETImporter."));
+    return false;
+  }
+
+  // ------------------------------------------------------------------------
+  // Source DICOM context from metadata already loaded into MRML/Subject
+  // Hierarchy and from the persisted provenance JSON.
+  // ------------------------------------------------------------------------
+
+  QVariantMap sourceMetadata;
+
+  if (displayPreset.valid)
+  {
+    sourceMetadata["SlicerDynamicPET.DisplayWindowMin"] =
+        QString::number(displayPreset.minimum, 'g', 16);
+    sourceMetadata["SlicerDynamicPET.DisplayWindowMax"] =
+        QString::number(displayPreset.maximum, 'g', 16);
+    sourceMetadata["SlicerDynamicPET.DisplayRangePolicy"] =
+        QString::fromStdString(displayPreset.rangePolicy);
+  }
+
+  const auto putMetadata =
+      [&sourceMetadata](const QString& key, const QString& value)
+      {
+        const QString trimmed = value.trimmed();
+        if (!trimmed.isEmpty() && !sourceMetadata.contains(key))
+        {
+          sourceMetadata[key] = trimmed;
+        }
+      };
+
+  const auto addJsonScalarObject =
+      [&putMetadata](const QJsonObject& object)
+      {
+        for (auto it = object.begin(); it != object.end(); ++it)
+        {
+          const QJsonValue value = it.value();
+          if (value.isString())
+          {
+            putMetadata(it.key(), value.toString());
+          }
+          else if (value.isDouble())
+          {
+            putMetadata(
+                it.key(),
+                QString::number(value.toDouble(), 'g', 16));
+          }
+          else if (value.isBool())
+          {
+            putMetadata(
+                it.key(),
+                value.toBool()
+                    ? QStringLiteral("1")
+                    : QStringLiteral("0"));
+          }
+        }
+      };
+
+  // Provenance captured by the importer is authoritative for DICOM identity.
+  putMetadata(
+      "StudyInstanceUID",
+      provenanceRoot.value(QStringLiteral("studyInstanceUID")).toString());
+  putMetadata(
+      "SeriesInstanceUID",
+      provenanceRoot.value(QStringLiteral("seriesInstanceUID")).toString());
+  putMetadata(
+      "FrameOfReferenceUID",
+      provenanceRoot.value(QStringLiteral("frameOfReferenceUID")).toString());
+
+  const QJsonValue patientStudyValue =
+      provenanceRoot.value(QStringLiteral("patientStudy"));
+  if (patientStudyValue.isObject())
+  {
+    addJsonScalarObject(patientStudyValue.toObject());
+  }
+
+  const auto hierarchyAttribute =
+      [q](vtkIdType itemID, const char* attributeName) -> QString
+      {
+        if (!q->SubjectHierarchyNode ||
+            itemID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID ||
+            !q->SubjectHierarchyNode->HasItemAttribute(
+                itemID, attributeName))
+        {
+          return QString();
+        }
+        return QString::fromStdString(
+            q->SubjectHierarchyNode->GetItemAttribute(
+                itemID, attributeName));
+      };
+
+  // Subject Hierarchy is a fallback for patient/study descriptive fields.
+  putMetadata("PatientName", hierarchyAttribute(q->patID, "DICOM.PatientName"));
+  putMetadata("PatientID", hierarchyAttribute(q->patID, "DICOM.PatientID"));
+  putMetadata("PatientBirthDate", hierarchyAttribute(q->patID, "DICOM.PatientBirthDate"));
+  putMetadata("PatientSex", hierarchyAttribute(q->patID, "DICOM.PatientSex"));
+  putMetadata("StudyDate", hierarchyAttribute(q->stuID, "DICOM.StudyDate"));
+  putMetadata("StudyTime", hierarchyAttribute(q->stuID, "DICOM.StudyTime"));
+  putMetadata("ReferringPhysicianName", hierarchyAttribute(q->stuID, "DICOM.ReferringPhysicianName"));
+  putMetadata("StudyID", hierarchyAttribute(q->stuID, "DICOM.StudyID"));
+  putMetadata("AccessionNumber", hierarchyAttribute(q->stuID, "DICOM.AccessionNumber"));
+
+  const auto putNodeOrKinetic =
+      [&](const QString& key,
+          const char* directAttribute,
+          const QString& commonKey)
+      {
+        QString value = nodeAttributeText(sourceMetadataNode, directAttribute);
+        if (value.isEmpty() && sourceMetadataNode != refPETNode)
+        {
+          value = nodeAttributeText(refPETNode, directAttribute);
+        }
+        if (value.isEmpty())
+        {
+          value = kineticMetadataCommonText(sourceMetadataNode, commonKey);
+        }
+        if (value.isEmpty() && sourceMetadataNode != refPETNode)
+        {
+          value = kineticMetadataCommonText(refPETNode, commonKey);
+        }
+        putMetadata(key, value);
+      };
+
+  // Copy scalar kinetic metadata as a compatibility/descriptive fallback.
+  const QString persistedMetadataText =
+      nodeAttributeText(sourceMetadataNode, "dPET.KineticMetadata");
+  if (!persistedMetadataText.isEmpty())
+  {
+    QJsonParseError parseError;
+    const QJsonDocument document =
+        QJsonDocument::fromJson(
+            persistedMetadataText.toUtf8(),
+            &parseError);
+    if (parseError.error == QJsonParseError::NoError &&
+        document.isObject())
+    {
+      const QJsonObject root = document.object();
+      addJsonScalarObject(root);
+      const QJsonValue commonValue = root.value(QStringLiteral("common"));
+      if (commonValue.isObject())
+      {
+        addJsonScalarObject(commonValue.toObject());
+      }
+    }
+  }
+
+  putNodeOrKinetic(
+      "PositionReferenceIndicator",
+      "DICOM.PositionReferenceIndicator",
+      "PositionReferenceIndicator");
 
   // ------------------------------------------------------------------------
   // Quantity semantics.
@@ -21141,8 +21925,8 @@ exportParametricMapDICOM(
           QVariantList{
               QString::fromUtf8(
                   tempNode->GetID()),
-              geometryInstanceUIDs,
-              allInstanceUIDs,
+              frameReferencesText,
+              sourceMetadata,
               outputPath,
               seriesDescription,
               seriesNumber,
@@ -21317,6 +22101,21 @@ outputTCMParametricResult(
         refPETNode,
         shNode,
         refPetID);
+
+    for (const std::string& field : fields)
+    {
+      vtkMRMLScalarVolumeNode* node =
+          this->findParametricResultNode(
+              "TCM",
+              modelID,
+              field,
+              refPETNode);
+
+      this->applyParametricDisplayPreset(
+          node,
+          logic->ExtractParameter(resultIt->second, field),
+          field);
+    }
   }
 
   if (this->TCMSaveDICOMCheckBoxImg->isChecked())

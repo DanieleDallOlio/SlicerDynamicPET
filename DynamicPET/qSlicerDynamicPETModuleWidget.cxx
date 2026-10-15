@@ -1214,6 +1214,129 @@ QString formatTCMBoundStatus(unsigned int flags)
   return hits.join(", ");
 }
 
+// Central, source-independent quality control for ROI TAC observations.
+// Only quantities offered for fitting are mandatory. Missing optional
+// workbook columns (e.g. PeakStDev or PET volume) must not reject a frame.
+std::vector<std::string> defaultTACFitStatistics()
+{
+    return {"Mean", "Median", "Peak", "Max"};
+}
+
+double tacFitStatisticValue(const VoxelStatistics& stats, const std::string& id)
+{
+    if (id == "Mean") return stats.mean;
+    if (id == "Median") return stats.median;
+    if (id == "Peak") return stats.peak;
+    if (id == "Max") return stats.max;
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+bool tacFrameHasFiniteFitStatistics(
+    const VoxelStatistics& stats,
+    const std::vector<std::string>& fitStatistics)
+{
+    if (stats.empty || fitStatistics.empty()) return false;
+    for (const std::string& id : fitStatistics)
+    {
+        if (!std::isfinite(tacFitStatisticValue(stats, id))) return false;
+    }
+    return true;
+}
+
+struct TACQualityReport
+{
+    QStringList lines;
+    size_t examinedFrames{0};
+    size_t affectedFrames{0};
+    size_t newlyExcludedFrames{0};
+};
+
+TACQualityReport maskNonFiniteTACObservations(
+    std::map<std::string, std::vector<VoxelStatistics>>& tacData,
+    const std::map<std::string, std::string>& roiNames,
+    const std::vector<std::string>& fitStatistics)
+{
+    TACQualityReport report;
+    if (fitStatistics.empty()) return report;
+
+    for (auto& [roiID, frames] : tacData)
+    {
+        QStringList frameDescriptions;
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            ++report.examinedFrames;
+            VoxelStatistics& stats = frames[i];
+            QStringList missing;
+            if (stats.empty)
+            {
+                missing << QObject::tr("empty ROI");
+            }
+            else
+            {
+                for (const std::string& id : fitStatistics)
+                {
+                    if (!std::isfinite(tacFitStatisticValue(stats, id)))
+                    {
+                        missing << QString::fromStdString(id);
+                    }
+                }
+            }
+
+            if (!missing.isEmpty())
+            {
+                if (stats.keep) ++report.newlyExcludedFrames;
+                stats.keep = false;  // Preserve the raw measurements and time grid.
+                ++report.affectedFrames;
+                frameDescriptions << QObject::tr("%1 (%2)")
+                    .arg(static_cast<qulonglong>(i))
+                    .arg(missing.join(", "));
+            }
+        }
+        if (!frameDescriptions.isEmpty())
+        {
+            const auto nameIt = roiNames.find(roiID);
+            const QString roiName = nameIt == roiNames.end()
+                ? QString::fromStdString(roiID)
+                : QString::fromStdString(nameIt->second);
+            report.lines << QObject::tr("%1: frame(s) %2")
+                .arg(roiName, frameDescriptions.join("; "));
+        }
+    }
+    return report;
+}
+
+void showTACQualityWarning(QWidget* parent, const QString& source,
+                           const TACQualityReport& report,
+                           bool reportAlreadyExcluded = false)
+{
+    if (reportAlreadyExcluded ? report.affectedFrames == 0
+                              : report.newlyExcludedFrames == 0) return;
+    const QString introduction = QObject::tr(
+        "%1: non-finite/missing TAC observations were detected. "
+        "%2 ROI/frame observation(s) have been excluded from fitting and "
+        "as measured input-function observations. Original TAC values and "
+        "frame timing are preserved. Models needing unavailable boundary "
+        "samples may still require a new input function or fitting range.\n\n"
+        "Affected ROI(s), 0-based frame index(es), and missing fit statistic(s):")
+        .arg(source)
+        .arg(static_cast<qulonglong>(report.affectedFrames));
+    QMessageBox warning(parent);
+    warning.setIcon(QMessageBox::Warning);
+    warning.setWindowTitle(QObject::tr("TAC data quality"));
+    const QString fullList = report.lines.join(QStringLiteral("\n"));
+    if (fullList.size() <= 3500)
+    {
+        warning.setText(introduction + QStringLiteral("\n") + fullList);
+    }
+    else
+    {
+        warning.setText(introduction + QStringLiteral("\n") +
+                        QObject::tr("See 'Show Details' for the complete list."));
+        warning.setDetailedText(fullList);
+    }
+    warning.exec();
+}
+
 std::vector<std::string> sortedSegmentIDs(
     const std::map<std::string, std::string>& segmentNames)
 {
@@ -1411,6 +1534,9 @@ public:
   bool loadTableWorkbook(const QString& filePath, QString* errorMessage = nullptr);
   void clearTableWorkbook();
   void rebuildTACStatisticUI();
+  void validateCurrentTACData(const QString& source,
+                              bool reportAlreadyExcluded = false);
+  std::vector<std::string> currentTACFitStatisticIDs() const;
   void updateTableWeightingAvailability();
   void updateTableUnitUI();
   void updateAcquisitionTimingContext(bool logMessage = true);
@@ -6434,6 +6560,46 @@ updateTableWeightingAvailability()
 }
 
 //-----------------------------------------------------------------------------
+std::vector<std::string>
+qSlicerDynamicPETModuleWidgetPrivate::
+currentTACFitStatisticIDs() const
+{
+    if (!this->tableBasedMode) return defaultTACFitStatistics();
+    std::vector<std::string> ids;
+    ids.reserve(this->tableFitStatistics.size());
+    for (const TACStatisticOption& option : this->tableFitStatistics)
+    {
+        ids.push_back(option.id);
+    }
+    return ids;
+}
+
+void
+qSlicerDynamicPETModuleWidgetPrivate::
+validateCurrentTACData(const QString& source,
+                       bool reportAlreadyExcluded)
+{
+    Q_Q(qSlicerDynamicPETModuleWidget);
+    const TACQualityReport report = maskNonFiniteTACObservations(
+        q->segmentTACs, q->segmentTACsnames, this->currentTACFitStatisticIDs());
+    if (report.newlyExcludedFrames > 0)
+    {
+        // Changes to imported or computed observations invalidate both ROI fits.
+        q->clearFITdata();
+        q->clearFITMTGAdata();
+        if (this->tableBasedMode)
+        {
+            this->captureActiveTACState(this->tableTACState);
+        }
+        else if (!this->multiTimepointMode)
+        {
+            this->captureActiveTACState(this->imageTACState);
+        }
+        this->invalidateInputFunctionResults();
+    }
+    showTACQualityWarning(q, source, report, reportAlreadyExcluded);
+}
+
 void
 qSlicerDynamicPETModuleWidgetPrivate::
 rebuildTACStatisticUI()
@@ -7354,6 +7520,25 @@ loadTableWorkbook(
         return false;
     }
 
+    std::vector<std::string> tableFitIDs;
+    tableFitIDs.reserve(this->tableFitStatistics.size());
+    for (const TACStatisticOption& option : this->tableFitStatistics)
+    {
+        tableFitIDs.push_back(option.id);
+    }
+    if (tableFitIDs.empty())
+    {
+        if (errorMessage)
+        {
+            *errorMessage = QObject::tr(
+                "TAC quality control could not run: the imported workbook "
+                "provides no common fitting statistic.");
+        }
+        return false;
+    }
+    const TACQualityReport tableQuality = maskNonFiniteTACObservations(
+        newState.segmentTACs, newState.segmentTACsnames, tableFitIDs);
+
     this->tableTACState = std::move(newState);
     this->tableDataLoaded = true;
     this->tableWorkbookPath = filePath;
@@ -7440,6 +7625,29 @@ loadTableWorkbook(
             .arg(acquisitionEndSec, 0, 'g', 10)
             .arg(framingLabel)
             .arg(this->tableTimingSummary));
+    // Show the outcome even when the dataset is clean. Otherwise a missing
+    // warning is indistinguishable from a validation path that never ran.
+    this->TableStatusLabel->setText(
+        this->TableStatusLabel->text() +
+        QObject::tr(" | TAC QC: %1/%2 ROI-frame observations excluded")
+            .arg(static_cast<qulonglong>(tableQuality.affectedFrames))
+            .arg(static_cast<qulonglong>(tableQuality.examinedFrames)));
+
+    if (tableQuality.affectedFrames > 0)
+    {
+        // In Release builds routine console logs are suppressed. The WARNING
+        // keyword ensures this actionable data-quality message is retained.
+        this->logToPythonConsole(
+            QObject::tr("[SlicerDynamicPET TAC QC] WARNING: %1/%2 ROI-frame "
+                        "observations excluded from imported XLSX.\n%3")
+                .arg(static_cast<qulonglong>(tableQuality.affectedFrames))
+                .arg(static_cast<qulonglong>(tableQuality.examinedFrames))
+                .arg(tableQuality.lines.join(QStringLiteral("\n"))));
+    }
+    // Warn on ANY invalid observation at import, including ones already
+    // excluded by an earlier mask. Subsequent fits needn't repeat the dialog.
+    showTACQualityWarning(q, QObject::tr("Imported XLSX workbook"),
+                          tableQuality, true);
 
     return true;
 }
@@ -9233,7 +9441,7 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
         max_col = find_col(lookup, ["Max", "Maximum", "SUVmax"])
   )DPEPY1");
 
-  dpePythonScript += QString::fromUtf8(R"DPEPY2(
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_1(
         generic_value_col = find_col(lookup, ["Value", "TAC", "Activity", "Concentration", "Radioactivity", "SUVbw", "SUV"])
 
         stat_columns = {}
@@ -9456,7 +9664,8 @@ def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
 
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
-            if not data:
+)DPEPY2_1");
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_2(            if not data:
                 continue
 
             df = pd.DataFrame(data)
@@ -9734,7 +9943,8 @@ def DPE_export_parametric_map(
         pixel_array = (
             slicer.util.arrayFromVolume(volume_node)
             .copy()
-            .astype(np.float32)
+)DPEPY2_2");
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_3(            .astype(np.float32)
         )
         if pixel_array.ndim != 3:
             return {
@@ -9965,7 +10175,8 @@ def DPE_export_parametric_map(
                     "error":
                         "Unsupported or unavailable persisted PET spatial "
                         "provenance for temporal frame "
-                        f"{temporal_index + 1}: "
+)DPEPY2_3");
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_4(                        f"{temporal_index + 1}: "
                         + (mapping_name or "unspecified")
                         + "."
                 }
@@ -10201,7 +10412,8 @@ def DPE_export_parametric_map(
         if hasattr(pm, "WindowCenter") and hasattr(pm, "WindowWidth"):
             pm.VOILUTFunction = "LINEAR_EXACT"
         for shared_group in getattr(pm, "SharedFunctionalGroupsSequence", []):
-            for voi_item in getattr(shared_group, "FrameVOILUTSequence", []):
+)DPEPY2_4");
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_5(            for voi_item in getattr(shared_group, "FrameVOILUTSequence", []):
                 if (
                     hasattr(voi_item, "WindowCenter")
                     and hasattr(voi_item, "WindowWidth")
@@ -10425,7 +10637,8 @@ def DPE_export_parametric_map(
             "ok": True,
             "path": output_path,
             "temporal_source_frames": len(source_frames),
-            "source_provenance_mode": source_mode,
+)DPEPY2_5");
+  dpePythonScript += QString::fromUtf8(R"DPEPY2_6(            "source_provenance_mode": source_mode,
             "spatial_source_slices": number_of_slices,
             "provenance_source_count": len(seen_source_uids),
             "pm_frames": int(pm.NumberOfFrames),
@@ -10439,7 +10652,7 @@ def DPE_export_parametric_map(
             "ok": False,
             "error": str(exc) + "\n\n" + traceback.format_exc(),
         }
-  )DPEPY2");
+  )DPEPY2_6");
 
   mainContext.evalScript(dpePythonScript);
 
@@ -12197,7 +12410,7 @@ buildCurrentSegmentInputFunction(
     values.push_back(value);
     if (keepMask)
     {
-      keepMask->push_back(frameStats.keep);
+      keepMask->push_back(frameStats.keep && std::isfinite(value));
     }
   }
 
@@ -13992,6 +14205,7 @@ processQueuedMultiTimepointSegmentEdits()
 
     if (anyTACChanged)
     {
+        this->validateCurrentTACData(QObject::tr("Updated multi-timepoint TACs"));
         q->clearFITdata();
         q->clearFITMTGAdata();
         if (inputSegmentChanged)
@@ -24534,6 +24748,7 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
       return;
     }
 
+    d->validateCurrentTACData(tr("Multi-timepoint image TACs"), true);
     d->populatePlotSegmentCheckboxes();
     d->rebuildTACStatisticUI();
     d->populateIF();
@@ -24647,6 +24862,7 @@ void qSlicerDynamicPETModuleWidget::onTACbutton()
   }
   // CT-referenced ROI volumes are intentionally not computed here.
 
+  d->validateCurrentTACData(tr("Single-acquisition image TACs"), true);
   d->updateAcquisitionTimingContext(false);
   d->populatePlotSegmentCheckboxes();
   d->rebuildTACStatisticUI();
@@ -26657,6 +26873,7 @@ std::vector<double> qSlicerDynamicPETModuleWidget::extractColumn(const std::vect
 void qSlicerDynamicPETModuleWidget::onFITbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
+  d->validateCurrentTACData(tr("TCM ROI TACs"));
 
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
@@ -26864,11 +27081,18 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
         vtkGenericWarningMacro("Unknown stat: " << currentSelectedStatID);
         return;
       }
-      if (!vs.keep) {
-        wgtVec[segmentName][ivs] = 0.;
+      const bool fitObservationAvailable =
+          vs.keep && std::isfinite(value);
+      if (!fitObservationAvailable)
+      {
+        wgtVec[segmentName][ivs] = 0.0;
+        // The TCM solver validates all TAC entries, even zero-weight ones.
+        // Use a finite value only inside the temporary fit buffer; this
+        // observation has weight zero and is never used for fitting.
+        if (!std::isfinite(value)) value = 0.0;
       }
-      tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
-      keeptacvec[segmentName].push_back(vs.keep);  // Adds one-element row (column vector)
+      tac[segmentName].emplace_back(1, value);
+      keeptacvec[segmentName].push_back(fitObservationAvailable);
     }
   }
   if (d->weightFitCheckBox->isChecked())
@@ -27078,6 +27302,21 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
     std::vector<double> weightFit(
         wgtVec[segmentID].begin(),
         wgtVec[segmentID].begin() + fitFrameCount);
+
+    const size_t validFitObservations = static_cast<size_t>(std::count_if(
+        weightFit.begin(), weightFit.end(),
+        [](double weight) { return std::isfinite(weight) && weight > 0.0; }));
+    if (validFitObservations < 2)
+    {
+      const auto nameIt = segmentTACsnames.find(segmentID);
+      const QString roiName = nameIt != segmentTACsnames.end()
+          ? QString::fromStdString(nameIt->second)
+          : QString::fromStdString(segmentID);
+      QMessageBox::warning(this, tr("TCM fit range"),
+          tr("ROI '%1': fewer than two finite retained TAC observations remain "
+             "in the selected TCM fit range.").arg(roiName));
+      continue;
+    }
 
     wgt = &weightFit;
     const long NframeFit = static_cast<long>(fitFrameCount);
@@ -28313,6 +28552,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
+  d->validateCurrentTACData(tr("MTGA ROI TACs"));
 
   if (segmentTACsnames.empty() || segmentTACs.empty()) {
     std::cerr << "Missing TACs!" << std::endl;
@@ -28447,10 +28687,11 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
         std::cerr << "Unknown stat: " << currentSelectedStatID << std::endl;
         return;
       }
-      if (!vs.keep) {
-        wgtVec[segmentName][ivs] = 0.;
+      if (!vs.keep || !std::isfinite(value))
+      {
+        wgtVec[segmentName][ivs] = 0.0;
       }
-      tac[segmentName].emplace_back(1, value);  // Adds one-element row (column vector)
+      tac[segmentName].emplace_back(1, value); // Preserve missing values for gap reconstruction.
     }
   }
 
@@ -28769,6 +29010,12 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
 
     auto tac_flatten = extractColumn(tacVOI);
     tac_flatten.resize(modelSupportCount);
+    // Frames before usable IF support cannot enter regression or tissue
+    // integration. Do not pass their missing data into the model routines.
+    for (size_t i = 0; i < std::min(firstUsableIndex, tac_flatten.size()); ++i)
+    {
+      if (!std::isfinite(tac_flatten[i])) tac_flatten[i] = 0.0;
+    }
 
     std::vector<double> cpFit(
         ifResult.frameModelPlasma.begin(),
@@ -28797,6 +29044,22 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAbutton()
     for (size_t i = regressionEndCount; i < weightFit.size(); ++i)
     {
         weightFit[i] = 0.0;
+    }
+
+    const size_t validRegressionObservations = static_cast<size_t>(std::count_if(
+        weightFit.begin() + static_cast<std::ptrdiff_t>(startFrameIndex),
+        weightFit.begin() + static_cast<std::ptrdiff_t>(regressionEndCount),
+        [](double weight) { return std::isfinite(weight) && weight > 0.0; }));
+    if (validRegressionObservations < 2)
+    {
+      const auto nameIt = segmentTACsnames.find(segmentID);
+      const QString roiName = nameIt != segmentTACsnames.end()
+          ? QString::fromStdString(nameIt->second)
+          : QString::fromStdString(segmentID);
+      QMessageBox::warning(this, tr("MTGA fit range"),
+          tr("ROI '%1': fewer than two finite retained TAC observations remain "
+             "in the selected MTGA regression range.").arg(roiName));
+      continue;
     }
 
     if (!reconstructRemovedTissueFrames(
@@ -30159,35 +30422,30 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   }
 }
 
-bool qSlicerDynamicPETModuleWidget::checkdisplayedDynamicPET() {
-  vtkMRMLPlotViewNode* plotViewNode = nullptr;
-  vtkCollection* viewNodes = this->mrmlScene()->GetNodesByClass("vtkMRMLPlotViewNode");
-  if (!viewNodes || viewNodes->GetNumberOfItems() == 0)
-  {
-      return false; // no plot view node
-  }
+bool qSlicerDynamicPETModuleWidget::checkdisplayedDynamicPET()
+{
+    vtkMRMLScene* scene = this->mrmlScene();
+    if (!scene)
+    {
+        return false;
+    }
 
-  plotViewNode = vtkMRMLPlotViewNode::SafeDownCast(viewNodes->GetItemAsObject(0));
-  if (!plotViewNode)
-  {
-      return false;
-  }
+    vtkMRMLPlotViewNode* plotViewNode =
+        vtkMRMLPlotViewNode::SafeDownCast(
+            scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
 
-  // Get the currently displayed plot chart
-  vtkMRMLPlotChartNode* currentPlot = vtkMRMLPlotChartNode::SafeDownCast(
-      this->mrmlScene()->GetNodeByID(plotViewNode->GetPlotChartNodeID())
-  );
-  if (!currentPlot)
-  {
-      return false;
-  }
+    if (!plotViewNode || !plotViewNode->GetPlotChartNodeID())
+    {
+        return false;
+    }
 
-  // Check if the currently displayed plot is your "DynamicPET.PlotChart"
-  if (currentPlot->GetName() == nullptr || std::string(currentPlot->GetName()) != "DynamicPET.PlotChart")
-  {
-      return false; // not the DynamicPET plot, do nothing
-  }
-  return true;
+    vtkMRMLPlotChartNode* currentPlot =
+        vtkMRMLPlotChartNode::SafeDownCast(
+            scene->GetNodeByID(plotViewNode->GetPlotChartNodeID()));
+
+    return currentPlot &&
+           currentPlot->GetName() &&
+           std::string(currentPlot->GetName()) == "DynamicPET.PlotChart";
 }
 
 void qSlicerDynamicPETModuleWidget::onDeleteKeyPressed()
@@ -30298,6 +30556,8 @@ void qSlicerDynamicPETModuleWidget::onResetbutton()
   bool changed = false;
   bool currentInputWasModified = false;
 
+  const std::vector<std::string> fittingStatistics =
+      d->currentTACFitStatisticIDs();
   for (auto& segmentPair : this->segmentTACs)
   {
     const bool isCurrentInput =
@@ -30306,7 +30566,7 @@ void qSlicerDynamicPETModuleWidget::onResetbutton()
 
     for (VoxelStatistics& vs : segmentPair.second)
     {
-      if (!vs.empty && !vs.keep)
+      if (!vs.keep && tacFrameHasFiniteFitStatistics(vs, fittingStatistics))
       {
         if (isCurrentInput)
           currentInputWasModified = true;

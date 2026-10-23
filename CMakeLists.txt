@@ -5,8 +5,6 @@ project(DynamicPET)
 # -----------------------------------------------------------------------------
 # Extension meta-information
 # -----------------------------------------------------------------------------
-# Extension meta-information
-# -----------------------------------------------------------------------------
 
 set(EXTENSION_HOMEPAGE "https://github.com/DanieleDallOlio/SlicerDynamicPET")
 set(EXTENSION_CATEGORY "Quantification")

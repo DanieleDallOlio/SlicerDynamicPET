@@ -3,28 +3,6 @@ cmake_minimum_required(VERSION 3.16.3...3.19.7 FATAL_ERROR)
 project(DynamicPET)
 
 # -----------------------------------------------------------------------------
-# CPU feature detection and compiler optimization flags
-# -----------------------------------------------------------------------------
-include(CheckCXXSourceCompiles)
-
-# Check if AVX512 is supported by trying to compile a simple intrinsic
-if(MSVC)
-
-  set(
-    CMAKE_CXX_FLAGS_RELEASE
-    "${CMAKE_CXX_FLAGS_RELEASE} /O2 /fp:fast /arch:AVX2"
-  )
-
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-
-  set(
-    CMAKE_CXX_FLAGS_RELEASE
-    "${CMAKE_CXX_FLAGS_RELEASE} -O3 -ffast-math -funroll-loops"
-  )
-
-endif()
-
-# -----------------------------------------------------------------------------
 # Extension meta-information
 # -----------------------------------------------------------------------------
 # Extension meta-information

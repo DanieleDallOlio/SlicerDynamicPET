@@ -9148,32 +9148,87 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
   QString dpePythonScript;
   dpePythonScript += QString::fromUtf8(R"DPEPY1(
-try:
-    import pandas as pd
-except ImportError:
-    import slicer
-    slicer.util.pip_install("pandas")
-    import pandas as pd
-
-try:
-    import xlsxwriter
-except ImportError:
-    import slicer
-    slicer.util.pip_install("xlsxwriter")
-
-try:
-    import openpyxl
-except ImportError:
-    import slicer
-    slicer.util.pip_install("openpyxl")
-
 import importlib
 import importlib.metadata
 import sys
 import slicer
+import numpy as np
 
 def DPE_console_message(message):
     print(message)
+
+def DPE_prepare_excel_dependencies(mode):
+    """Prepare optional Excel dependencies only when an Excel feature is used.
+
+    mode:
+      "import" -> pandas + openpyxl
+      "export" -> pandas + xlsxwriter
+
+    Nothing is installed when the DynamicPET module is opened. If an Excel
+    feature needs a missing package, ask the user explicitly before pip
+    modifies Slicer's shared Python environment.
+    """
+    if mode == "import":
+        required = (("pandas", "pandas"), ("openpyxl", "openpyxl"))
+        feature_name = "Excel TAC import"
+    elif mode == "export":
+        required = (("pandas", "pandas"), ("xlsxwriter", "xlsxwriter"))
+        feature_name = "Excel export"
+    else:
+        return None, "Unknown Excel dependency mode: " + str(mode)
+
+    missing_packages = []
+    for module_name, package_name in required:
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name == module_name:
+                missing_packages.append(package_name)
+            else:
+                return None, (
+                    f"Python package '{module_name}' is installed but cannot be "
+                    f"imported because module '{exc.name}' is missing. DynamicPET "
+                    "did not modify the Python environment."
+                )
+        except Exception as exc:
+            return None, (
+                f"Python package '{module_name}' could not be imported. "
+                "DynamicPET did not modify the Python environment. "
+                f"Original error: {exc}"
+            )
+
+    if missing_packages:
+        package_text = ", ".join(missing_packages)
+        install = slicer.util.confirmYesNoDisplay(
+            f"{feature_name} requires the optional Python package(s): "
+            f"{package_text}.\n\nInstall them now?",
+            "DynamicPET optional dependency",
+        )
+        if not install:
+            return None, (
+                f"{feature_name} requires: {package_text}. "
+                "Installation was cancelled."
+            )
+        try:
+            slicer.util.pip_install(" ".join(missing_packages))
+            importlib.invalidate_caches()
+        except Exception as exc:
+            return None, (
+                "Could not install the optional Python package(s): "
+                f"{package_text}. Original error: {exc}"
+            )
+
+    try:
+        pd = importlib.import_module("pandas")
+        if mode == "import":
+            importlib.import_module("openpyxl")
+        else:
+            importlib.import_module("xlsxwriter")
+        return pd, ""
+    except Exception as exc:
+        return None, (
+            f"{feature_name} dependencies are not usable. Original error: {exc}"
+        )
 
 def DPE_get_highdicom():
     """Reuse an existing highdicom installation without replacing it.
@@ -9233,18 +9288,16 @@ def DPE_get_highdicom():
 # highdicom is loaded lazily by DPE_export_parametric_map().
 # Do not force installation/version resolution merely by opening the module.
 
-try:
-    import numpy as np
-except ImportError:
-    import slicer
-    slicer.util.pip_install("numpy")
-
 def DPE_save_multisheet_excel(filepath, sheet_data_dict, metadata=None):
     """
     Save the detailed DynamicPET TAC workbook.  ROI sheet names remain ROI
     names.  The optional _DynamicPET sheet is deliberately small and optional
     so that externally produced workbooks do not need to reproduce it.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("export")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
             df = pd.DataFrame(data)[["Time(s)", "FrameStart_s", "FrameMid_s", "FrameEnd_s", "Duration_s", "Mean", "Median", "StDev","IQR","Min", "Max", "Q1", "Q3", "Peak", "PeakStDev", "PeakVoxelCount", "VoxelCount","Volume(mm3)","Volume(cm3)"]]
@@ -9256,6 +9309,8 @@ def DPE_save_multisheet_excel(filepath, sheet_data_dict, metadata=None):
             )
             md.to_excel(writer, sheet_name="_DynamicPET", index=False)
 
+
+    return {"ok": True, "error": ""}
 
 def DPE_load_tac_workbook(filepath, time_mode="auto"):
     """
@@ -9269,6 +9324,10 @@ def DPE_load_tac_workbook(filepath, time_mode="auto"):
     representative time exists, a contiguous frame schedule is inferred.  A
     generic time is interpreted as frame end in Auto mode.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("import")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     import math
     import re
 
@@ -9633,6 +9692,10 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
     sheet_data_dict: dict[str, list[dict]]
         Sheet name -> one dictionary per fitted model.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("export")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     columns = [
         "Model", "K1", "k2", "k3", "k4", "ka", "fA", "vb", "td",
         "Ki", "DV", "AIC", "BIC", "MASE", "chi^2_nu", "BoundHits",
@@ -9649,6 +9712,8 @@ def DPE_saveTCM_multisheet_excel(filepath, sheet_data_dict):
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 
+    return {"ok": True, "error": ""}
+
 def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
     """
     Save ROI-wise MTGA parameter tables using the compact Ki / DV schema.
@@ -9657,6 +9722,10 @@ def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
     Model column preserves the semantic distinction. KiPrime / DVPrime are
     accepted only for backward compatibility with an older C++ bridge.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("export")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     columns = ["Model", "Ki", "DV", "Intercept", "R2", "AIC", "MASE"]
 
     def numeric_or_nan(value):
@@ -9714,6 +9783,8 @@ def DPE_saveMTGA_multisheet_excel(filepath, sheet_data_dict):
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 
+    return {"ok": True, "error": ""}
+
 def DPE_generic_save_multisheet_excel(filepath, sheet_data_dict):
     """
     Save generic ROI-wise fitted curves (currently TCM).
@@ -9721,6 +9792,10 @@ def DPE_generic_save_multisheet_excel(filepath, sheet_data_dict):
     sheet_data_dict: dict[str, list[dict]]
         Sheet name -> one dictionary per time point.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("export")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     with pd.ExcelWriter(filepath, engine="xlsxwriter") as writer:
         for sheet, data in sheet_data_dict.items():
             if not data:
@@ -9739,6 +9814,8 @@ def DPE_generic_save_multisheet_excel(filepath, sheet_data_dict):
             df.to_excel(writer, sheet_name=sheet, index=False)
 
 
+    return {"ok": True, "error": ""}
+
 def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     """
     Save ROI-wise MTGA graphical coordinates and fitted lines.
@@ -9747,6 +9824,10 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
     written in a stable order; any future model exposing the same *_x, *_y,
     *_fitted triplet is retained automatically afterwards.
     """
+    pd, dependency_error = DPE_prepare_excel_dependencies("export")
+    if pd is None:
+        return {"ok": False, "error": dependency_error}
+
     preferred_models = [
         "Patlak",
         "Relative Patlak",
@@ -9796,6 +9877,8 @@ def DPE_genericMTGA_save_multisheet_excel(filepath, sheet_data_dict):
                 df = df[cols]
 
             df.to_excel(writer, sheet_name=sheet, index=False)
+
+    return {"ok": True, "error": ""}
 
 # --------------------------------------------------------------------------
 # DICOM Parametric Map export.
@@ -25664,10 +25747,17 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
   }
 
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  const QVariant result = mainContext.call(
+  const QVariant resultVariant = mainContext.call(
       "DPE_save_multisheet_excel",
       QVariantList{ fullPath, segmentDict, metadata });
-  Q_UNUSED(result);
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("Excel export"),
+        result.value("error").toString());
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
@@ -25679,7 +25769,17 @@ void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
 
   QVariantMap segmentDict = this->TCMParamsToPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  PythonQtObjectPtr result = mainContext.call("DPE_saveTCM_multisheet_excel", QVariantList{ fullPath, segmentDict });
+  const QVariant resultVariant = mainContext.call(
+      "DPE_saveTCM_multisheet_excel",
+      QVariantList{ fullPath, segmentDict });
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("TCM Excel export"),
+        result.value("error").toString());
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onSaveMTGAExcelbutton()
@@ -25691,7 +25791,17 @@ void qSlicerDynamicPETModuleWidget::onSaveMTGAExcelbutton()
 
   QVariantMap segmentDict = this->MTGAParamsToPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  PythonQtObjectPtr result = mainContext.call("DPE_saveMTGA_multisheet_excel", QVariantList{ fullPath, segmentDict });
+  const QVariant resultVariant = mainContext.call(
+      "DPE_saveMTGA_multisheet_excel",
+      QVariantList{ fullPath, segmentDict });
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("MTGA Excel export"),
+        result.value("error").toString());
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onSaveTCMfittedExcelbutton()
@@ -25703,7 +25813,17 @@ void qSlicerDynamicPETModuleWidget::onSaveTCMfittedExcelbutton()
 
   QVariantMap segmentDict = this->fittedTCMtoPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  PythonQtObjectPtr result = mainContext.call("DPE_generic_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
+  const QVariant resultVariant = mainContext.call(
+      "DPE_generic_save_multisheet_excel",
+      QVariantList{ fullPath, segmentDict });
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("TCM fitted-curve Excel export"),
+        result.value("error").toString());
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onSaveMTGAfittedExcelbutton()
@@ -25715,7 +25835,17 @@ void qSlicerDynamicPETModuleWidget::onSaveMTGAfittedExcelbutton()
 
   QVariantMap segmentDict = this->fittedMTGAtoPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
-  PythonQtObjectPtr result = mainContext.call("DPE_genericMTGA_save_multisheet_excel", QVariantList{ fullPath, segmentDict });
+  const QVariant resultVariant = mainContext.call(
+      "DPE_genericMTGA_save_multisheet_excel",
+      QVariantList{ fullPath, segmentDict });
+  const QVariantMap result = resultVariant.toMap();
+  if (!result.value("ok").toBool())
+  {
+    QMessageBox::warning(
+        this,
+        tr("MTGA fitted-curve Excel export"),
+        result.value("error").toString());
+  }
 }
 
 void qSlicerDynamicPETModuleWidget::onSelectedPoint(vtkStringArray* mrmlPlotSeriesIDs, vtkCollection* selectionCol)

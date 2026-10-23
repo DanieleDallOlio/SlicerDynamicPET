@@ -32,6 +32,7 @@
 #include "qMRMLNodeComboBox.h"
 #include <vtkCollection.h>
 #include <vtkSmartPointer.h>
+#include <vtkWeakPointer.h>
 #include <vtkMRMLScene.h>
 #include <vtkStringArray.h>
 #include <vtkMRMLScalarVolumeNode.h>
@@ -122,6 +123,8 @@ public:
 
 public slots:
   void onSubjectHierarchyChanged();
+  void onSceneNodeAboutToBeRemoved(vtkObject* caller, vtkObject* node);
+  void onSubjectHierarchyItemAboutToBeRemoved(vtkObject* caller, void* callData);
   void onPatChanged(int index);
   void onStuChanged(int index);
   void onCTChanged(int index);
@@ -191,6 +194,11 @@ protected:
   vtkMRMLSequenceNode* segSequenceNode;
   vtkMRMLSequenceBrowserNode* sequenceBrowserPETNode;
   vtkSmartPointer<SegmentationChangeWatcher> SegWatcher;
+  // Weak: the scene owns this node. Never retain a removed segmentation.
+  vtkWeakPointer<vtkMRMLSegmentationNode> SelectedSegmentationNode;
+  bool SegmentationRemovalCleanupQueued{false};
+  unsigned int SegmentationRemovalSerial{0};
+  void handleRemovedSegmentation(bool multiTimepoint);
 private:
   Q_DECLARE_PRIVATE(qSlicerDynamicPETModuleWidget);
   Q_DISABLE_COPY(qSlicerDynamicPETModuleWidget);

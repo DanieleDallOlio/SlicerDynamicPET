@@ -46,6 +46,7 @@
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QDateTime>
+#include <QStatusBar>
 #include <QDir>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -4052,6 +4053,7 @@ setMultiTimepointMode(bool enabled)
     }
     q->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
     q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    q->SelectedSegmentationNode = nullptr;
     q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
     q->segmentIDs.clear();
     if (enabled)
@@ -5334,6 +5336,12 @@ prepareDynamicMultiTimepointAcquisition(
         vtkSmartPointer<vtkMRMLSequenceNode> newSequence =
             vtkSmartPointer<vtkMRMLSequenceNode>::New();
         newSequence->SetName(stableName.c_str());
+        // A synchronized segmentation sequence must use the PET master's
+        // index metadata, not the vtkMRMLSequenceNode defaults. Matching
+        // numeric index *values* alone does not guarantee compatibility.
+        newSequence->SetIndexName(petSequence->GetIndexName());
+        newSequence->SetIndexUnit(petSequence->GetIndexUnit());
+        newSequence->SetIndexType(petSequence->GetIndexType());
         newSequence->SetAttribute("SlicerDynamicPET.MultiPreparedStaticSegmentation", "1");
         scene->AddNode(newSequence);
 
@@ -23037,6 +23045,7 @@ setPETItemID(vtkIdType newPetID)
   q->sequencePETNode = nullptr;
   q->sequenceBrowserPETNode = nullptr;
   q->segSequenceNode = nullptr;
+  q->SelectedSegmentationNode = nullptr;
 
   if (q->SegWatcher)
   {
@@ -23072,6 +23081,7 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
   this->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->petID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  this->SelectedSegmentationNode = nullptr;
   this->sequencePETNode = nullptr;
   this->segSequenceNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
@@ -23130,13 +23140,16 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
   // Install global key watcher
   if (mainWindow)
   {
-    this->keyWatcher = new KeyPressWatcher(mainWindow);
+    this->keyWatcher = new KeyPressWatcher(this);
     mainWindow->installEventFilter(this->keyWatcher);
     QObject::connect(this->keyWatcher, SIGNAL(deletePressed()), this, SLOT(onDeleteKeyPressed()));
   }
 
-  // Optional: start with watcher disabled
-  this->keyWatcher->setActive(true);
+  // The Delete-key hook belongs only to this module, not to other Slicer modules.
+  if (this->keyWatcher)
+  {
+    this->keyWatcher->setActive(false);
+  }
   this->PET_flatten_values.clear();
   this->PETdims[0] = 0;
   this->PETdims[1] = 0;
@@ -23217,9 +23230,242 @@ qSlicerDynamicPETModuleWidget::~qSlicerDynamicPETModuleWidget()
 //   this->ui->progressBar->setVisible(false);
 // }
 
+// React synchronously to the *identity* of a disappearing segmentation.
+// Do not clear plot nodes or rebuild Subject Hierarchy controls from inside
+// Slicer's removal callback: doing so is re-entrant and can crash.
+void qSlicerDynamicPETModuleWidget::handleRemovedSegmentation(bool multiTimepoint)
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+  if (multiTimepoint != d->isMultiTimepointMode())
+  {
+    return;
+  }
+
+  if (multiTimepoint)
+  {
+    d->clearMultiTimepointSegmentationWatchers();
+    d->multiTimepointPreparationValid = false;
+    d->multiTimepointSelectionValidated = false;
+  }
+  else
+  {
+    // Clear observers BEFORE Slicer destroys the segmentation and its
+    // vtkSegmentation object (SegmentationChangeWatcher holds raw VTK keys).
+    if (this->SegWatcher)
+    {
+      this->SegWatcher->Clear();
+      this->SegWatcher->browser = nullptr;
+    }
+    // Unregister the disappearing proxy/sequence pair before Slicer's
+    // removal machinery processes the node. Do not remove the sequence node
+    // from the scene: it may contain user-edited segmentation frames.
+    if (this->sequenceBrowserPETNode && this->segSequenceNode &&
+        this->segSequenceNode->GetID() &&
+        this->sequenceBrowserPETNode->GetMasterSequenceNode() != this->segSequenceNode &&
+        this->sequenceBrowserPETNode->IsSynchronizedSequenceNode(this->segSequenceNode->GetID()))
+    {
+      this->sequenceBrowserPETNode->RemoveSynchronizedSequenceNode(
+          this->segSequenceNode->GetID());
+    }
+    this->SelectedSegmentationNode = nullptr;
+    this->segSequenceNode = nullptr;
+    this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+    this->segmentIDs.clear();
+    if (d->isTableBasedMode())
+    {
+      // A suspended image TAC must not be restored after this removal.
+      d->imageTACState = TACModeState{};
+      d->imageIFID.clear();
+    }
+  }
+
+  if (this->SegmentationRemovalCleanupQueued)
+  {
+    return;
+  }
+  this->SegmentationRemovalCleanupQueued = true;
+  const unsigned int removalSerial = ++this->SegmentationRemovalSerial;
+  vtkWeakPointer<vtkMRMLScene> sceneAtRemoval = this->mrmlScene();
+
+  QTimer::singleShot(0, this, [this, multiTimepoint, removalSerial, sceneAtRemoval]()
+  {
+    Q_D(qSlicerDynamicPETModuleWidget);
+    if (removalSerial != this->SegmentationRemovalSerial)
+    {
+      return;
+    }
+    this->SegmentationRemovalCleanupQueued = false;
+    if (!this->mrmlScene() || sceneAtRemoval.GetPointer() != this->mrmlScene() ||
+        d->isMultiTimepointMode() != multiTimepoint)
+    {
+      return;
+    }
+
+    if (multiTimepoint)
+    {
+      d->invalidateMultiTimepointDerivedState();
+      d->multiTimepointCommonSegmentNames.clear();
+      d->populateMultiTimepointCommonSegmentCheckboxes();
+      d->populateMultiTimepointAcquisitionTable();
+      d->MultiTimepointStatusLabel->setText(
+          tr("A selected segmentation was removed. Review and prepare the acquisitions again."));
+      this->enableTACbutton();
+      return;
+    }
+
+    if (d->isTableBasedMode())
+    {
+      // Image analysis was suspended, not discarded, on entering Table mode.
+      // Invalidate its saved snapshot without touching the active workbook.
+      d->imageTACState = TACModeState{};
+      d->imageIFID.clear();
+      return;
+    }
+
+    // The selected Single-mode segmentation is gone. Retain the PET and
+    // independently loaded external IF, but discard segmentation-derived
+    // TACs, model fits, graph selections, and their plot nodes.
+    this->clearTACdata();
+    if (d->IFSourceSelector->currentIndex() == 0)
+    {
+      d->resetInputFunctionData(false);
+    }
+    else
+    {
+      d->invalidateInputFunctionResults();
+    }
+    this->PlotSelectedFrame = -1;
+    this->PlotSelectedVOI.clear();
+    d->resetDistributionFrameToFirstPending = true;
+    // Revalidate patient/study context too: deleting a parent hierarchy item
+    // may remove both the segmentation and its containing study.
+    if (this->SubjectHierarchyNode)
+    {
+      d->populatePatientComboBox();
+    }
+    d->SegSelector->setToolTip(
+        tr("The previously selected segmentation was removed. "
+           "Segmentation-derived TACs and ROI fits were cleared."));
+    if (this->IsActive && qSlicerApplication::application())
+    {
+      QMainWindow* mainWindow = qobject_cast<QMainWindow*>(
+          qSlicerApplication::application()->mainWindow());
+      if (mainWindow && mainWindow->statusBar())
+      {
+        mainWindow->statusBar()->showMessage(
+            tr("SlicerDynamicPET: selected segmentation removed; TACs and ROI fits cleared."),
+            10000);
+      }
+    }
+    d->updateSegmentationAdvancedUI();
+    d->updateInputFunctionStatus();
+    this->enableTACbutton();
+  });
+}
+
+void qSlicerDynamicPETModuleWidget::onSceneNodeAboutToBeRemoved(
+    vtkObject* caller, vtkObject* nodeObject)
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+  if (caller != this->mrmlScene())
+  {
+    return;
+  }
+  vtkMRMLNode* node = vtkMRMLNode::SafeDownCast(nodeObject);
+  if (!node)
+  {
+    return;
+  }
+
+  if (!d->isMultiTimepointMode())
+  {
+    if (this->SelectedSegmentationNode &&
+        (this->SelectedSegmentationNode.GetPointer() == node ||
+         this->segSequenceNode == node))
+    {
+      this->handleRemovedSegmentation(false);
+    }
+    return;
+  }
+
+  // Multi-mode preparations depend on specific source segmentations (and
+  // their temporal sequences). Removing an unrelated segmentation is harmless.
+  if (!node->GetID())
+  {
+    return;
+  }
+  const QString id = QString::fromUtf8(node->GetID());
+  for (const auto& acquisition : d->preparedMultiTimepointAcquisitions)
+  {
+    if (id == acquisition.segmentationNodeID ||
+        id == acquisition.segmentationSequenceNodeID)
+    {
+      this->handleRemovedSegmentation(true);
+      return;
+    }
+  }
+}
+
+void qSlicerDynamicPETModuleWidget::onSubjectHierarchyItemAboutToBeRemoved(
+    vtkObject* caller, void* callData)
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+  if (caller != this->SubjectHierarchyNode || !callData ||
+      !this->SubjectHierarchyNode)
+  {
+    return;
+  }
+  const vtkIdType removedID = *static_cast<vtkIdType*>(callData);
+  const vtkIdType invalid = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  auto isRemovedOrDescendant = [&](vtkIdType itemID) -> bool
+  {
+    while (itemID != invalid)
+    {
+      if (itemID == removedID)
+      {
+        return true;
+      }
+      const vtkIdType parent = this->SubjectHierarchyNode->GetItemParent(itemID);
+      if (parent == itemID)
+      {
+        break;
+      }
+      itemID = parent;
+    }
+    return false;
+  };
+
+  if (!d->isMultiTimepointMode())
+  {
+    if (this->SelectedSegmentationNode &&
+        isRemovedOrDescendant(this->segID))
+    {
+      this->handleRemovedSegmentation(false);
+    }
+    return;
+  }
+
+  for (const auto& acquisition : d->preparedMultiTimepointAcquisitions)
+  {
+    vtkMRMLNode* seg = this->mrmlScene()
+        ? this->mrmlScene()->GetNodeByID(acquisition.segmentationNodeID.toUtf8().constData())
+        : nullptr;
+    if (seg && isRemovedOrDescendant(
+        this->SubjectHierarchyNode->GetItemByDataNode(seg)))
+    {
+      this->handleRemovedSegmentation(true);
+      return;
+    }
+  }
+}
+
 void qSlicerDynamicPETModuleWidget::enter()
 {
   this->IsActive = true;
+  if (this->keyWatcher)
+  {
+    this->keyWatcher->setActive(true);
+  }
   this->Superclass::enter();
 
   // Optional: force refresh when the user enters the module
@@ -23229,6 +23475,10 @@ void qSlicerDynamicPETModuleWidget::enter()
 void qSlicerDynamicPETModuleWidget::exit()
 {
   this->IsActive = false;
+  if (this->keyWatcher)
+  {
+    this->keyWatcher->setActive(false);
+  }
   this->Superclass::exit();
 }
 
@@ -23298,11 +23548,29 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   Q_D(qSlicerDynamicPETModuleWidget);
 
   d->clearMultiTimepointSegmentationWatchers();
+  ++this->SegmentationRemovalSerial;
+  this->SegmentationRemovalCleanupQueued = false;
+  if (this->SegWatcher)
+  {
+    this->SegWatcher->Clear();
+    this->SegWatcher->browser = nullptr;
+  }
+  this->SelectedSegmentationNode = nullptr;
+  this->segSequenceNode = nullptr;
+  this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->qvtkDisconnectAll();
 
+  if (scene)
+  {
+    this->qvtkConnect(scene, vtkMRMLScene::NodeAboutToBeRemovedEvent,
+                      this, SLOT(onSceneNodeAboutToBeRemoved(vtkObject*,vtkObject*)));
+  }
   this->SubjectHierarchyNode = vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
   if (this->SubjectHierarchyNode)
   {
+    this->qvtkConnect(this->SubjectHierarchyNode,
+                      vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemAboutToBeRemovedEvent,
+                      this, SLOT(onSubjectHierarchyItemAboutToBeRemoved(vtkObject*,void*)));
     this->qvtkConnect(this->SubjectHierarchyNode, vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemAddedEvent,
                       this, SLOT(onSubjectHierarchyChanged()));
     this->qvtkConnect(this->SubjectHierarchyNode, vtkMRMLSubjectHierarchyNode::SubjectHierarchyItemRemovedEvent,
@@ -23318,20 +23586,69 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->SegWatcher->GetSegEditCorr = [d]() { return d->PlotLiveSegEdit->isChecked(); };
   this->SegWatcher->RunPlot = [this]() { this->onPlotbutton(); };
   this->SegWatcher->GetCurrentSegID = [this]() { return this->SubjectHierarchyNode->GetItemName(this->segID); };
-  this->SegWatcher->OnSegmentStructureChanged = [this, d]()
+  // Segment add/remove/rename must not propagate changes to sequence frames
+  // from inside vtkSegmentation's own event callback (notably during deletion
+  // and Segment Editor undo/redo). The watcher reports identity only; Qt owns
+  // the deferred synchronization, TAC invalidation, and widget rebuild.
+  this->SegWatcher->OnSegmentStructureChangedDetailed =
+      [this, d](int, int, vtkMRMLSegmentationNode* sourceNode,
+                const std::string& segmentID,
+                SegmentationChangeWatcher::StructureChangeType changeType)
   {
-    // Defer UI/cache changes until Slicer finishes its own segment reparent
-    // callback. This avoids modifying subject-hierarchy-dependent state from
-    // inside vtkSegmentation::SegmentAdded/SegmentRemoved processing.
-    QTimer::singleShot(0, this, [this, d]()
+    const vtkWeakPointer<vtkMRMLSegmentationNode> changedSegmentation = sourceNode;
+    const std::string changedID = segmentID;
+    QTimer::singleShot(0, this, [this, d, changedSegmentation, changedID, changeType]()
     {
-      if (d->isTableBasedMode() || d->isMultiTimepointMode())
+      if (d->isMultiTimepointMode() ||
+          !this->SegWatcher || !changedSegmentation ||
+          this->SelectedSegmentationNode != changedSegmentation ||
+          !this->SubjectHierarchyNode ||
+          this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID ||
+          this->SubjectHierarchyNode->GetItemDataNode(this->segID) != changedSegmentation.GetPointer())
       {
         return;
       }
-      // Segment add/remove changes the structure of every dynamic segmentation
-      // frame. Cached TACs and any segment-derived IF are no longer trustworthy.
+
+      vtkSegmentation* segmentation = changedSegmentation->GetSegmentation();
+      if (!segmentation)
+      {
+        return;
+      }
+      // If multiple edits/undo operations preceded this Qt turn, do not
+      // propagate a superseded add/removal to the temporal sequence.
+      const bool segmentExists = segmentation->GetSegment(changedID) != nullptr;
+      const bool superseded =
+          (changeType == SegmentationChangeWatcher::StructureChangeType::Added && !segmentExists) ||
+          (changeType == SegmentationChangeWatcher::StructureChangeType::Removed && segmentExists);
+      if (!superseded)
+      {
+        this->SegWatcher->ApplyDeferredStructureChange(
+            changedSegmentation.GetPointer(), changedID, changeType);
+      }
+
+      if (d->isTableBasedMode())
+      {
+        // Image TACs are suspended in Table mode; do not restore measurements
+        // referring to the old segment layout on returning to Image mode.
+        // The active XLSX dataset remains untouched.
+        d->imageTACState = TACModeState{};
+        d->imageIFID.clear();
+        return;
+      }
+
+      // Every structural edit invalidates old segment-level quantification,
+      // including a segment selected as the IDIF. Retain the independent PET.
       this->clearTACdata();
+      this->clearFITdata();
+      this->clearFITMTGAdata();
+      if (d->IFSourceSelector->currentIndex() == 0)
+      {
+        d->resetInputFunctionData(false);
+      }
+      else
+      {
+        d->invalidateInputFunctionResults();
+      }
       d->populateSegmentCheckboxes(this->segID);
       d->updateInputFunctionStatus();
       this->enableTACbutton();
@@ -23366,11 +23683,15 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
     // TAC from that VTK callback. Let Slicer finish the restoration first, then
     // update the exact frame that generated the event on the Qt event loop.
     const std::string deferredSegmentID = segmentID;
-    QTimer::singleShot(0, this, [this, d, frameIndex, deferredSegmentID]()
+    const vtkWeakPointer<vtkMRMLSegmentationNode> changedSegmentation =
+        this->SelectedSegmentationNode;
+    QTimer::singleShot(0, this, [this, d, frameIndex, deferredSegmentID, changedSegmentation]()
     {
       if (d->isTableBasedMode() || d->isMultiTimepointMode() ||
           !this->SegWatcher || !this->SubjectHierarchyNode ||
-          this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+          this->segID == vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID ||
+          !changedSegmentation ||
+          this->SelectedSegmentationNode != changedSegmentation)
       {
         return;
       }
@@ -23484,6 +23805,7 @@ void qSlicerDynamicPETModuleWidget::onCTChanged(int index)
 void qSlicerDynamicPETModuleWidget::resetPETSelection()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
+  this->SelectedSegmentationNode = nullptr;
   d->resetInputFunctionData(true);
   this->sequencePETNode = nullptr;
   this->sequenceBrowserPETNode = nullptr;
@@ -23802,6 +24124,7 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
 void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 {
   Q_D(qSlicerDynamicPETModuleWidget);
+  d->SegSelector->setToolTip(QString());
 
   // A new Single segmentation context must start with exactly one observer
   // set. Clear any previous segmentation/proxy observations before rebuilding
@@ -23825,6 +24148,7 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
           .value<vtkIdType>();
 
   this->segSequenceNode = nullptr;
+  this->SelectedSegmentationNode = nullptr;
   d->updateSegmentationAdvancedUI();
 
   vtkMRMLScene* scene = this->mrmlScene();
@@ -23863,6 +24187,7 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
     d->populateSegmentCheckboxes(this->segID);
     return;
   }
+  this->SelectedSegmentationNode = segNode;
   // Make sure the source of the segmentation is a binary label map, alongside a created closed surface
   vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {
@@ -23877,22 +24202,33 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
   this->ProgressBar->show();
 
   this->stopButton->setVisible(false);
-  qApp->processEvents();
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
 
   this->ProgressBar->setValue(5);
   this->ProgressBar->setFormat(
     "Preparing segmentation representations...");
 
-  qApp->processEvents();
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
 
+  if (this->SelectedSegmentationNode.GetPointer() != segNode)
+  {
+    this->ProgressBar->hide();
+    return;
+  }
   logic->setupSeg(segNode);
 
   this->ProgressBar->setValue(80);
   this->ProgressBar->setFormat(
     "Preparing frame-by-frame segmentation...");
 
-  qApp->processEvents();
+  qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
 
+  if (this->SelectedSegmentationNode.GetPointer() != segNode ||
+      !this->sequenceBrowserPETNode)
+  {
+    this->ProgressBar->hide();
+    return;
+  }
   vtkMRMLSequenceNode* seqNode =
   this->sequenceBrowserPETNode->GetSequenceNode(segNode);
 
@@ -23964,6 +24300,12 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
 
     newSeqNode->SetName(
       stableSegmentationName.c_str());
+    // Inherit the PET sequence index before synchronizing with its browser.
+    // Otherwise Sequences Logic may reject this sequence due to a different
+    // index name, unit or numeric/text type even if frame values match.
+    newSeqNode->SetIndexName(this->sequencePETNode->GetIndexName());
+    newSeqNode->SetIndexUnit(this->sequencePETNode->GetIndexUnit());
+    newSeqNode->SetIndexType(this->sequencePETNode->GetIndexType());
 
     scene->AddNode(newSeqNode);
 
@@ -23998,7 +24340,13 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
         QString("Preparing segmentation frames %1/%2 (%p%)")
           .arg(i + 1)
           .arg(this->numberOfTimepoints));
-      qApp->processEvents();
+      qApp->processEvents(QEventLoop::ExcludeUserInputEvents);
+      if (this->SelectedSegmentationNode.GetPointer() != segNode ||
+          !this->sequenceBrowserPETNode)
+      {
+        this->ProgressBar->hide();
+        return;
+      }
     }
 
     // The synchronized segmentation proxy is now fully established and the
@@ -30450,6 +30798,10 @@ bool qSlicerDynamicPETModuleWidget::checkdisplayedDynamicPET()
 
 void qSlicerDynamicPETModuleWidget::onDeleteKeyPressed()
 {
+  if (!this->IsActive)
+  {
+    return;
+  }
   Q_D(qSlicerDynamicPETModuleWidget);
 
   // External IF preview deletion is mode-specific. The raw CSV is shared,

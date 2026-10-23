@@ -586,7 +586,10 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
     const StructureChangeType changeType = eid == vtkSegmentation::SegmentAdded
         ? StructureChangeType::Added : StructureChangeType::Removed;
 
-    if (self->DetectionOnly)
+    // When the widget supplies a detailed handler (both Single and Multi),
+    // structural synchronization happens after the VTK event has completed.
+    // Avoid mutating sequence data nodes from inside SegmentRemoved callbacks.
+    if (self->DetectionOnly || self->OnSegmentStructureChangedDetailed)
     {
       if (self->OnSegmentStructureChangedDetailed)
       {
@@ -597,6 +600,7 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
             segmentId,
             changeType);
       }
+      self->RefreshKnownSegmentNames(segmentation);
       return;
     }
 
@@ -619,7 +623,7 @@ void SegmentationChangeWatcher::OnSegmentationChanged(
   if (eid == vtkSegmentation::SegmentModified && !segmentId.empty() &&
       self->SegmentNameChanged(segmentation, segmentId))
   {
-    if (self->DetectionOnly)
+    if (self->DetectionOnly || self->OnSegmentStructureChangedDetailed)
     {
       if (self->OnSegmentStructureChangedDetailed)
       {

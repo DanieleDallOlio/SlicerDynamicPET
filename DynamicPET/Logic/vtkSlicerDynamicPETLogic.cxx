@@ -33,6 +33,7 @@
 // for linear regression
 #include <Eigen/Dense>
 #include <QThread>
+#include <QDebug>  // Route one-line QC summaries to Slicer logging/Python console.
 
 #include <vtkImageThreshold.h>
 #include <vtkImageConnectivityFilter.h>
@@ -4649,19 +4650,36 @@ double vtkSlicerDynamicPETLogic::computeAIC(const std::vector<double>& obs,
         weights = *wgt;
     }
 
-    // Sum of squared errors with weights
+    // Invalid data must not be interpreted as a nearly perfect fit.
+    // Keep the existing weighted SSE and n denominator for valid input.
+    if (numfrm == 0)
+    {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     double ss = 0.0;
     for (size_t i = 0; i < numfrm; ++i)
     {
-        double diff = obs[i] - est[i];
+        if (!std::isfinite(obs[i]) || !std::isfinite(est[i]) ||
+            !std::isfinite(weights[i]) || weights[i] < 0.0)
+        {
+            return std::numeric_limits<double>::quiet_NaN();
+        }
+        const double diff = obs[i] - est[i];
         ss += weights[i] * diff * diff;
+    }
+    if (!std::isfinite(ss))
+    {
+        return std::numeric_limits<double>::quiet_NaN();
     }
 
     int numpar_new = numpar + 1; // fitted kinetic parameters + residual-variance scale
 
-    double mse = (numfrm > 0 ? ss / static_cast<double>(numfrm) : 0.0);
-    if (mse <= 0.0 || !std::isfinite(mse))
+    double mse = ss / static_cast<double>(numfrm);
+    if (mse < std::numeric_limits<double>::min())
     {
+        // Numerical variance floor: at RSS=0 the unconstrained Gaussian
+        // maximum likelihood is unbounded. Use the same documented floor
+        // for AIC and BIC; do not apply it to non-finite residuals.
         mse = std::numeric_limits<double>::min();
     }
     double AIC = numfrm * std::log(mse) + 2.0 * numpar_new;
@@ -4746,15 +4764,27 @@ double vtkSlicerDynamicPETLogic::computeBIC(const std::vector<double>& obs,
         weights = *wgt;
     }
 
-    // Weighted SSE
+    if (n == 0)
+        return std::numeric_limits<double>::quiet_NaN();
+
+    // Weighted SSE: reject non-finite observations/predictions rather than
+    // assigning a favorable information criterion to an invalid fit.
     double ss = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        double diff = obs[i] - est[i];
+        if (!std::isfinite(obs[i]) || !std::isfinite(est[i]) ||
+            !std::isfinite(weights[i]) || weights[i] < 0.0)
+            return std::numeric_limits<double>::quiet_NaN();
+        const double diff = obs[i] - est[i];
         ss += weights[i] * diff * diff;
     }
+    if (!std::isfinite(ss))
+        return std::numeric_limits<double>::quiet_NaN();
 
+    // Same numerical variance floor as AIC, including underflow of ss/n.
+    const double mse = std::max(ss / static_cast<double>(n),
+                                std::numeric_limits<double>::min());
     int p = numpar + 1; // fitted kinetic parameters + residual-variance scale
-    double BIC = n * std::log(ss / static_cast<double>(n))
+    double BIC = n * std::log(mse)
                  + p * std::log(static_cast<double>(n));
 
     return BIC;
@@ -8719,6 +8749,19 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
 
     std::atomic<int> guardHitCount(0);
     std::atomic<int> boundHitVoxelCount(0);
+    std::atomic<int> nearConstantAttemptCount(0);
+    std::atomic<int> nearConstantStoredCount(0);
+    std::atomic<int> noAcceptedStepCount(0);
+    std::atomic<int> finiteCandidateCount(0);
+    std::atomic<int> convergedCount(0);
+    std::atomic<int> negligibleGainCount(0);
+    std::atomic<int> otherStallCount(0);
+    std::atomic<int> maxIterationCount(0);
+    std::atomic<int> derivativeFallbackCount(0);
+    std::atomic<int> exactZeroResidualCount(0);
+    std::atomic<int> clampedInitializationCount(0);
+    std::atomic<int> nonfiniteAICCount(0);
+    std::atomic<int> storedFitCount(0);
 
     // ---------- 8) Parallel voxel loop with per-thread scratch buffers ----------
     #ifdef HAVE_OPENMP
@@ -8751,10 +8794,11 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             TCMParameters params;
 
             for (int i = 0; i < Nframe; ++i) cfit_local[i] = voxels[v][i];
-            if (check_if_constant(cfit_local)) {
-              reportVoxelProcessed();
-              continue;
-            }
+            // A near-constant finite TAC is still eligible for kinetic fitting.
+            // The old absolute 0.001 cutoff discarded it without a solver attempt.
+            const bool nearConstantTAC = check_if_constant(cfit_local);
+            if (nearConstantTAC)
+                ++nearConstantAttemptCount;
 
             for (int i = 0; i < num_par; ++i) pinit_local[i] = kinit[i];
 
@@ -8782,6 +8826,36 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             if (stx.hit_guard > 0)
             {
                 ++guardHitCount;
+                reportVoxelProcessed();
+                continue;
+            }
+
+            if (stx.finite_candidate) ++finiteCandidateCount;
+            if (stx.numerical_jacobian_fallbacks) ++derivativeFallbackCount;
+            if (stx.clamped_initial_parameters) ++clampedInitializationCount;
+            if (stx.converged) ++convergedCount;
+            // These two reasons were previously both reported as "stalled".
+            // Keep them separate: small expected gain is not a solver guard exit.
+            if (stx.termination_reason == KMAP_TERMINATION_NEGLIGIBLE_IMPROVEMENT)
+                ++negligibleGainCount;
+            if (stx.termination_reason == KMAP_TERMINATION_STALLED)
+                ++otherStallCount;
+            if (stx.termination_reason == KMAP_TERMINATION_ITERATION_LIMIT)
+                ++maxIterationCount;
+
+            // Accepted iterations measure solver activity, not convergence proof.
+            if (stx.it_accept == 0)
+                ++noAcceptedStepCount;
+
+            // Refuse to store numerically invalid parameters or predictions.
+            bool finiteFit = true;
+            for (int i = 0; i < num_par; ++i)
+                finiteFit = finiteFit && std::isfinite(pinit_local[i]);
+            for (double prediction : fitted_local)
+                finiteFit = finiteFit && std::isfinite(prediction);
+            if (!finiteFit)
+            {
+                ++nonfiniteAICCount;
                 reportVoxelProcessed();
                 continue;
             }
@@ -8840,9 +8914,15 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
                 ++boundHitVoxelCount;
             }
 
-            // Residuals
+            // Residuals: exact zero RSS is a limiting Gaussian-likelihood
+            // case, not a solver failure. Track its occurrence separately.
             params.r.resize(Nframe);
-            for (int i=0;i<Nframe;++i) params.r[i] = cfit_local[i]-fitted_local[i];
+            bool exactZeroResidual = true;
+            for (int i=0;i<Nframe;++i) {
+                params.r[i] = cfit_local[i]-fitted_local[i];
+                exactZeroResidual = exactZeroResidual && (params.r[i] == 0.0);
+            }
+            if (exactZeroResidual) ++exactZeroResidualCount;
 
             params.weights = wt;
             params.keep = keep;
@@ -8851,14 +8931,44 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
             // // // Statistics
             params.AIC  = this->computeAIC(cfit_local, fitted_local, params.dof, &wt);
             params.BIC  = this->computeBIC(cfit_local, fitted_local, params.dof, &wt);
+            // Keep model selection separate: do not assign a preferred model here.
+            if (!std::isfinite(params.AIC))
+                ++nonfiniteAICCount;
             params.MASE = this->MASE(cfit_local, fitted_local, &wt);
             params.chi2 = this->computeChi2(cfit_local, fitted_local, &wt)/(Nframe-params.dof);
             params.loglik = this->computeLogLik(cfit_local, fitted_local, &wt);
 
+            if (nearConstantTAC)
+                ++nearConstantStoredCount;
+            ++storedFitCount;
             outputParams[v] = std::move(params);
             reportVoxelProcessed();
         }
     }
+
+    // One summary per fitted model (not one log line per voxel).
+    // These counters explain absent AIC without changing model fitting or selection.
+    std::ostringstream qcSummary;
+    qcSummary << "[TCM FIT QC] model=" << modelID
+              << " eligible=" << Nfit
+              << " stored=" << storedFitCount.load()
+              << " guard_rejected=" << guardHitCount.load()
+              << " near_constant_attempted=" << nearConstantAttemptCount.load()
+              << " near_constant_stored=" << nearConstantStoredCount.load()
+              << " no_accepted_step=" << noAcceptedStepCount.load()
+              << " finite_candidate=" << finiteCandidateCount.load()
+              << " converged=" << convergedCount.load()
+              << " stalled=" << (negligibleGainCount.load() + otherStallCount.load())
+              << " negligible_gain=" << negligibleGainCount.load()
+              << " other_stall=" << otherStallCount.load()
+              << " iteration_limit=" << maxIterationCount.load()
+              << " numerical_jacobian_fallback=" << derivativeFallbackCount.load()
+              << " exact_zero_residual=" << exactZeroResidualCount.load()
+              << " clamped_initial_parameters=" << clampedInitializationCount.load()
+              << " nonfinite_or_missing_AIC=" << nonfiniteAICCount.load();
+    // Emit through Qt instead of stdout so Slicer can show it in the Python
+    // console and Error Log (depending on the configured Python log level).
+    qInfo().noquote() << QString::fromStdString(qcSummary.str());
 
     if (kEnableDeveloperConsoleMessages && guardHitCount.load() > 0)
     {

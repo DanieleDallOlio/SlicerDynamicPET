@@ -1774,25 +1774,43 @@ static double norm_cdf(double x)
     return 0.5 * std::erfc(-x / std::sqrt(2.0));
 }
 
-static double chi2_cdf(double x, int df)
+static double chi2_sf(double x, int df)
 {
-    // Regularized gamma function approximation
-    // Here we use std::tgamma and std::lgamma for stability
-    // P(k/2, x/2) = lower_gamma(k/2, x/2) / Gamma(k/2)
-    double k = df * 0.5;
-    double t = x * 0.5;
+    if (df <= 0 || !std::isfinite(x) || x < 0.0)
+        return std::numeric_limits<double>::quiet_NaN();
+    if (x == 0.0)
+        return 1.0;
 
-    // Series expansion for lower incomplete gamma (simple for moderate df)
-    double sum = 1.0 / k;
-    double term = sum;
-    for (int n = 1; n < 100; ++n) {
-        term *= t / (k + n);
-        sum += term;
-        if (term < 1e-12) break;
+    // Exact finite-series upper tails for integer chi-square degrees of freedom.
+    const double t = 0.5 * x;
+    const double e = std::exp(-t);
+    double tail = 0.0;
+
+    if (df % 2 == 0)
+    {
+        double term = e;
+        tail = term;
+        for (int j = 1; j < df / 2; ++j)
+        {
+            term *= t / static_cast<double>(j);
+            tail += term;
+        }
+    }
+    else
+    {
+        tail = std::erfc(std::sqrt(t));
+        const double twoOverSqrtPi = 1.1283791670955125739;
+        double term = twoOverSqrtPi * std::sqrt(t) * e;
+        for (int j = 1; j <= (df - 1) / 2; ++j)
+        {
+            tail += term;
+            term *= t / (j + 0.5);
+        }
     }
 
-    double result = std::exp(-t + k * std::log(t) - std::lgamma(k)) * sum;
-    return result;
+    if (!std::isfinite(tail))
+        return std::numeric_limits<double>::quiet_NaN();
+    return std::max(0.0, std::min(1.0, tail));
 }
 
 //----------------------------------------------------------------------------
@@ -2624,6 +2642,9 @@ VoxelStatistics vtkSlicerDynamicPETLogic::ComputeVoxelStatistics(vtkMRMLScalarVo
 
 double vtkSlicerDynamicPETLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
 {
+  if (!std::isfinite(LR) || LR < 0.0 || r_b < 0 || r_i < 0)
+    return std::numeric_limits<double>::quiet_NaN();
+
   double p = 0.0;
 
   for (int j = 0; j <= r_b; ++j)
@@ -2634,12 +2655,14 @@ double vtkSlicerDynamicPETLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
     int df = r_i + j;
 
     double tail = (df == 0)
-        ? (LR <= 0.0 ? 1.0 : 0.0)
-        : (1.0 - chi2_cdf(LR, df));
+        ? (LR == 0.0 ? 1.0 : 0.0)
+        : chi2_sf(LR, df);
 
     p += weight * tail;
   }
 
+  if (!std::isfinite(p))
+    return std::numeric_limits<double>::quiet_NaN();
   return std::max(0.0, std::min(1.0, p));
 }
 
@@ -4969,7 +4992,7 @@ double vtkSlicerDynamicPETLogic::computeLRTP(double logLik1,
   double Lambda = -2.0 * (logLik1 - logLik2);
   if (Lambda < 0) Lambda = 0.0;
 
-  double p = 1.0 - chi2_cdf(Lambda, dfDiff);
+  double p = chi2_sf(Lambda, dfDiff);
   return p;
 }
 

@@ -8943,6 +8943,23 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onFITMTGAbutton()));
   QObject::connect( this->FITbuttonMTGAImg, SIGNAL(clicked(bool)),
     q, SLOT(onFITMTGAImgbutton()));
+
+  // Keep interpretation text synchronized when ROI model/segment choices
+  // clear the existing p-value fields.
+  QObject::connect(this->MTGAVuongP, &QLineEdit::textChanged, q,
+    [this](const QString& value)
+    {
+      if (value.isEmpty())
+        this->MTGAComparisonDirectionLabel->setText("Direction: select two fitted models.");
+    });
+  auto resetTCMComparison = [this](const QString&)
+  {
+    if (this->TCMLRTP->text().isEmpty() && this->TCMVuongP->text().isEmpty())
+      this->TCMComparisonInterpretationLabel->setText("Comparison: select two fitted models.");
+  };
+  QObject::connect(this->TCMLRTP, &QLineEdit::textChanged, q, resetTCMComparison);
+  QObject::connect(this->TCMVuongP, &QLineEdit::textChanged, q, resetTCMComparison);
+
   QObject::connect( this->VOISelector, SIGNAL(currentIndexChanged(int)),
     q, SLOT(onVOISelectionChanged(int)));
   QObject::connect( this->VOISelectorMTGA, SIGNAL(currentIndexChanged(int)),
@@ -26959,6 +26976,7 @@ void qSlicerDynamicPETModuleWidget::runVuong(std::string sel1,
       fit1.frame != fit2.frame)
   {
       d->MTGAVuongP->setText("N/A");
+      d->MTGAComparisonDirectionLabel->setText("Direction unavailable: different PET frames.");
       qWarning() << "MTGA exploratory comparison skipped: fitted models use different acquisition frames.";
       return;
   }
@@ -26976,8 +26994,33 @@ void qSlicerDynamicPETModuleWidget::runVuong(std::string sel1,
                                   VuongCorrection::BIC,
                                   Tail::TwoSided
                                 );
-  d->MTGAVuongP->setText(QString::number(p, 'g', 4));
-  // d->MTGAVuongP->adjustSize();
+  d->MTGAVuongP->setText(std::isfinite(p) ? QString::number(p, 'g', 4) : "N/A");
+
+  // The one-sided tail is used only to recover the sign of the same
+  // BIC-corrected contrast; keep the displayed p-value two-sided.
+  if (std::isfinite(p))
+  {
+    const double pModel1Better = logic->computeVuongP(
+        fit1.r, fit2.r, wgt, fit1.dof, fit2.dof,
+        VuongCorrection::BIC, Tail::Model1Greater);
+    if (std::isfinite(pModel1Better) && pModel1Better != 0.5)
+    {
+      const QString favored = QString::fromStdString(
+          pModel1Better < 0.5 ? sel1 : sel2);
+      d->MTGAComparisonDirectionLabel->setText(
+          "Residual comparison favors " + favored + ".");
+    }
+    else
+    {
+      d->MTGAComparisonDirectionLabel->setText(
+          "Direction indeterminate on the corrected residual contrast.");
+    }
+  }
+  else
+  {
+    d->MTGAComparisonDirectionLabel->setText(
+        "Direction unavailable: invalid residual comparison.");
+  }
   return;
 }
 
@@ -27047,11 +27090,31 @@ void qSlicerDynamicPETModuleWidget::runTCMstat(std::string sel1,
 
   if (res.type == "LRT")
   {
-    d->TCMLRTP->setText(QString::number(res.p_value, 'g', 4));
+    d->TCMLRTP->setText(std::isfinite(res.p_value) ?
+        QString::number(res.p_value, 'g', 4) : "N/A");
+    const QString restricted = QString::fromStdString(res.restrictedModel);
+    const QString full = QString::fromStdString(res.fullModel);
+    d->TCMComparisonInterpretationLabel->setText(
+        "LRT: " + restricted + " vs " + full +
+        ". Tests whether the additional parameters in " + full +
+        " significantly improve the fit.");
   }
   else if (res.type == "Vuong")
   {
-    d->TCMVuongP->setText(QString::number(res.p_value, 'g', 4));
+    d->TCMVuongP->setText(std::isfinite(res.p_value) ?
+        QString::number(res.p_value, 'g', 4) : "N/A");
+    if (std::isfinite(res.signedVuongZ) && res.signedVuongZ != 0.0)
+    {
+      const QString favored = QString::fromStdString(
+          res.signedVuongZ > 0.0 ? sel1 : sel2);
+      d->TCMComparisonInterpretationLabel->setText(
+          "BIC-corrected Vuong comparison favors " + favored + ".");
+    }
+    else
+    {
+      d->TCMComparisonInterpretationLabel->setText(
+          "Non-nested Vuong direction unavailable or indeterminate.");
+    }
   }
 
   return;

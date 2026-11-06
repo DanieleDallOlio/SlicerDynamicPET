@@ -1641,6 +1641,13 @@
                       </property>
                     </widget>
                   </item>
+                   <item row="4" column="0" colspan="2">
+                     <widget class="QLabel" name="MTGAComparisonDirectionLabel">
+                       <property name="wordWrap"><bool>true</bool></property>
+                       <property name="text"><string>Direction: select two fitted models.</string></property>
+                       <property name="toolTip"><string>Reports the direction of the BIC-corrected squared-residual contrast for the same fitted PET frames. The approximate two-sided p-value and direction are exploratory; differently transformed graphical responses do not provide a calibrated kinetic-model comparison. Adaptive robust weights can also affect direction.</string></property>
+                     </widget>
+                   </item>
                 </layout>
               </widget>
             </item>
@@ -2299,7 +2306,7 @@
                   <item row="0" column="0">
                    <widget class="QLabel" name="voiresTCM">
                     <property name="text">
-                     <string>Likelihood Ratio Test and Vuong's Test between two models</string>
+                      <string>Pairwise TCM comparison: nested LRT or non-nested Vuong</string>
                     </property>
                    </widget>
                   </item>
@@ -2355,6 +2362,13 @@
                       <property name="alignment">
                         <set>Qt::AlignCenter</set>
                       </property>
+                     </widget>
+                   </item>
+                   <item row="4" column="0" colspan="2">
+                     <widget class="QLabel" name="TCMComparisonInterpretationLabel">
+                       <property name="wordWrap"><bool>true</bool></property>
+                       <property name="text"><string>Comparison: select two fitted models.</string></property>
+                       <property name="toolTip"><string>Nested comparisons identify the restricted and full TCM models; the LRT tests whether added parameters improve fit, subject to model assumptions and boundary limitations. For non-nested models, a BIC-corrected signed Vuong contrast indicates which model the statistic favors on the common tissue TAC. Neither p-value alone selects a kinetic model, and temporal dependence may affect calibration.</string></property>
                     </widget>
                   </item>
                 </layout>

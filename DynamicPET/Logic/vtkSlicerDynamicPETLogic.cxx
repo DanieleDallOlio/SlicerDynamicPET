@@ -2671,8 +2671,11 @@ double vtkSlicerDynamicPETLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
 // model, as in computeLogLik(). Do not use for graphical-analysis residuals:
 // Patlak/RE may have different transformed dependent variables.
 static double computeTCMProfiledVuongP(const TCMParameters& m1,
-                                       const TCMParameters& m2)
+                                       const TCMParameters& m2,
+                                       double* signedZ = nullptr)
 {
+  if (signedZ)
+    *signedZ = std::numeric_limits<double>::quiet_NaN();
   const size_t N = m1.r.size();
   if (N != m2.r.size() || N != m1.weights.size() ||
       N != m2.weights.size() || m1.dof < 0 || m2.dof < 0)
@@ -2735,6 +2738,8 @@ static double computeTCMProfiledVuongP(const TCMParameters& m1,
   const double z = std::sqrt(n) * (mean - penalty / n) / sd;
   if (!std::isfinite(z))
     return std::numeric_limits<double>::quiet_NaN();
+  if (signedZ)
+    *signedZ = z;
   return std::erfc(std::abs(z) / std::sqrt(2.0));
 }
 
@@ -2763,7 +2768,7 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
     }
 
     res.type = "Vuong";
-    res.p_value = computeTCMProfiledVuongP(m1, m2);
+    res.p_value = computeTCMProfiledVuongP(m1, m2, &res.signedVuongZ);
     return res;
   }
 
@@ -2805,7 +2810,8 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
     countConstraints(*restricted, *full, r_b, r_i);
 
     res.type = "LRT";
-    // res.statistic = LR;
+    res.restrictedModel = A_in_B ? modelA : modelB;
+    res.fullModel = A_in_B ? modelB : modelA;
     res.p_value = this->boundaryLRTPvalue(LR, r_b, r_i);
 
     return res;
@@ -2817,7 +2823,7 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
   else
   {
     res.type = "Vuong";
-    res.p_value = computeTCMProfiledVuongP(m1, m2);
+    res.p_value = computeTCMProfiledVuongP(m1, m2, &res.signedVuongZ);
 
     return res;
   }

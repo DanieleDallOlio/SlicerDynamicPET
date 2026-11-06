@@ -195,8 +195,13 @@ struct TCMParameters
 struct ModelComparisonResult
 {
   std::string type;
-  // double statistic = std::numeric_limits<double>::quiet_NaN();
   double p_value = std::numeric_limits<double>::quiet_NaN();
+  // Sign of the BIC-corrected non-nested TCM Vuong comparison:
+  // positive favors model A, negative favors model B.
+  double signedVuongZ = std::numeric_limits<double>::quiet_NaN();
+  // Names are populated only for nested LRT comparisons.
+  std::string restrictedModel;
+  std::string fullModel;
 };
 
 enum class VuongCorrection { None, AIC, BIC };

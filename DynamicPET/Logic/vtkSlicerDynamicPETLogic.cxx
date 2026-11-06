@@ -2666,6 +2666,78 @@ double vtkSlicerDynamicPETLogic::boundaryLRTPvalue(double LR, int r_b, int r_i)
   return std::max(0.0, std::min(1.0, p));
 }
 
+// Vuong comparison on a common observed tissue TAC, with the same relative
+// inverse-variance weights in both models. Profile one Gaussian variance per
+// model, as in computeLogLik(). Do not use for graphical-analysis residuals:
+// Patlak/RE may have different transformed dependent variables.
+static double computeTCMProfiledVuongP(const TCMParameters& m1,
+                                       const TCMParameters& m2)
+{
+  const size_t N = m1.r.size();
+  if (N != m2.r.size() || N != m1.weights.size() ||
+      N != m2.weights.size() || m1.dof < 0 || m2.dof < 0)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  double rss1 = 0.0;
+  double rss2 = 0.0;
+  size_t nUsed = 0;
+  for (size_t i = 0; i < N; ++i)
+  {
+    const double w = m1.weights[i];
+    // Different weights mean different observation likelihoods; averaging
+    // the weights would not repair that mismatch.
+    if (!std::isfinite(w) || w < 0.0 ||
+        !std::isfinite(m2.weights[i]) || w != m2.weights[i])
+      return std::numeric_limits<double>::quiet_NaN();
+    if (w == 0.0)
+      continue;
+    if (!std::isfinite(m1.r[i]) || !std::isfinite(m2.r[i]))
+      return std::numeric_limits<double>::quiet_NaN();
+
+    rss1 += w * m1.r[i] * m1.r[i];
+    rss2 += w * m2.r[i] * m2.r[i];
+    ++nUsed;
+  }
+
+  if (nUsed < 2 || !std::isfinite(rss1) || !std::isfinite(rss2) ||
+      rss1 <= 0.0 || rss2 <= 0.0)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  // With separately profiled residual variances, the mean of the pointwise
+  // log-likelihood differences is exactly 0.5 * log(RSS2/RSS1).
+  const double n = static_cast<double>(nUsed);
+  const double mean = 0.5 * (std::log(rss2) - std::log(rss1));
+
+  // Centered per-frame log-likelihood difference. The common log-weight and
+  // Gaussian constants cancel, as does the constant log-variance term.
+  double deviationsSquared = 0.0;
+  for (size_t i = 0; i < N; ++i)
+  {
+    const double w = m1.weights[i];
+    if (w == 0.0)
+      continue;
+    const double q1 = (w * m1.r[i] * m1.r[i]) / rss1;
+    const double q2 = (w * m2.r[i] * m2.r[i]) / rss2;
+    const double centered = 0.5 * n * (q2 - q1);
+    deviationsSquared += centered * centered;
+  }
+
+  // No arbitrary variance floor: zero dispersion makes the usual normal
+  // Vuong statistic undefined (e.g. observationally identical models).
+  const double sd = std::sqrt(deviationsSquared / (n - 1.0));
+  if (!std::isfinite(sd) || sd <= 0.0)
+    return std::numeric_limits<double>::quiet_NaN();
+
+  // BIC-corrected, two-sided Vuong, preserving the existing TCM policy.
+  // The residual-variance parameter occurs in both models and cancels in dk.
+  const double penalty = 0.5 * static_cast<double>(m1.dof - m2.dof)
+                         * std::log(n);
+  const double z = std::sqrt(n) * (mean - penalty / n) / sd;
+  if (!std::isfinite(z))
+    return std::numeric_limits<double>::quiet_NaN();
+  return std::erfc(std::abs(z) / std::sqrt(2.0));
+}
+
 ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
     const std::string& modelA,
     const std::string& modelB,
@@ -2690,21 +2762,8 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
           "Liver DBIF Vuong comparison requires matching residual/weight vectors.");
     }
 
-    std::vector<double> wgt(m1.weights.size(), 1.0);
-    for (size_t i = 0; i < wgt.size(); ++i)
-    {
-      wgt[i] = 0.5 * (m1.weights[i] + m2.weights[i]);
-    }
-
     res.type = "Vuong";
-    res.p_value = this->computeVuongP(
-        m1.r,
-        m2.r,
-        &wgt,
-        m1.dof,
-        m2.dof,
-        VuongCorrection::BIC,
-        Tail::TwoSided);
+    res.p_value = computeTCMProfiledVuongP(m1, m2);
     return res;
   }
 
@@ -2757,26 +2816,8 @@ ModelComparisonResult vtkSlicerDynamicPETLogic::compareModels(
   // =====================
   else
   {
-    // average weights (your current logic)
-    std::vector<double> wgt(m1.weights.size());
-    for (size_t i = 0; i < wgt.size(); ++i)
-      wgt[i] = 0.5 * (m1.weights[i] + m2.weights[i]);
-
-    const std::vector<double>* wgt_ptr = &wgt;
-
-    double p = this->computeVuongP(
-        m1.r,
-        m2.r,
-        wgt_ptr,
-        m1.dof,
-        m2.dof,
-        VuongCorrection::BIC,
-        Tail::TwoSided
-    );
-
     res.type = "Vuong";
-    // res.statistic = std::numeric_limits<double>::quiet_NaN(); // optional
-    res.p_value = p;
+    res.p_value = computeTCMProfiledVuongP(m1, m2);
 
     return res;
   }

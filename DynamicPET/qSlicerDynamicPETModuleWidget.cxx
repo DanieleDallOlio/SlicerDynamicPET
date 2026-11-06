@@ -18299,6 +18299,27 @@ updateMTGAOptimizationUI()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
+  // MASE is an exploratory absolute-error ranking. The optional residual
+  // comparison is based on squared errors, so do not offer it for MASE.
+  const bool filterAvailable =
+      this->MTGASelectionCriterionComboImg->currentText() != "MASE";
+
+  if (!filterAvailable &&
+      this->MTGAUseVuongCheckBoxImg->isChecked())
+  {
+    // Clear the selection rather than showing a checked, disabled filter.
+    const bool wasBlocked =
+        this->MTGAUseVuongCheckBoxImg->blockSignals(true);
+    this->MTGAUseVuongCheckBoxImg->setChecked(false);
+    this->MTGAUseVuongCheckBoxImg->blockSignals(wasBlocked);
+  }
+
+  this->MTGAUseVuongCheckBoxImg->setEnabled(filterAvailable);
+  const bool filterActive =
+      filterAvailable && this->MTGAUseVuongCheckBoxImg->isChecked();
+  this->MTGAVuongAlphaSpinBoxImg->setEnabled(filterActive);
+  this->MTGAVuongAlphaLabelImg->setEnabled(filterActive);
+
   auto hasResult =
       [&](const std::string& modelID)
       {
@@ -19545,9 +19566,11 @@ generateMTGAOptimizedResult()
       this->MTGASelectionCriterionComboImg
           ->currentText();
 
+  // Enforce MASE exclusion also when invoked programmatically, without
+  // relying exclusively on the checkbox's enabled state.
   const bool useVuong =
-      this->MTGAUseVuongCheckBoxImg
-          ->isChecked();
+      criterion != "MASE" &&
+      this->MTGAUseVuongCheckBoxImg->isChecked();
 
   const double alpha =
       this->MTGAVuongAlphaSpinBoxImg
@@ -19624,6 +19647,10 @@ generateMTGAOptimizedResult()
   size_t reversibleSelectedCount = 0;
   size_t nonSignificantCount = 0;
   size_t invalidCount = 0;
+
+  // For R2 and AIC, a two-sided p-value alone does not identify which
+  // graphical response has the smaller weighted residual contrast.
+  size_t directionRejectedCount = 0;
 
 
   // ------------------------------------------------------------------------
@@ -19725,6 +19752,10 @@ generateMTGAOptimizedResult()
       if (p.r.empty() ||
           r.r.empty() ||
           p.r.size() != r.r.size() ||
+          p.frame.empty() ||
+          p.frame.size() != p.r.size() ||
+          r.frame.size() != r.r.size() ||
+          p.frame != r.frame ||
           p.weights.size() !=
               p.r.size() ||
           r.weights.size() !=
@@ -19738,6 +19769,11 @@ generateMTGAOptimizedResult()
           p.weights.size(),
           1.0);
 
+      // Same weighted squared-residual contrast as computeVuongP():
+      // positive favors Patlak; negative favors the reversible model.
+      // Use the same averaged frame weights as computeVuongP().
+      long double signedResidualContrast = 0.0L;
+      bool residualContrastValid = true;
       for (size_t i = 0;
            i < averageWeights.size();
            ++i)
@@ -19748,6 +19784,19 @@ generateMTGAOptimizedResult()
               p.weights[i] +
               r.weights[i]
             );
+        if (!std::isfinite(averageWeights[i]) ||
+            !std::isfinite(p.r[i]) ||
+            !std::isfinite(r.r[i]))
+        {
+          residualContrastValid = false;
+          continue;
+        }
+        const long double patlakResidual = p.r[i];
+        const long double reversibleResidual = r.r[i];
+        signedResidualContrast +=
+            static_cast<long double>(averageWeights[i]) *
+            (reversibleResidual * reversibleResidual -
+             patlakResidual * patlakResidual);
       }
 
       const double pValue =
@@ -19764,6 +19813,18 @@ generateMTGAOptimizedResult()
           pValue >= alpha)
       {
         ++nonSignificantCount;
+        continue;
+      }
+
+      // R2/AIC: require the signed residual contrast to favor the same
+      // winner as the selected graphical fit criterion. Do not switch
+      // models; leave a discordant or indeterminate voxel unclassified.
+      if (!residualContrastValid ||
+          !std::isfinite(signedResidualContrast) ||
+          signedResidualContrast == 0.0L ||
+          ((signedResidualContrast > 0.0L) != patlakWins))
+      {
+        ++directionRejectedCount;
         continue;
       }
     }
@@ -19830,6 +19891,7 @@ generateMTGAOptimizedResult()
       << primaryModel << "=" << primarySelectedCount
       << ", reversible=" << reversibleSelectedCount
       << ", non-significant=" << nonSignificantCount
+      << ", direction-rejected=" << directionRejectedCount
       << ", invalid=" << invalidCount
       << std::endl;
 
@@ -26870,6 +26932,19 @@ void qSlicerDynamicPETModuleWidget::runVuong(std::string sel1,
   if (w1.size() != w2.size()) {
       throw std::invalid_argument("Weight vectors must have the same length");
   }
+  // Residuals must correspond to the same physical PET frames,
+  // not merely vectors with the same number of entries.
+  const MTGAParameters& fit1 = modelsForSegment[sel1];
+  const MTGAParameters& fit2 = modelsForSegment[sel2];
+  if (fit1.frame.empty() ||
+      fit1.frame.size() != fit1.r.size() ||
+      fit2.frame.size() != fit2.r.size() ||
+      fit1.frame != fit2.frame)
+  {
+      d->MTGAVuongP->setText("N/A");
+      qWarning() << "MTGA exploratory comparison skipped: fitted models use different acquisition frames.";
+      return;
+  }
   // Compute average weights
   std::vector<double> wgt_avg(w1.size());
   for (size_t i = 0; i < w1.size(); ++i) {
@@ -29885,7 +29960,9 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   }
 
   const bool robust = d->robustFitCheckBoxImg->isChecked();
-  const bool std = false;  // MTGA parametric imaging intentionally uses physical graphical variables.
+  // Match ROI MTGA: standardize graphical X/Y during fitting, then
+  // restore fitted kinetic parameters and displayed coordinates.
+  const bool std = d->standardizationCheckBoxImg->isChecked();
   const double huber_tune = d->huberTuneEditImg->text().toDouble();
   const double tol = d->tolEditImg->text().toDouble();
   const int max_iter = d->maxIterEditImg->text().toInt();
@@ -29938,7 +30015,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
                 d->weightedFitCheckBoxImg->isChecked())
             + "|robust="
             + QString::number(robust)
-            + "|standardize=0";
+             + "|standardize="
+             + QString::number(std);
 
         appendDouble(key, framingNorm);
         appendDouble(key, timeOffset);

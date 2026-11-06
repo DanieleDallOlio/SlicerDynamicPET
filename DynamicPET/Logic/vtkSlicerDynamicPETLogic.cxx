@@ -3307,30 +3307,42 @@ double vtkSlicerDynamicPETLogic::computeLogLik(const std::vector<double>& y,
                                          const std::vector<double>& fitted,
                                          const std::vector<double>* wgt)
 {
-    size_t n = y.size();
-
-    std::vector<double> weights;
-    if (wgt == nullptr)
-        weights.assign(n, 1.0);
-    else {
-        if (wgt->size() != n)
-            throw std::invalid_argument("weights size must match obs");
-        weights = *wgt;
-    }
-
-    if (y.size() != fitted.size() || y.size() != weights.size()) {
+    const size_t n = y.size();
+    if (fitted.size() != n || (wgt && wgt->size() != n))
         throw std::invalid_argument("Input vectors must have same length");
+
+    double wrss = 0.0;
+    double sumLogWeights = 0.0;
+    size_t nUsed = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        const double wi = wgt ? (*wgt)[i] : 1.0;
+        if (!std::isfinite(wi) || wi < 0.0)
+            return std::numeric_limits<double>::quiet_NaN();
+        if (wi == 0.0)
+            continue;
+        if (!std::isfinite(y[i]) || !std::isfinite(fitted[i]))
+            return std::numeric_limits<double>::quiet_NaN();
+
+        const double r = y[i] - fitted[i];
+        const double contribution = wi * r * r;
+        if (!std::isfinite(contribution))
+            return std::numeric_limits<double>::quiet_NaN();
+        wrss += contribution;
+        sumLogWeights += std::log(wi);
+        ++nUsed;
     }
 
-    double logLik = 0.0;
-    for (size_t i = 0; i < y.size(); ++i) {
-        double r = y[i] - fitted[i];
-        double wi = weights[i];
-        if (wi <= 0) continue; // skip invalid weights
+    // Unknown common Gaussian variance, profiled over retained frames.
+    // An exact zero WRSS has no finite variance MLE or calibrated LRT.
+    if (nUsed == 0 || !std::isfinite(wrss) || wrss <= 0.0)
+        return std::numeric_limits<double>::quiet_NaN();
 
-        logLik += -0.5 * (std::log(2.0 * M_PI / wi) + wi * r * r);
-    }
-    return logLik;
+    const double count = static_cast<double>(nUsed);
+    const double logTwoPi = 1.8378770664093454836;
+    const double logVariance = std::log(wrss) - std::log(count);
+    return -0.5 * (count * (logTwoPi + 1.0 + logVariance)
+                   - sumLogWeights);
 }
 
 

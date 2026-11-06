@@ -28438,6 +28438,29 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  // Give immediate feedback: PET preparation, eligibility-mask computation,
+  // input-function processing and cache checks precede the worker signals.
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(0);
+  this->ProgressBar->setFormat("Preparing TCM parametric fit...");
+  this->ProgressBar->show();
+  this->stopButton->setVisible(false);
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+  // Every validation/cancel/fully-cached early return must dismiss this
+  // preparatory feedback. Once the worker starts, its existing signals own
+  // the bar through finishedAll/canceled and no cleanup occurs here.
+  struct PreparationProgressGuard
+  {
+    QProgressBar* bar;
+    bool workerStarted = false;
+    ~PreparationProgressGuard()
+    {
+      if (!workerStarted)
+        bar->setVisible(false);
+    }
+  } preparationProgress{this->ProgressBar};
+
   QString petError;
 
   if (!d->ensureParametricPETData(
@@ -28450,6 +28473,14 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 
       return;
   }
+
+  // PET flattening may have hidden its own progress bar; keep the startup
+  // indicator visible while preparing the fitting support and inputs.
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(0);
+  this->ProgressBar->setFormat("Preparing TCM parametric fit...");
+  this->ProgressBar->show();
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
   if (this->PET_flatten_values.size()!=numVoxels) {
@@ -28465,6 +28496,9 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
                          tr("Number of timepoints is not as expected."));
     return;
   }
+
+  this->ProgressBar->setFormat("Preparing TCM eligible-voxel mask...");
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   if (!d->ensureParametricVoxelSelection())
   {
@@ -29115,6 +29149,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       worker,
       &QObject::deleteLater);
 
+  preparationProgress.workerStarted = true;
   worker->start();
 
 }
@@ -29746,6 +29781,29 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
 
+  // Give immediate feedback: PET preparation, eligibility-mask computation,
+  // input-function processing and cache checks precede the worker signals.
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(0);
+  this->ProgressBar->setFormat("Preparing MTGA parametric fit...");
+  this->ProgressBar->show();
+  this->stopButton->setVisible(false);
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
+  // Every validation/cancel/fully-cached early return must dismiss this
+  // preparatory feedback. Once the worker starts, its existing signals own
+  // the bar through finishedAll/canceled and no cleanup occurs here.
+  struct PreparationProgressGuard
+  {
+    QProgressBar* bar;
+    bool workerStarted = false;
+    ~PreparationProgressGuard()
+    {
+      if (!workerStarted)
+        bar->setVisible(false);
+    }
+  } preparationProgress{this->ProgressBar};
+
   QString petError;
 
   if (!d->ensureParametricPETData(
@@ -29758,6 +29816,14 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 
       return;
   }
+
+  // PET flattening may have hidden its own progress bar; keep the startup
+  // indicator visible while preparing the fitting support and inputs.
+  this->ProgressBar->setMinimum(0);
+  this->ProgressBar->setMaximum(0);
+  this->ProgressBar->setFormat("Preparing MTGA parametric fit...");
+  this->ProgressBar->show();
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
   if (this->PET_flatten_values.size()!=numVoxels) {
@@ -29773,6 +29839,9 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
                          tr("Number of timepoints is not as expected."));
     return;
   }
+
+  this->ProgressBar->setFormat("Preparing MTGA eligible-voxel mask...");
+  QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   if (!d->ensureParametricVoxelSelection())
   {
@@ -30091,6 +30160,12 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           << "Reusing existing MTGA voxelwise fit:"
           << QString::fromStdString(modelID);
 
+      this->ProgressBar->setFormat(
+          "Preparing cached " + QString::fromStdString(modelID) +
+          " parametric outputs...");
+      this->ProgressBar->show();
+      QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+
       d->outputMTGAParametricResult(
           modelID,
           logic,
@@ -30312,6 +30387,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
       worker,
       &QObject::deleteLater);
 
+  preparationProgress.workerStarted = true;
   worker->start();
 
 }

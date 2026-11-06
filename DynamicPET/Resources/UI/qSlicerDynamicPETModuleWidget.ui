@@ -3061,7 +3061,7 @@
                                 <double>0.010000000000000</double>
                               </property>
                               <property name="value">
-                                <double>0.050000000000000</double>
+                                 <double>0.010000000000000</double>
                               </property>
                             </widget>
                           </item>
@@ -3504,7 +3504,7 @@
                             <widget class="QLabel" name="TCMOptimizationInfoLabelImg">
                               <property name="wordWrap"><bool>true</bool></property>
                               <property name="text">
-                                <string>The selected criterion chooses the best fitted model at each voxel. With statistical testing enabled, nested models use LRT and non-nested models use Vuong. If a simpler model is not significantly different from the criterion-selected model, the simplest such model is preferred.</string>
+                                <string>The criterion selects the best fit to the same observed tissue TAC. Optional statistical simplification is available for AIC, BIC and chi2, but disabled for exploratory MASE. Nested comparisons use an approximate LRT; non-nested comparisons use a profiled-Gaussian Vuong test. If a simpler alternative has p at or above the threshold, it may be preferred; this does not prove equivalence.</string>
                               </property>
                             </widget>
                           </item>
@@ -3535,7 +3535,7 @@
                           </item>
                           <item row="3" column="1">
                             <widget class="QComboBox" name="TCMSelectionCriterionComboImg">
-                              <property name="toolTip"><string>AIC, BIC, MASE and chi2 are minimized.</string></property>
+                              <property name="toolTip"><string>All criteria are minimized. AIC and BIC are Gaussian residual information criteria on the same tissue TAC; BIC penalizes complexity more strongly. MASE is an exploratory absolute-error metric and disables statistical tests. chi2 is weighted squared residual error divided by residual degrees of freedom; without calibrated variance weights it is not a formal chi-square goodness-of-fit statistic.</string></property>
                               <item><property name="text"><string>AIC</string></property></item>
                               <item><property name="text"><string>BIC</string></property></item>
                               <item><property name="text"><string>MASE</string></property></item>
@@ -3545,7 +3545,7 @@
                           <item row="4" column="0" colspan="2">
                             <widget class="QCheckBox" name="TCMUseStatTestsCheckBoxImg">
                               <property name="text"><string>Use statistical tests</string></property>
-                              <property name="toolTip"><string>Compare each alternative model only against the criterion-selected best model. If models are not significantly different, prefer the one with fewer fitted parameters.</string></property>
+                              <property name="toolTip"><string>Available with AIC, BIC and chi2; disabled for MASE. Compare only simpler alternatives against the original criterion-selected model. Nested models use an approximate likelihood-ratio test; non-nested models use a two-sided profiled-Gaussian Vuong comparison. If p is at or above the threshold, a simpler alternative may be selected; this does not demonstrate model equivalence. BIC already penalizes complexity, and PET frame dependence and boundary constraints limit p-value calibration.</string></property>
                             </widget>
                           </item>
                           <item row="5" column="0">
@@ -3555,12 +3555,13 @@
                           </item>
                           <item row="5" column="1">
                             <widget class="QDoubleSpinBox" name="TCMStatAlphaSpinBoxImg">
+                              <property name="toolTip"><string>Threshold for optional TCM simplification under AIC, BIC or chi2. Disabled for MASE. This is an approximate model-comparison p-value threshold, not proof of equivalence when a difference is not detected.</string></property>
                               <property name="enabled"><bool>false</bool></property>
                               <property name="decimals"><number>3</number></property>
                               <property name="minimum"><double>0.001000000000000</double></property>
                               <property name="maximum"><double>0.500000000000000</double></property>
                               <property name="singleStep"><double>0.010000000000000</double></property>
-                              <property name="value"><double>0.050000000000000</double></property>
+                              <property name="value"><double>0.010000000000000</double></property>
                             </widget>
                           </item>
                           <item row="6" column="0" colspan="2">

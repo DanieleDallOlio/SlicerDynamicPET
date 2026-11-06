@@ -20365,6 +20365,27 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOptimizationUI()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
+  // MASE is exploratory; the optional likelihood-based simplification is
+  // deliberately unavailable with this selection criterion. Update even
+  // when no fitted models exist yet so the controls remain consistent.
+  const bool testsAvailable =
+      this->TCMSelectionCriterionComboImg->currentText() != "MASE";
+
+  if (!testsAvailable &&
+      this->TCMUseStatTestsCheckBoxImg->isChecked())
+  {
+    const bool wasBlocked =
+        this->TCMUseStatTestsCheckBoxImg->blockSignals(true);
+    this->TCMUseStatTestsCheckBoxImg->setChecked(false);
+    this->TCMUseStatTestsCheckBoxImg->blockSignals(wasBlocked);
+  }
+
+  this->TCMUseStatTestsCheckBoxImg->setEnabled(testsAvailable);
+  const bool testsActive =
+      testsAvailable && this->TCMUseStatTestsCheckBoxImg->isChecked();
+  this->TCMStatAlphaSpinBoxImg->setEnabled(testsActive);
+  this->TCMStatAlphaLabelImg->setEnabled(testsActive);
+
   int fittedModelCount = 0;
   int selectedModelCount = 0;
 
@@ -20409,12 +20430,6 @@ void qSlicerDynamicPETModuleWidgetPrivate::updateTCMOptimizationUI()
 
     return;
   }
-
-  const bool useTests =
-      this->TCMUseStatTestsCheckBoxImg->isChecked();
-
-  this->TCMStatAlphaSpinBoxImg
-      ->setEnabled(useTests);
 
   const bool anyParameter =
       this->TCMOptK1CheckBoxImg->isChecked() ||
@@ -20642,9 +20657,11 @@ generateTCMOptimizedResult()
       this->TCMSelectionCriterionComboImg
           ->currentText();
 
+  // Keep MASE metric-only even if optimization is invoked programmatically
+  // while the checkbox is in an unexpected state.
   const bool useTests =
-      this->TCMUseStatTestsCheckBoxImg
-          ->isChecked();
+      criterion != "MASE" &&
+      this->TCMUseStatTestsCheckBoxImg->isChecked();
 
   const double alpha =
       this->TCMStatAlphaSpinBoxImg

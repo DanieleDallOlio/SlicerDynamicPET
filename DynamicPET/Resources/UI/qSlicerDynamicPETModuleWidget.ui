@@ -2785,6 +2785,19 @@
                                   </property>
                                 </widget>
                               </item>
+                              <item>
+                                <widget class="QCheckBox" name="standardizationCheckBoxImg">
+                                  <property name="text">
+                                    <string>Standardize Data</string>
+                                  </property>
+                                  <property name="checked">
+                                    <bool>true</bool>
+                                  </property>
+                                  <property name="toolTip">
+                                    <string>Standardize each MTGA graphical X/Y variable over the selected regression frames before fitting (default ON, as in ROI MTGA). Reported Ki, Ki', DV, DV' and intercepts are converted back to physical graphical units. R2 is generally scale-invariant; AIC and the exploratory residual p-value can change. This does not validate cross-model AIC or Vuong p-values. Refit models after changing this option.</string>
+                                  </property>
+                                </widget>
+                              </item>
                             </layout>
                           </item>
                           <item row="8" column="0">
@@ -2988,7 +3001,7 @@
                           <item row="2" column="1">
                             <widget class="QComboBox" name="MTGASelectionCriterionComboImg">
                               <property name="toolTip">
-                                 <string>R2: highest wins. AIC and MASE: lowest wins. Each criterion is computed in its model-specific graphical response space; ranking does not establish kinetic-model superiority. The exploratory p-value filter is a separate residual-based calculation.</string>
+                                  <string>R2: highest wins; AIC and MASE: lowest wins. Each criterion is computed in its model-specific graphical response space, so ranking does not establish kinetic-model superiority. The exploratory residual filter is available for R2/AIC only and is automatically disabled for MASE.</string>
                               </property>
                               <item>
                                 <property name="text">
@@ -3014,7 +3027,7 @@
                                  <string>Exploratory Vuong-style filter</string>
                               </property>
                               <property name="toolTip">
-                                 <string>Optional exploratory filter, OFF by default. A model is first selected by R2, AIC or MASE, then retained only if the approximate two-sided residual-contrast p-value is below the chosen threshold. Patlak, Logan and RE residuals may have different transformed response units, so this is not a conventional likelihood-based Vuong comparison. The p-value is not calibrated evidence that the selected graphical or kinetic model is superior. Scaling, weights, robust fitting, frame alignment and temporal dependence can affect the result.</string>
+                                 <string>Optional exploratory filter for R2 and AIC only (unavailable for MASE). The metric first selects Patlak or the reversible model. The winner is retained only when BOTH the approximate two-sided residual-contrast p-value is below the chosen threshold AND the signed weighted squared-residual contrast favors the same winner. Conflicting or indeterminate comparisons are excluded, not switched to the other model. Standardization reduces scale differences, but this is not a conventional likelihood-based Vuong test, and its p-values do not establish kinetic-model superiority. Robust fitting, weighting, graphical transformations and temporal dependence remain limitations.</string>
                               </property>
                             </widget>
                           </item>

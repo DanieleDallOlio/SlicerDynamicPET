@@ -23277,6 +23277,21 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
       (parentGeometry.width() - barGeometry.width()) / 2,
       (parentGeometry.height() - barGeometry.height()) / 2
   );
+  // Native QProgressBar busy mode suppresses setFormat() text on some
+  // platforms. A separate label keeps Preparation/Finalizing visible while
+  // preserving the centered busy indicator and its animation.
+  this->parametricProgressLabel = new QLabel(mainWindow);
+  this->parametricProgressLabel->setObjectName("ParametricFitStageLabel");
+  this->parametricProgressLabel->setAlignment(Qt::AlignCenter);
+  this->parametricProgressLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+  this->parametricProgressLabel->setGeometry(
+      this->ProgressBar->x(), this->ProgressBar->y() - 29,
+      this->ProgressBar->width(), 24);
+  this->parametricProgressLabel->setStyleSheet(
+      "QLabel { background-color: rgba(30, 30, 30, 210); "
+      "color: white; border-radius: 4px; padding: 2px; }");
+  this->parametricProgressLabel->hide();
+
   this->stopButton = new QPushButton("Stop", mainWindow);
   stopButton->move(this->ProgressBar->x(), this->ProgressBar->y() + 40);
 
@@ -23335,6 +23350,16 @@ qSlicerDynamicPETModuleWidget::qSlicerDynamicPETModuleWidget(QWidget* _parent)
   this->PETdims[2] = 0;
   // qRegisterMetaType<std::vector<TCMParameters>>("std::vector<TCMParameters>");
   d->init();
+}
+
+void qSlicerDynamicPETModuleWidget::setParametricProgressMessage(const QString& message)
+{
+  if (!this->parametricProgressLabel)
+    return;
+  this->parametricProgressLabel->setText(message);
+  this->parametricProgressLabel->setVisible(!message.isEmpty());
+  if (!message.isEmpty())
+    this->parametricProgressLabel->raise();
 }
 
 //-----------------------------------------------------------------------------
@@ -28507,22 +28532,26 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   this->ProgressBar->setMaximum(0);
   this->ProgressBar->setFormat("Preparing TCM parametric fit...");
   this->ProgressBar->show();
+  this->setParametricProgressMessage(tr("Preparing TCM parametric fit..."));
   this->stopButton->setVisible(false);
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
-  // Every validation/cancel/fully-cached early return must dismiss this
-  // preparatory feedback. Once the worker starts, its existing signals own
-  // the bar through finishedAll/canceled and no cleanup occurs here.
+  // Early returns dismiss both the bar and its stage label; the worker
+  // signals take ownership of both after start().
   struct PreparationProgressGuard
   {
     QProgressBar* bar;
+    QLabel* label;
     bool workerStarted = false;
     ~PreparationProgressGuard()
     {
       if (!workerStarted)
+      {
         bar->setVisible(false);
+        if (label) label->hide();
+      }
     }
-  } preparationProgress{this->ProgressBar};
+  } preparationProgress{this->ProgressBar, this->parametricProgressLabel};
 
   QString petError;
 
@@ -28543,6 +28572,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   this->ProgressBar->setMaximum(0);
   this->ProgressBar->setFormat("Preparing TCM parametric fit...");
   this->ProgressBar->show();
+  this->setParametricProgressMessage(tr("Preparing TCM parametric fit..."));
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
@@ -28561,6 +28591,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   }
 
   this->ProgressBar->setFormat("Preparing TCM eligible-voxel mask...");
+  this->setParametricProgressMessage(tr("Preparing TCM eligible-voxel mask..."));
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   if (!d->ensureParametricVoxelSelection())
@@ -29003,6 +29034,8 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
           QString::fromStdString(modelID) +
           " maps in Slicer...");
 
+      this->setParametricProgressMessage(
+          tr("Finalizing cached %1 outputs...").arg(QString::fromStdString(modelID)));
       QApplication::processEvents();
 
       d->outputTCMParametricResult(
@@ -29094,6 +29127,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
             modelID +
             " (%p%)");
 
+        this->setParametricProgressMessage(QString());
         this->ProgressBar->setVisible(true);
 
         this->stopButton->setEnabled(true);
@@ -29107,6 +29141,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
   });
 
   QObject::connect(worker, &TCMWorker::canceled, this, [this, worker](const QString& modelID){
+      this->setParametricProgressMessage(QString());
       this->ProgressBar->setVisible(false);
       this->stopButton->setVisible(false);
   });
@@ -29166,6 +29201,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
           modelID +
           " parametric outputs...");
 
+      this->setParametricProgressMessage(tr("Finalizing %1 outputs...").arg(modelID));
       this->ProgressBar->setVisible(true);
 
       this->stopButton->setEnabled(false);
@@ -29193,6 +29229,7 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
       {
         Q_D(qSlicerDynamicPETModuleWidget);
 
+        this->setParametricProgressMessage(QString());
         this->ProgressBar->setVisible(false);
 
         this->stopButton->setVisible(false);
@@ -29850,6 +29887,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   this->ProgressBar->setMaximum(0);
   this->ProgressBar->setFormat("Preparing MTGA parametric fit...");
   this->ProgressBar->show();
+  this->setParametricProgressMessage(tr("Preparing MTGA parametric fit..."));
   this->stopButton->setVisible(false);
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
@@ -29859,13 +29897,17 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   struct PreparationProgressGuard
   {
     QProgressBar* bar;
+    QLabel* label;
     bool workerStarted = false;
     ~PreparationProgressGuard()
     {
       if (!workerStarted)
+      {
         bar->setVisible(false);
+        if (label) label->hide();
+      }
     }
-  } preparationProgress{this->ProgressBar};
+  } preparationProgress{this->ProgressBar, this->parametricProgressLabel};
 
   QString petError;
 
@@ -29886,6 +29928,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   this->ProgressBar->setMaximum(0);
   this->ProgressBar->setFormat("Preparing MTGA parametric fit...");
   this->ProgressBar->show();
+  this->setParametricProgressMessage(tr("Preparing MTGA parametric fit..."));
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   int numVoxels = this->PETdims[0]*this->PETdims[1]*this->PETdims[2];
@@ -29904,6 +29947,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
   }
 
   this->ProgressBar->setFormat("Preparing MTGA eligible-voxel mask...");
+  this->setParametricProgressMessage(tr("Preparing MTGA eligible-voxel mask..."));
   QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
   if (!d->ensureParametricVoxelSelection())
@@ -30227,6 +30271,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
           "Preparing cached " + QString::fromStdString(modelID) +
           " parametric outputs...");
       this->ProgressBar->show();
+      this->setParametricProgressMessage(
+          tr("Finalizing cached %1 outputs...").arg(QString::fromStdString(modelID)));
       QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
 
       d->outputMTGAParametricResult(
@@ -30307,6 +30353,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
         this->ProgressBar->setMinimum(0);
         this->ProgressBar->setMaximum(100);
         this->ProgressBar->setValue(0);
+        this->setParametricProgressMessage(QString());
         this->ProgressBar->setVisible(true);
 
         this->stopButton->setEnabled(true);
@@ -30330,6 +30377,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
       this,
       [this](const QString&)
       {
+        this->setParametricProgressMessage(QString());
         this->ProgressBar->setVisible(
             false);
 
@@ -30397,6 +30445,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
             modelID +
             " parametric outputs...");
 
+        this->setParametricProgressMessage(tr("Finalizing %1 outputs...").arg(modelID));
         this->ProgressBar->setVisible(true);
 
         this->stopButton->setEnabled(false);
@@ -30423,6 +30472,7 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
       {
         Q_D(qSlicerDynamicPETModuleWidget);
 
+        this->setParametricProgressMessage(QString());
         this->ProgressBar->setVisible(
             false);
 

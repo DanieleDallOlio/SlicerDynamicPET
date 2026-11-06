@@ -82,6 +82,7 @@
 
 class qSlicerDynamicPETModuleWidgetPrivate;
 class vtkMRMLNode;
+class QLabel;
 
 class Q_SLICER_QTMODULES_DYNAMICPET_EXPORT qSlicerDynamicPETModuleWidget :
   public qSlicerAbstractModuleWidget
@@ -202,6 +203,7 @@ protected:
 private:
   Q_DECLARE_PRIVATE(qSlicerDynamicPETModuleWidget);
   Q_DISABLE_COPY(qSlicerDynamicPETModuleWidget);
+  void setParametricProgressMessage(const QString& message);
   std::vector<double> extractColumn(const std::vector<std::vector<double>>& mat, const int index=0);
   vtkMRMLSubjectHierarchyNode* SubjectHierarchyNode;
   vtkIdType patID, stuID, ctID, petID, segID;
@@ -221,6 +223,7 @@ private:
 
   QProgressBar* ProgressBar;
   QPushButton* stopButton;
+  QLabel* parametricProgressLabel{nullptr};
   std::atomic<bool> stopRequested;
   std::vector<double> timePoints, durations, suvFactors;
   QStringList checkboxNames, ModelsNamesTCM, ModelsNamesMTGA, StatsNames;

@@ -1588,13 +1588,16 @@
             <item>
               <widget class="ctkCollapsibleButton" name="MTGAStatTestButton">
                 <property name="text">
-                 <string>Statistical Test</string>
+                  <string>Exploratory comparison</string>
                 </property>
                 <layout class="QGridLayout" name="MTGAStatTestFormLayout">
                   <item row="0" column="0">
                    <widget class="QLabel" name="voiresMTGAvuong">
                     <property name="text">
-                     <string>Vuong's Test between two models</string>
+                      <string>Vuong-style residual comparison</string>
+                     </property>
+                     <property name="toolTip">
+                      <string>Compares framewise squared residuals of two independently fitted graphical regressions with a weighted approximate normal-reference p-value. Different graphical transformations can have incomparable scales, so this is not a conventional Vuong test based on common-observation likelihoods. The p-value does not prove superiority of either graphical fit or reversible/irreversible kinetics. Interpret together with the plots and fit diagnostics; results depend on frame alignment, scaling, weighting, robust fitting and temporal dependence.</string>
                     </property>
                    </widget>
                   </item>
@@ -1615,7 +1618,10 @@
                   <item row="2" column="0" colspan="2">
                     <widget class="QLabel" name="MTGAVuongPLabel">
                       <property name="text">
-                        <string>Vuong's Test p-value</string>
+                         <string>Approximate p-value (exploratory)</string>
+                       </property>
+                       <property name="toolTip">
+                         <string>Approximate two-sided p-value from a Vuong-style squared-residual contrast. Not a calibrated significance test of graphical-fit superiority because the models may transform the response differently.</string>
                       </property>
                       <property name="alignment">
                         <set>Qt::AlignCenter</set>
@@ -1624,6 +1630,9 @@
                   </item>
                   <item row="3" column="0" colspan="2">
                     <widget class="QLineEdit" name="MTGAVuongP">
+                       <property name="toolTip">
+                         <string>Exploratory approximate p-value only. This comparison does not test whether the R2, AIC or MASE winner fits significantly better and does not establish kinetic reversibility.</string>
+                       </property>
                       <property name="readOnly">
                         <bool>true</bool>
                       </property>
@@ -2979,7 +2988,7 @@
                           <item row="2" column="1">
                             <widget class="QComboBox" name="MTGASelectionCriterionComboImg">
                               <property name="toolTip">
-                                <string>R2: highest wins. AIC and MASE: lowest wins.</string>
+                                 <string>R2: highest wins. AIC and MASE: lowest wins. Each criterion is computed in its model-specific graphical response space; ranking does not establish kinetic-model superiority. The exploratory p-value filter is a separate residual-based calculation.</string>
                               </property>
                               <item>
                                 <property name="text">
@@ -3002,10 +3011,10 @@
                           <item row="3" column="0" colspan="2">
                             <widget class="QCheckBox" name="MTGAUseVuongCheckBoxImg">
                               <property name="text">
-                                <string>Use Vuong test</string>
+                                 <string>Exploratory Vuong-style filter</string>
                               </property>
                               <property name="toolTip">
-                                <string>If enabled, the criterion-selected model is accepted only when the voxelwise comparison is statistically significant. Non-significant voxels are excluded.</string>
+                                 <string>Optional exploratory filter, OFF by default. A model is first selected by R2, AIC or MASE, then retained only if the approximate two-sided residual-contrast p-value is below the chosen threshold. Patlak, Logan and RE residuals may have different transformed response units, so this is not a conventional likelihood-based Vuong comparison. The p-value is not calibrated evidence that the selected graphical or kinetic model is superior. Scaling, weights, robust fitting, frame alignment and temporal dependence can affect the result.</string>
                               </property>
                             </widget>
                           </item>
@@ -3013,13 +3022,16 @@
                           <item row="4" column="0">
                             <widget class="QLabel" name="MTGAVuongAlphaLabelImg">
                               <property name="text">
-                                <string>Significance level</string>
+                                 <string>Exploratory p-value threshold</string>
                               </property>
                             </widget>
                           </item>
 
                           <item row="4" column="1">
                             <widget class="QDoubleSpinBox" name="MTGAVuongAlphaSpinBoxImg">
+                               <property name="toolTip">
+                                 <string>Threshold applied to the exploratory residual-contrast p-value. It is not a validated significance level for selecting between differently transformed graphical regressions.</string>
+                               </property>
                               <property name="enabled">
                                 <bool>false</bool>
                               </property>

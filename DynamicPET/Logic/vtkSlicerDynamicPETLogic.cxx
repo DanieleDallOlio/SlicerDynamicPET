@@ -8723,19 +8723,23 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
     // ---------- 5b) Remove exact-zero TACs from fitting ----------
     auto markInvalidVoxel = [&](TCMParameters& params)
     {
-        params.vb = -1.0;
-        params.K1 = -1.0;
-        params.k2 = -1.0;
+        // An excluded or unfitted voxel has no quantitative estimate.
+        // NaN prevents a legacy -1 sentinel from appearing as a real value
+        // in individual-model TCM images and DICOM parametric maps.
+        const double missing = std::numeric_limits<double>::quiet_NaN();
+        params.vb = missing;
+        params.K1 = missing;
+        params.k2 = missing;
 
         if (n_tc == 2)
         {
-            params.k3 = -1.0;
-            params.k4 = -1.0;
+            params.k3 = missing;
+            params.k4 = missing;
         }
 
-        params.td = -1.0;
-        params.Ki = -1.0;
-        params.DV = -1.0;
+        params.td = missing;
+        params.Ki = missing;
+        params.DV = missing;
 
         params.r.clear();
         params.weights.clear();

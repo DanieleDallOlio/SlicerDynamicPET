@@ -3063,16 +3063,16 @@
                                 <bool>false</bool>
                               </property>
                               <property name="decimals">
-                                <number>3</number>
+                                <number>6</number>
                               </property>
                               <property name="minimum">
-                                <double>0.001000000000000</double>
+                                <double>0.000001000000000</double>
                               </property>
                               <property name="maximum">
                                 <double>0.500000000000000</double>
                               </property>
                               <property name="singleStep">
-                                <double>0.010000000000000</double>
+                                <double>0.001000000000000</double>
                               </property>
                               <property name="value">
                                  <double>0.010000000000000</double>
@@ -3532,14 +3532,14 @@
                         <layout class="QGridLayout" name="TCMOutputLayoutImg">
                           <item row="0" column="0" colspan="2">
                             <widget class="QCheckBox" name="TCMShowInSlicerCheckBoxImg">
-                              <property name="toolTip"><string>Add generated quantitative parametric maps to the Slicer scene.</string></property>
+                              <property name="toolTip"><string>Create quantitative TCM maps. For individual-model results, Ki is output only for irreversible models and DV only for reversible models. Excluded/unfitted voxels are NaN, not -1 or zero.</string></property>
                               <property name="text"><string>Show in Slicer</string></property>
                               <property name="checked"><bool>true</bool></property>
                             </widget>
                           </item>
                           <item row="1" column="0" colspan="2">
                             <widget class="QCheckBox" name="TCMSaveDICOMCheckBoxImg">
-                              <property name="toolTip"><string>Save generated quantitative maps as DICOM Parametric Map objects.</string></property>
+                              <property name="toolTip"><string>Export floating-point DICOM Parametric Maps. Missing voxels are stored as NaN and marked as float pixel padding; Ki is exported only for irreversible TCM and DV only for reversible TCM.</string></property>
                               <property name="text"><string>Save as DICOM Parametric Map</string></property>
                             </widget>
                           </item>
@@ -3645,10 +3645,10 @@
                             <widget class="QDoubleSpinBox" name="TCMStatAlphaSpinBoxImg">
                               <property name="toolTip"><string>Threshold for optional TCM simplification under AIC, BIC or chi2. Disabled for MASE. This is an approximate model-comparison p-value threshold, not proof of equivalence when a difference is not detected.</string></property>
                               <property name="enabled"><bool>false</bool></property>
-                              <property name="decimals"><number>3</number></property>
-                              <property name="minimum"><double>0.001000000000000</double></property>
+                              <property name="decimals"><number>6</number></property>
+                              <property name="minimum"><double>0.000001000000000</double></property>
                               <property name="maximum"><double>0.500000000000000</double></property>
-                              <property name="singleStep"><double>0.010000000000000</double></property>
+                              <property name="singleStep"><double>0.001000000000000</double></property>
                               <property name="value"><double>0.010000000000000</double></property>
                             </widget>
                           </item>
@@ -3662,8 +3662,8 @@
                                 <item row="0" column="3"><widget class="QCheckBox" name="TCMOptk4CheckBoxImg"><property name="text"><string>k4</string></property><property name="checked"><bool>true</bool></property></widget></item>
                                 <item row="1" column="0"><widget class="QCheckBox" name="TCMOptvbCheckBoxImg"><property name="text"><string>vb</string></property><property name="checked"><bool>true</bool></property></widget></item>
                                 <item row="1" column="1"><widget class="QCheckBox" name="TCMOpttdCheckBoxImg"><property name="text"><string>td</string></property><property name="checked"><bool>true</bool></property></widget></item>
-                                <item row="1" column="2"><widget class="QCheckBox" name="TCMOptKiCheckBoxImg"><property name="text"><string>Ki</string></property><property name="checked"><bool>true</bool></property></widget></item>
-                                <item row="1" column="3"><widget class="QCheckBox" name="TCMOptDVCheckBoxImg"><property name="text"><string>DV</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="2"><widget class="QCheckBox" name="TCMOptKiCheckBoxImg"><property name="text"><string>Ki</string></property><property name="toolTip"><string>Net influx Ki is output only where an irreversible TCM is selected. Other voxels are NaN (not zero).</string></property><property name="checked"><bool>true</bool></property></widget></item>
+                                <item row="1" column="3"><widget class="QCheckBox" name="TCMOptDVCheckBoxImg"><property name="text"><string>DV</string></property><property name="toolTip"><string>Equilibrium DV is output only where a reversible TCM is selected. Other voxels are NaN (not zero).</string></property><property name="checked"><bool>true</bool></property></widget></item>
                               </layout>
                             </widget>
                           </item>

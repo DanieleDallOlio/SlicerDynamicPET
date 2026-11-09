@@ -10517,6 +10517,13 @@ def DPE_export_parametric_map(
 
         pm = hd.pm.ParametricMap(**pm_kwargs)
 
+        # Explicitly identify non-finite background as missing pixel data.
+        # Float Pixel Padding Value (0028,0122) supports quiet NaN for
+        # floating-point DICOM PMAPs; finite zero remains a valid measurement.
+        if np.isnan(pixel_array).any():
+            pm.FloatPixelPaddingValue = float("nan")
+            pm.FloatPixelPaddingRangeLimit = float("nan")
+
         # Older highdicom APIs expose only window_center/window_width and may
         # create the VOI transform with the default LINEAR function. Normalize
         # every emitted W/L transform to LINEAR_EXACT so sub-unit kinetic-map
@@ -20772,10 +20779,20 @@ generateTCMOptimizedResult()
          const std::string& field)
       {
         if (field == "K1" ||
-            field == "vb" ||
-            field == "Ki")
+            field == "vb")
         {
           return true;
+        }
+
+        // Net-trapping Ki is meaningful only for irreversible models.
+        // Reversible models can still output K1 as a separate parameter.
+        if (field == "Ki")
+        {
+          return
+              modelID == "1TiCM" ||
+              modelID == "1TidCM" ||
+              modelID == "2TiCM" ||
+              modelID == "2TidCM";
         }
 
         if (field == "k2")
@@ -20858,12 +20875,17 @@ generateTCMOptimizedResult()
       std::vector<double>>
       optimizedValues;
 
+  // Missing values must not look like measured zero: this includes excluded
+  // voxels, inapplicable model/parameter pairs and non-finite fit results.
+  const double missingValue =
+      std::numeric_limits<double>::quiet_NaN();
+
   for (const std::string& field :
        outputFields)
   {
     optimizedValues[field].assign(
         numberOfVoxels,
-        0.0);
+        missingValue);
   }
 
   std::map<std::string, size_t>
@@ -21145,9 +21167,9 @@ generateTCMOptimizedResult()
     ++selectedCounts[finalModel];
 
     // ------------------------------------------------------
-    // 3. Copy the parameters from the selected model.
+    // 3. Copy applicable finite parameters from the selected model.
     //
-    // A parameter absent from that model stays zero.
+    // Inapplicable, excluded and invalid values remain NaN, not zero.
     // ------------------------------------------------------
 
     for (const std::string& field :
@@ -21176,6 +21198,25 @@ generateTCMOptimizedResult()
   }
 
   q->ProgressBar->setValue(100);
+
+  // If no voxel supports a requested parameter, do not create a map that
+  // would consist only of NaNs (or attempt a DICOM PMAP with no finite data).
+  std::set<std::string> fieldsWithFiniteValues;
+  for (const auto& item : optimizedValues)
+  {
+    if (std::any_of(
+            item.second.begin(), item.second.end(),
+            [](double value) { return std::isfinite(value); }))
+    {
+      fieldsWithFiniteValues.insert(item.first);
+    }
+    else
+    {
+      qWarning() << "[TCM OPT] No applicable finite voxels for"
+                 << QString::fromStdString(item.first)
+                 << "- skipping this output map.";
+    }
+  }
 
   std::cout
       << "[TCM OPT] Selection COMPLETE"
@@ -21230,7 +21271,10 @@ generateTCMOptimizedResult()
       QString(
           "selectionCriterion=%1; "
           "comparedModels=%2; "
-          "statisticalTests=%3")
+          "statisticalTests=%3; "
+          "missingParameterValues=NaN; "
+          "Ki=irreversibleModelsOnly; "
+          "DV=reversibleModelsOnly")
           .arg(
               criterion,
               comparedModels,
@@ -21370,6 +21414,11 @@ generateTCMOptimizedResult()
     for (const std::string& field :
          outputFields)
     {
+      if (fieldsWithFiniteValues.count(field) == 0)
+      {
+        continue;
+      }
+
       const QString name =
           "TCM Optimized - " +
           QString::fromStdString(field) +
@@ -21388,11 +21437,22 @@ generateTCMOptimizedResult()
 
       setMetadata(node);
 
+      // NaN now marks missing voxels, so genuine zeros must count.
       this->applyParametricDisplayPreset(
           node,
           optimizedValues.at(field),
           field,
-          true);
+          false);
+
+      node->SetAttribute(
+          "SlicerDynamicPET.TCM.MissingValue",
+          "NaN");
+      if (field == "Ki" || field == "DV")
+      {
+        node->SetAttribute(
+            "SlicerDynamicPET.TCM.Applicability",
+            field == "Ki" ? "IrreversibleOnly" : "ReversibleOnly");
+      }
 
       this->TCMOptimizedNodeIDs
           .push_back(
@@ -21521,6 +21581,11 @@ generateTCMOptimizedResult()
     for (const std::string& field :
          outputFields)
     {
+      if (fieldsWithFiniteValues.count(field) == 0)
+      {
+        continue;
+      }
+
       QString unitCode = "1";
       QString unitMeaning = "no units";
 
@@ -21873,9 +21938,10 @@ exportParametricMapDICOM(
     return false;
   }
 
+  // Optimized TCM now uses NaN for inapplicable/excluded voxels, so
+  // a genuine zero must participate in display-window estimation.
   const bool optimizedSparseMap =
-      modelID == "MTGAOptimized" ||
-      modelID == "TCMOptimized";
+      modelID == "MTGAOptimized";
 
   const ParametricDisplayPreset displayPreset =
       this->computeParametricDisplayPreset(
@@ -22449,12 +22515,15 @@ outputTCMParametricResult(
 
   std::vector<std::string> fields;
 
+  // Individual TCM image outputs follow the same kinetic semantics as
+  // optimized TCM maps: net influx Ki is available for irreversible models,
+  // whereas equilibrium DV is available for reversible models.
   if (modelID == "1TCM")
   {
     fields =
     {
       "K1", "k2", "vb",
-      "Ki", "DV",
+      "DV",
       "AIC", "MASE", "BIC", "chi2"
     };
   }
@@ -22463,7 +22532,7 @@ outputTCMParametricResult(
     fields =
     {
       "K1", "k2", "vb", "td",
-      "Ki", "DV",
+      "DV",
       "AIC", "MASE", "BIC", "chi2"
     };
   }
@@ -22488,7 +22557,7 @@ outputTCMParametricResult(
     fields =
     {
       "K1", "k2", "k3", "k4", "vb",
-      "Ki", "DV",
+      "DV",
       "AIC", "MASE", "BIC", "chi2"
     };
   }
@@ -22497,7 +22566,7 @@ outputTCMParametricResult(
     fields =
     {
       "K1", "k2", "k3", "k4", "vb", "td",
-      "Ki", "DV",
+      "DV",
       "AIC", "MASE", "BIC", "chi2"
     };
   }
@@ -22532,6 +22601,20 @@ outputTCMParametricResult(
   // ------------------------------------------------------------------------
   if (this->TCMShowInSlicerCheckBoxImg->isChecked())
   {
+    // Remove a stale reversible Ki map from a prior extension version.
+    // Regenerating individual TCM outputs must not leave an inapplicable
+    // legacy map beside the newly generated scientifically valid maps.
+    if (modelID == "1TCM" || modelID == "1TdCM" ||
+        modelID == "2TCM" || modelID == "2TdCM")
+    {
+      vtkMRMLScalarVolumeNode* legacyKi =
+          this->findParametricResultNode("TCM", modelID, "Ki", refPETNode);
+      if (legacyKi && legacyKi->GetScene())
+      {
+        legacyKi->GetScene()->RemoveNode(legacyKi);
+      }
+    }
+
     q->ProgressBar->setMinimum(0);
     q->ProgressBar->setMaximum(0);
 
@@ -22564,6 +22647,17 @@ outputTCMParametricResult(
           node,
           logic->ExtractParameter(resultIt->second, field),
           field);
+
+      if (node)
+      {
+        node->SetAttribute("SlicerDynamicPET.TCM.MissingValue", "NaN");
+        if (field == "Ki" || field == "DV")
+        {
+          node->SetAttribute(
+              "SlicerDynamicPET.TCM.Applicability",
+              field == "Ki" ? "IrreversibleOnly" : "ReversibleOnly");
+        }
+      }
     }
   }
 
@@ -22653,7 +22747,11 @@ outputTCMParametricResult(
               outputDirectory,
               seriesNumber,
               unitCode,
-              unitMeaning))
+              unitMeaning,
+              QStringLiteral(
+                  "missingParameterValues=NaN; "
+                  "Ki=irreversibleModelsOnly; "
+                  "DV=reversibleModelsOnly")))
       {
         // Avoid producing one error dialog for every
         // remaining parameter if dcmqi/source DICOM
@@ -23901,13 +23999,27 @@ void qSlicerDynamicPETModuleWidget::onParametricCursorMoved()
       d->TCMOptimizedProbeLabelImg->setText("TCM: Outside selection map");
       return;
     }
-    const int code = static_cast<int>(std::llround(
-        map->GetImageData()->GetScalarComponentAsDouble(i, j, k, 0)));
+    // Model codes are written as exact integers (0-8) into the scalar map.
+    // Use the map's own code-to-name metadata, rather than guessing from color.
+    const double rawCode =
+        map->GetImageData()->GetScalarComponentAsDouble(i, j, k, 0);
+    if (!std::isfinite(rawCode) || rawCode < 0.0 || rawCode > 8.0 ||
+        std::abs(rawCode - std::round(rawCode)) > 1e-6)
+    {
+      d->TCMOptimizedProbeLabelImg->setText("TCM: Invalid model code");
+      return;
+    }
+    const int code = static_cast<int>(std::llround(rawCode));
+    if (code == 0)
+    {
+      d->TCMOptimizedProbeLabelImg->setText("TCM: Excluded (0)");
+      return;
+    }
     const QByteArray key = QString("SlicerDynamicPET.TCM.ModelCode.%1")
         .arg(code).toUtf8();
     const char* modelName = map->GetAttribute(key.constData());
     d->TCMOptimizedProbeLabelImg->setText(
-        modelName
+        modelName && modelName[0] != '\0'
           ? QString("TCM selected: %1 (%2)")
                 .arg(QString::fromUtf8(modelName)).arg(code)
           : QString("TCM: Unknown model code (%1)").arg(code));

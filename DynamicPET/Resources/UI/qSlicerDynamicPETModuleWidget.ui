@@ -3115,6 +3115,72 @@
                             </widget>
                           </item>
 
+                          <item row="8" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGARedLegendBarLegacyImg">
+                              <property name="visible"><bool>false</bool></property>
+                              <property name="minimumSize"><size><width>0</width><height>14</height></size></property>
+                              <property name="styleSheet"><string notr="true">background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #000000,stop:1 #FF0000); border:1px solid #888888;</string></property>
+                              <property name="toolTip"><string>Patlak Ki red intensity increases from left to right.</string></property>
+                            </widget>
+                          </item>
+                          <item row="9" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGABlueLegendBarLegacyImg">
+                              <property name="visible"><bool>false</bool></property>
+                              <property name="minimumSize"><size><width>0</width><height>14</height></size></property>
+                              <property name="styleSheet"><string notr="true">background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #000000,stop:1 #0000FF); border:1px solid #888888;</string></property>
+                              <property name="toolTip"><string>Reversible DV blue intensity increases from left to right.</string></property>
+                            </widget>
+                          </item>
+                          <item row="10" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAOptimizedLegendTextImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Generate an optimized RGB map to see the quantitative legend.</string></property>
+                            </widget>
+                          </item>
+                          <item row="11" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAOptimizedProbeLabelLegacyImg">
+                              <property name="visible"><bool>false</bool></property>
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Hover over the displayed MTGA Selection RGB image to identify the model and value.</string></property>
+                            </widget>
+                          </item>
+
+                          <!-- Model readout first; red/blue ranges and compact raster gradients below. -->
+                          <item row="8" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAOptimizedProbeLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Hover over the displayed MTGA Selection RGB image to identify the model and value.</string></property>
+                              <property name="toolTip"><string>Black RGB pixels can indicate excluded voxels or selected-model values at or below the display minimum. Hover the selection map to identify which case applies.</string></property>
+                            </widget>
+                          </item>
+                          <item row="9" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGAKiRangeLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Ki (red): generate an optimized RGB map to see the range.</string></property>
+                              <property name="toolTip"><string>Red intensity increases left to right. The endpoints are taken from the optimized Ki volume display window/level when you generate or refresh RGB.</string></property>
+                            </widget>
+                          </item>
+                          <item row="10" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGARedLegendBarImg">
+                              <property name="minimumSize"><size><width>192</width><height>13</height></size></property>
+                              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+                              <property name="toolTip"><string>Red: dark means at/below Ki display minimum, bright red means at/above its maximum. Black may also mean excluded; use the model hover readout to distinguish.</string></property>
+                            </widget>
+                          </item>
+                          <item row="11" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGADvRangeLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>DV (blue): generate an optimized RGB map to see the range.</string></property>
+                              <property name="toolTip"><string>Blue intensity increases left to right. The endpoints are taken from the optimized DV volume display window/level when you generate or refresh RGB.</string></property>
+                            </widget>
+                          </item>
+                          <item row="12" column="0" colspan="2">
+                            <widget class="QLabel" name="MTGABlueLegendBarImg">
+                              <property name="minimumSize"><size><width>192</width><height>13</height></size></property>
+                              <property name="alignment"><set>Qt::AlignLeft|Qt::AlignVCenter</set></property>
+                              <property name="toolTip"><string>Blue: dark means at/below DV display minimum, bright blue means at/above its maximum. Black may also mean excluded; use the model hover readout to distinguish.</string></property>
+                            </widget>
+                          </item>
                         </layout>
                       </widget>
                     </item>
@@ -3491,6 +3557,14 @@
                               </property>
                             </widget>
                           </item>
+                          <item row="8" column="0" colspan="2">
+                            <widget class="QLabel" name="TCMOptimizedProbeLabelLegacyImg">
+                              <property name="visible"><bool>false</bool></property>
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Hover over the displayed TCM model-selection image to identify the model.</string></property>
+                              <property name="toolTip"><string>Reads the selected model code 0-8 from the optimized selection volume without changing the Slicer Data Probe.</string></property>
+                            </widget>
+                          </item>
                         </layout>
                       </widget>
                     </item>
@@ -3601,6 +3675,13 @@
                               <property name="toolTip">
                                 <string>Generate quantitative parameter maps and a model-selection visualization from the voxelwise selected TCM model.</string>
                               </property>
+                            </widget>
+                          </item>
+                          <item row="8" column="0" colspan="2">
+                            <widget class="QLabel" name="TCMOptimizedProbeLabelImg">
+                              <property name="wordWrap"><bool>true</bool></property>
+                              <property name="text"><string>Hover over the displayed TCM model-selection image to identify the model.</string></property>
+                              <property name="toolTip"><string>Reads the selected model code 0-8 from the optimized selection volume without changing the Slicer Data Probe.</string></property>
                             </widget>
                           </item>
                         </layout>

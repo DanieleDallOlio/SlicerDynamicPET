@@ -123,6 +123,8 @@ public:
   bool checkdisplayedDynamicPET();
 
 public slots:
+  // In-module model identification; does not alter Slicer's Data Probe.
+  void onParametricCursorMoved();
   void onSubjectHierarchyChanged();
   void onSceneNodeAboutToBeRemoved(vtkObject* caller, vtkObject* node);
   void onSubjectHierarchyItemAboutToBeRemoved(vtkObject* caller, void* callData);

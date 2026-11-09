@@ -43,6 +43,10 @@
 #include <QLabel>
 #include <QSlider>
 #include <QFileInfo>
+#include <vtkMRMLCrosshairNode.h>
+#include <vtkMRMLSliceNode.h>
+#include <vtkMRMLSliceCompositeNode.h>
+#include <vtkMatrix4x4.h>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QDateTime>
@@ -19444,6 +19448,50 @@ refreshMTGAOptimizedRGB()
   this->RefreshMTGARGBButtonImg
       ->setEnabled(true);
 
+  // Same endpoints as the actual RGB normalization above (kiLow/kiHigh,
+  // dvLow/dvHigh). Display-only; does not recalculate selection or fitted maps.
+  const char* primaryAttr = kiNode->GetAttribute(
+      "SlicerDynamicPET.MTGA.PrimaryModel");
+  const char* reversibleAttr = dvNode->GetAttribute(
+      "SlicerDynamicPET.MTGA.ReversibleModel");
+  const char* relativeAttr = kiNode->GetAttribute(
+      "SlicerDynamicPET.MTGA.RelativeMode");
+  const bool relativeMode = relativeAttr && std::string(relativeAttr) == "1";
+  const QString primaryName = primaryAttr
+      ? QString::fromUtf8(primaryAttr) : QStringLiteral("Patlak");
+  const QString reversibleName = reversibleAttr
+      ? QString::fromUtf8(reversibleAttr) : QStringLiteral("Reversible model");
+
+  this->MTGAKiRangeLabelImg->setText(
+      QString("%1 - %2 (red): low %3  ->  high %4")
+          .arg(primaryName, relativeMode ? QStringLiteral("Ki'") : QStringLiteral("Ki"))
+          .arg(kiLow, 0, 'g', 4).arg(kiHigh, 0, 'g', 4));
+  this->MTGADvRangeLabelImg->setText(
+      QString("%1 - %2 (blue): low %3  ->  high %4")
+          .arg(reversibleName, relativeMode ? QStringLiteral("DV'") : QStringLiteral("DV"))
+          .arg(dvLow, 0, 'g', 4).arg(dvHigh, 0, 'g', 4));
+
+  // Match the compact raster-gradient bars from the supplied reference CXX.
+  // A non-stretched pixmap has stable color progression across platforms.
+  const auto makeGradient = [](bool red)
+  {
+    QImage image(192, 13, QImage::Format_RGB32);
+    for (int x = 0; x < image.width(); ++x)
+    {
+      const int intensity = static_cast<int>(
+          255.0 * x / (image.width() - 1));
+      const QRgb color = red ? qRgb(intensity, 0, 0)
+                            : qRgb(0, 0, intensity);
+      for (int y = 0; y < image.height(); ++y)
+        image.setPixel(x, y, color);
+    }
+    return QPixmap::fromImage(image);
+  };
+  this->MTGARedLegendBarImg->setPixmap(makeGradient(true));
+  this->MTGABlueLegendBarImg->setPixmap(makeGradient(false));
+  this->MTGAOptimizedProbeLabelImg->setText(
+      "Hover over the displayed MTGA Selection RGB image to identify the model and value.");
+
   std::cout
       << "[MTGA RGB] refresh END"
       << std::endl;
@@ -23687,6 +23735,189 @@ void qSlicerDynamicPETModuleWidget::exit()
 }
 
 
+void qSlicerDynamicPETModuleWidget::onParametricCursorMoved()
+{
+  Q_D(qSlicerDynamicPETModuleWidget);
+  if (!d->MTGAOptimizedProbeLabelImg || !d->TCMOptimizedProbeLabelImg)
+    return;
+
+  const QString mtgaPrompt =
+      "Hover over the displayed MTGA Selection RGB image to identify the model and value.";
+  const QString tcmPrompt =
+      "Hover over the displayed TCM model-selection image to identify the model.";
+  auto clearProbe = [&]()
+  {
+    d->MTGAOptimizedProbeLabelImg->setText(mtgaPrompt);
+    d->TCMOptimizedProbeLabelImg->setText(tcmPrompt);
+  };
+  vtkMRMLScene* scene = this->mrmlScene();
+  if (!this->IsActive || !scene)
+  {
+    clearProbe();
+    return;
+  }
+
+  vtkMRMLCrosshairNode* crosshair = vtkMRMLCrosshairNode::SafeDownCast(
+      scene->GetFirstNodeByClass("vtkMRMLCrosshairNode"));
+  double cursorXYZ[3] = {0.0, 0.0, 0.0};
+  double ras[3] = {0.0, 0.0, 0.0};
+  vtkMRMLSliceNode* slice = crosshair
+      ? crosshair->GetCursorPositionXYZ(cursorXYZ) : nullptr;
+  if (!slice || !crosshair->GetCursorPositionRAS(ras))
+  {
+    clearProbe();
+    return;
+  }
+
+  vtkMRMLSliceCompositeNode* composite = nullptr;
+  const QString sliceName = QString::fromUtf8(
+      slice->GetLayoutName() ? slice->GetLayoutName() : "");
+  for (int i = 0; i < scene->GetNumberOfNodesByClass(
+           "vtkMRMLSliceCompositeNode"); ++i)
+  {
+    auto* candidate = vtkMRMLSliceCompositeNode::SafeDownCast(
+        scene->GetNthNodeByClass(i, "vtkMRMLSliceCompositeNode"));
+    if (candidate && QString::fromUtf8(
+          candidate->GetLayoutName() ? candidate->GetLayoutName() : "")
+          == sliceName)
+    {
+      composite = candidate;
+      break;
+    }
+  }
+  if (!composite)
+  {
+    clearProbe();
+    return;
+  }
+
+  const QString backgroundID = QString::fromUtf8(
+      composite->GetBackgroundVolumeID()
+          ? composite->GetBackgroundVolumeID() : "");
+  const QString foregroundID = QString::fromUtf8(
+      composite->GetForegroundVolumeID()
+          ? composite->GetForegroundVolumeID() : "");
+  auto isDisplayed = [&](const std::string& id)
+  {
+    if (id.empty()) return false;
+    const QString qID = QString::fromStdString(id);
+    return qID == backgroundID || qID == foregroundID;
+  };
+
+  // Use the actual selection buffer, not the RGB triplet: black pixels can
+  // also be valid, low-intensity Patlak or reversible-model observations.
+  if (isDisplayed(d->MTGAOptimizedRGBNodeID))
+  {
+    vtkMRMLVolumeNode* rgb = vtkMRMLVolumeNode::SafeDownCast(
+        scene->GetNodeByID(d->MTGAOptimizedRGBNodeID.c_str()));
+    vtkIdType flatIndex = -1;
+    if (rgb && rgb->GetImageData())
+    {
+      vtkNew<vtkMatrix4x4> rasToIjk;
+      rgb->GetRASToIJKMatrix(rasToIjk);
+      const double ras4[4] = {ras[0], ras[1], ras[2], 1.0};
+      double ijk4[4];
+      rasToIjk->MultiplyPoint(ras4, ijk4);
+      const int i = static_cast<int>(std::llround(ijk4[0]));
+      const int j = static_cast<int>(std::llround(ijk4[1]));
+      const int k = static_cast<int>(std::llround(ijk4[2]));
+      int extent[6];
+      rgb->GetImageData()->GetExtent(extent);
+      if (i >= extent[0] && i <= extent[1] &&
+          j >= extent[2] && j <= extent[3] &&
+          k >= extent[4] && k <= extent[5])
+      {
+        const vtkIdType width = extent[1] - extent[0] + 1;
+        const vtkIdType height = extent[3] - extent[2] + 1;
+        flatIndex = (static_cast<vtkIdType>(k - extent[4]) * height +
+                     (j - extent[2])) * width + (i - extent[0]);
+      }
+    }
+    const size_t v = flatIndex >= 0
+        ? static_cast<size_t>(flatIndex) : d->MTGAOptimizedSelection.size();
+    if (v >= d->MTGAOptimizedSelection.size() ||
+        v >= d->MTGAOptimizedKiValues.size() ||
+        v >= d->MTGAOptimizedDVValues.size())
+    {
+      d->MTGAOptimizedProbeLabelImg->setText("MTGA: Outside selected map");
+    }
+    else
+    {
+      const unsigned char cls = d->MTGAOptimizedSelection[v];
+      const char* primary = rgb->GetAttribute(
+          "SlicerDynamicPET.MTGA.PrimaryModel");
+      const char* reversible = rgb->GetAttribute(
+          "SlicerDynamicPET.MTGA.ReversibleModel");
+      if (cls == static_cast<unsigned char>(
+              qSlicerDynamicPETModuleWidgetPrivate::MTGAOptimizedClass::Patlak))
+      {
+        d->MTGAOptimizedProbeLabelImg->setText(
+            QString("%1 (red): Ki = %2")
+                .arg(primary ? QString::fromUtf8(primary) : QStringLiteral("Patlak"))
+                .arg(d->MTGAOptimizedKiValues[v], 0, 'g', 5));
+      }
+      else if (cls == static_cast<unsigned char>(
+                   qSlicerDynamicPETModuleWidgetPrivate::MTGAOptimizedClass::Reversible))
+      {
+        d->MTGAOptimizedProbeLabelImg->setText(
+            QString("%1 (blue): DV = %2")
+                .arg(reversible ? QString::fromUtf8(reversible) : QStringLiteral("Reversible"))
+                .arg(d->MTGAOptimizedDVValues[v], 0, 'g', 5));
+      }
+      else
+      {
+        d->MTGAOptimizedProbeLabelImg->setText("MTGA: Excluded (0)");
+      }
+    }
+  }
+  else
+  {
+    d->MTGAOptimizedProbeLabelImg->setText(mtgaPrompt);
+  }
+
+  if (isDisplayed(d->TCMOptimizedModelSelectionNodeID))
+  {
+    vtkMRMLScalarVolumeNode* map = vtkMRMLScalarVolumeNode::SafeDownCast(
+        scene->GetNodeByID(d->TCMOptimizedModelSelectionNodeID.c_str()));
+    if (!map || !map->GetImageData())
+    {
+      d->TCMOptimizedProbeLabelImg->setText(tcmPrompt);
+      return;
+    }
+    vtkNew<vtkMatrix4x4> rasToIjk;
+    map->GetRASToIJKMatrix(rasToIjk);
+    const double ras4[4] = {ras[0], ras[1], ras[2], 1.0};
+    double ijk4[4];
+    rasToIjk->MultiplyPoint(ras4, ijk4);
+    const int i = static_cast<int>(std::llround(ijk4[0]));
+    const int j = static_cast<int>(std::llround(ijk4[1]));
+    const int k = static_cast<int>(std::llround(ijk4[2]));
+    int extent[6];
+    map->GetImageData()->GetExtent(extent);
+    if (i < extent[0] || i > extent[1] ||
+        j < extent[2] || j > extent[3] ||
+        k < extent[4] || k > extent[5])
+    {
+      d->TCMOptimizedProbeLabelImg->setText("TCM: Outside selection map");
+      return;
+    }
+    const int code = static_cast<int>(std::llround(
+        map->GetImageData()->GetScalarComponentAsDouble(i, j, k, 0)));
+    const QByteArray key = QString("SlicerDynamicPET.TCM.ModelCode.%1")
+        .arg(code).toUtf8();
+    const char* modelName = map->GetAttribute(key.constData());
+    d->TCMOptimizedProbeLabelImg->setText(
+        modelName
+          ? QString("TCM selected: %1 (%2)")
+                .arg(QString::fromUtf8(modelName)).arg(code)
+          : QString("TCM: Unknown model code (%1)").arg(code));
+  }
+  else
+  {
+    d->TCMOptimizedProbeLabelImg->setText(tcmPrompt);
+  }
+}
+
 void qSlicerDynamicPETModuleWidget::onSubjectHierarchyChanged() {
   if (!this->IsActive)
   {
@@ -23763,6 +23994,20 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->segSequenceNode = nullptr;
   this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
   this->qvtkDisconnectAll();
+
+  // Crosshair cursor movement is independent of the Data Probe widget.
+  // Observe it once per MRML scene to display only our own model-map readout.
+  if (scene)
+  {
+    vtkMRMLCrosshairNode* crosshair = vtkMRMLCrosshairNode::SafeDownCast(
+        scene->GetFirstNodeByClass("vtkMRMLCrosshairNode"));
+    if (crosshair)
+    {
+      this->qvtkConnect(crosshair,
+          vtkMRMLCrosshairNode::CursorPositionModifiedEvent,
+          this, SLOT(onParametricCursorMoved()));
+    }
+  }
 
   if (scene)
   {

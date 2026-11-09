@@ -26,6 +26,7 @@
 // Slicer includes
 #include "qSlicerDynamicPETModuleWidget.h"
 #include "ui_qSlicerDynamicPETModuleWidget.h"
+#include <vtkNew.h>
 
 #include <QApplication>
 #include <QEventLoop>
@@ -24749,6 +24750,49 @@ void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
     return;
   }
   this->SelectedSegmentationNode = segNode;
+  // Conversion of a planar-contour RTSTRUCT must not run using Slicer's
+  // automatically inferred (potentially extremely fine) voxel geometry.
+  // Existing binary-labelmap segmentations do not need this preflight.
+  vtkSegmentation* selectedSegmentation = segNode->GetSegmentation();
+  const std::string binaryLabelmapName =
+    vtkSegmentationConverter::GetSegmentationBinaryLabelmapRepresentationName();
+  if (selectedSegmentation &&
+      !selectedSegmentation->ContainsRepresentation(binaryLabelmapName))
+  {
+    const std::string referenceGeometry =
+      selectedSegmentation->GetConversionParameter(
+        vtkSegmentationConverter::GetReferenceImageGeometryParameterName());
+    vtkNew<vtkMatrix4x4> geometryMatrix;
+    int geometryExtent[6] = {0, -1, 0, -1, 0, -1};
+    const bool validReferenceGeometry = !referenceGeometry.empty() &&
+      vtkSegmentationConverter::DeserializeImageGeometry(
+        referenceGeometry, geometryMatrix.GetPointer(), geometryExtent);
+    if (!validReferenceGeometry)
+    {
+      QMessageBox::warning(
+        this,
+        tr("RTSTRUCT reference geometry missing"),
+        tr("The selected segmentation has no valid reference image geometry.\n\n"
+           "Converting its planar RTSTRUCT contours now may create extremely "
+           "fine voxel grids and make Slicer appear unresponsive. "
+           "Segmentation preparation has been stopped without changing "
+           "the source contours.\n\n"
+           "Open Slicer's Segmentations module, select this segmentation, "
+           "and use Reference image geometry / Specify geometry to choose "
+           "an appropriate reference volume (PET or CT) that is spatially "
+           "aligned with the RTSTRUCT.\n\n"
+           "Then return to DynamicPET, select None, and reselect the "
+           "segmentation to prepare it."));
+      this->SelectedSegmentationNode = nullptr;
+      d->populateSegmentCheckboxes(this->segID);
+      this->enableTACbutton();
+      d->updateSegmentationAdvancedUI();
+      d->SegSelector->setToolTip(tr(
+        "Reference image geometry is missing. Assign it in Segmentations, "
+        "then select None and reselect the segmentation."));
+      return;
+    }
+  }
   // Make sure the source of the segmentation is a binary label map, alongside a created closed surface
   vtkSlicerDynamicPETLogic* logic = vtkSlicerDynamicPETLogic::SafeDownCast(this->logic());
   if (!logic) {

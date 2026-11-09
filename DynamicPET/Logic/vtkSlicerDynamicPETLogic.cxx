@@ -2433,7 +2433,26 @@ void vtkSlicerDynamicPETLogic::setupSeg(vtkMRMLSegmentationNode* segNode)
   auto start = Clock::now();
   if (!segmentation->ContainsRepresentation(labelmapRep))
   {
-    segmentation->CreateRepresentation(labelmapRep);
+    // Last-resort safeguard for callers other than the Setup selection UI.
+    const std::string referenceGeometry = segmentation->GetConversionParameter(
+      vtkSegmentationConverter::GetReferenceImageGeometryParameterName());
+    vtkNew<vtkMatrix4x4> geometryMatrix;
+    int geometryExtent[6] = {0, -1, 0, -1, 0, -1};
+    const bool validReferenceGeometry = !referenceGeometry.empty() &&
+      vtkSegmentationConverter::DeserializeImageGeometry(
+        referenceGeometry, geometryMatrix.GetPointer(), geometryExtent);
+    if (!validReferenceGeometry)
+    {
+      qWarning() << "SlicerDynamicPET setupSeg: missing/invalid reference "
+                    "image geometry; binary-labelmap conversion skipped.";
+      return;
+    }
+    if (!segmentation->CreateRepresentation(labelmapRep))
+    {
+      qWarning() << "SlicerDynamicPET setupSeg: binary-labelmap "
+                    "representation creation failed.";
+      return;
+    }
   }
   auto end = Clock::now();
 

@@ -8906,7 +8906,16 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       q,
       [this, q](int)
       {
+        // The source points and the modeled IF must use the same statistic.
+        // Remember whether the preview is open before invalidation removes it.
+        const bool previewOpen =
+            this->previewGroupExists("InputFunctionPreview");
+        this->invalidateInputFunctionResults();
         this->updateInputFunctionStatus();
+        if (previewOpen)
+        {
+            this->previewInputFunction();
+        }
 
         // ROI results depend on the chosen IF statistic.
         q->clearFITdata();

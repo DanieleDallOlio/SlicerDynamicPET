@@ -1470,6 +1470,19 @@
                       </item>
                     </layout>
                   </item>
+                  <item row="3" column="1">
+                   <widget class="QCheckBox" name="MTGAShowExcludedPointsCheckBox">
+                    <property name="toolTip">
+                     <string>Show MTGA observations excluded from regression. This affects only the plot; excluded points never contribute to the fit. Hide them to prevent outliers from expanding the plot axes.</string>
+                    </property>
+                    <property name="text">
+                     <string>Show excluded regression points</string>
+                    </property>
+                    <property name="checked">
+                     <bool>false</bool>
+                    </property>
+                   </widget>
+                  </item>
                   <item row="4" column="0">
                    <widget class="QLabel" name="infoExcelMTGA">
                     <property name="text">

@@ -8890,6 +8890,43 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
     q, SLOT(onPlotTCMbutton()));
   QObject::connect( this->plotMTGAButton, SIGNAL(clicked(bool)),
     q, SLOT(onPlotMTGAbutton()));
+  QObject::connect(
+      this->MTGAShowExcludedPointsCheckBox,
+      &QCheckBox::toggled,
+      q,
+      [this, q](bool showExcluded)
+      {
+        vtkMRMLScene* scene = q->mrmlScene();
+        if (!scene) return;
+
+        // Only change the currently displayed MTGA regression plot.
+        vtkMRMLPlotViewNode* viewNode = vtkMRMLPlotViewNode::SafeDownCast(
+            scene->GetFirstNodeByClass("vtkMRMLPlotViewNode"));
+        if (!viewNode || !viewNode->GetPlotChartNodeID()) return;
+
+        vtkMRMLPlotChartNode* chartNode = vtkMRMLPlotChartNode::SafeDownCast(
+            scene->GetNodeByID(viewNode->GetPlotChartNodeID()));
+        if (!chartNode ||
+            !chartNode->GetAttribute("SlicerDynamicPET.MTGARegressionPlot"))
+        {
+          return;
+        }
+
+        const char* excludedID = chartNode->GetAttribute(
+            "SlicerDynamicPET.MTGAExcludedSeriesID");
+        if (!excludedID || !scene->GetNodeByID(excludedID)) return;
+
+        // Update the chart's series membership, not the regression data.
+        // This also lets the plot axes ignore hidden outliers.
+        if (showExcluded && !chartNode->HasPlotSeriesNodeID(excludedID))
+        {
+          chartNode->AddAndObservePlotSeriesNodeID(excludedID);
+        }
+        else if (!showExcluded && chartNode->HasPlotSeriesNodeID(excludedID))
+        {
+          chartNode->RemovePlotSeriesNodeID(excludedID);
+        }
+      });
   QObject::connect( this->PlotErrorCheckbox, SIGNAL(toggled(bool)),
     q, SLOT(onPlotbutton()));
   QObject::connect(
@@ -25640,6 +25677,16 @@ void qSlicerDynamicPETModuleWidget::RemoveExistingPlotChartAndTable()
 
     std::vector<std::string> seriesIDs;
     chartNode->GetPlotSeriesNodeIDs(seriesIDs);
+
+    // A hidden MTGA excluded-points series is not in the chart's reference
+    // list. Clean it up as well when the plot is replaced.
+    const char* excludedID = chartNode->GetAttribute(
+        "SlicerDynamicPET.MTGAExcludedSeriesID");
+    if (excludedID &&
+        std::find(seriesIDs.begin(), seriesIDs.end(), excludedID) == seriesIDs.end())
+    {
+      seriesIDs.emplace_back(excludedID);
+    }
     this->mrmlScene()->RemoveNode(chartNode);
     for (const std::string& id : seriesIDs)
     {
@@ -31522,6 +31569,7 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   tableNode->AddColumn(labelArray);
 
   vtkMRMLPlotChartNode* chartNode = this->GetOrCreatePlotChart();
+  chartNode->SetAttribute("SlicerDynamicPET.MTGARegressionPlot", "1");
 
   vtkNew<vtkDoubleArray> fitArray;
   fitArray->SetName(modelName.c_str());
@@ -31567,7 +31615,12 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   excludedSeries->SetLabelColumnName("ToolTipData");
   excludedSeries->SetUniqueColor();
   excludedSeries->SetLineStyle(vtkMRMLPlotSeriesNode::LineStyleNone);
-  chartNode->AddAndObservePlotSeriesNodeID(excludedSeries->GetID());
+  chartNode->SetAttribute(
+      "SlicerDynamicPET.MTGAExcludedSeriesID", excludedSeries->GetID());
+  if (d->MTGAShowExcludedPointsCheckBox->isChecked())
+  {
+    chartNode->AddAndObservePlotSeriesNodeID(excludedSeries->GetID());
+  }
 
   chartNode->SetTitle((modelName + " - " + this->segmentTACsnames[selectedVOI]).c_str());
   if (modelName == "Patlak" || modelName == "Relative Patlak") {

@@ -6491,6 +6491,174 @@ CreatePETBodySupportMask(
         return nullptr;
     }
 
+    // A multiscale valley between the first two positive log-intensity modes
+    // is not necessarily a background/tissue boundary. In low-count or
+    // reconstruction-smoothed total-body PET, both modes can belong to the
+    // positive reconstructed background, yielding a near-whole-FOV mask.
+    // Check the proposed foreground against a sampled outer in-FOV annulus
+    // before running the expensive 3-D morphology and connectivity filters.
+    const double histogramThreshold = threshold;
+    const size_t initiallySelected = static_cast<size_t>(std::count_if(
+        composite.begin(), composite.end(),
+        [threshold](double value)
+        {
+            return std::isfinite(value) && value >= threshold;
+        }));
+    const double initialForegroundFraction =
+        static_cast<double>(initiallySelected) /
+        static_cast<double>(numberOfVoxels);
+
+    const int nx = dims[0];
+    const int ny = dims[1];
+    const int nz = dims[2];
+    const double cx = 0.5 * static_cast<double>(nx - 1);
+    const double cy = 0.5 * static_cast<double>(ny - 1);
+    const double safeCx = std::max(cx, 1.0);
+    const double safeCy = std::max(cy, 1.0);
+    const int stepX = std::max(1, nx / 128);
+    const int stepY = std::max(1, ny / 128);
+    const int stepZ = std::max(1, nz / 40);
+    std::vector<double> peripheralSamples;
+    std::vector<double> centralSamples;
+    peripheralSamples.reserve(120000);
+    centralSamples.reserve(120000);
+    size_t peripheralSelected = 0;
+
+    for (int z = 0; z < nz; z += stepZ)
+    {
+        for (int y = 0; y < ny; y += stepY)
+        {
+            const double ry = (static_cast<double>(y) - cy) / safeCy;
+            for (int x = 0; x < nx; x += stepX)
+            {
+                const double rx = (static_cast<double>(x) - cx) / safeCx;
+                const double radiusSquared = rx * rx + ry * ry;
+                // Also sample a central ROI to ensure a proposed background
+                // limit would not erase genuine central patient signal.
+                const bool central = radiusSquared <= 0.25;
+                const bool peripheral =
+                    radiusSquared >= 0.55 && radiusSquared <= 0.90;
+                if (!central && !peripheral)
+                {
+                    continue;
+                }
+                const size_t index = static_cast<size_t>(x) +
+                    static_cast<size_t>(nx) * (
+                        static_cast<size_t>(y) +
+                        static_cast<size_t>(ny) * static_cast<size_t>(z));
+                const double value = composite[index];
+                if (!std::isfinite(value))
+                {
+                    continue;
+                }
+                if (central)
+                {
+                    centralSamples.push_back(value);
+                }
+                else
+                {
+                    peripheralSamples.push_back(value);
+                    if (value >= threshold)
+                    {
+                        ++peripheralSelected;
+                    }
+                }
+            }
+        }
+    }
+
+    const double peripheralForegroundFraction =
+        peripheralSamples.empty()
+        ? 0.0
+        : static_cast<double>(peripheralSelected) /
+          static_cast<double>(peripheralSamples.size());
+    const bool wholeFOVSuspected =
+        (initialForegroundFraction >= 0.45 &&
+         peripheralForegroundFraction >= 0.35) ||
+        initialForegroundFraction >= 0.85;
+
+    // Single-line temporary QA: distinguish a histogram failure from a
+    // later VTK morphology/connectivity failure on the actual Quadra data.
+    qInfo().noquote() << QString(
+        "[SlicerDynamicPET PET support QC] histogram threshold=%1; "
+        "candidate foreground=%2%; peripheral foreground=%3%; samples=%4")
+        .arg(histogramThreshold, 0, 'g', 7)
+        .arg(100.0 * initialForegroundFraction, 0, 'f', 1)
+        .arg(100.0 * peripheralForegroundFraction, 0, 'f', 1)
+        .arg(static_cast<qulonglong>(peripheralSamples.size()));
+
+    if (wholeFOVSuspected)
+    {
+        if (peripheralSamples.size() < 128 || centralSamples.size() < 128)
+        {
+            qWarning() << "PET support: suspicious whole-FOV threshold,"
+                       << "but insufficient spatial reference samples."
+                       << "Refusing an unreliable fitting mask.";
+            return nullptr;
+        }
+
+        // A high background percentile is a data-adaptive alternative to a
+        // hard-coded PET activity threshold. It is used ONLY when the
+        // histogram solution demonstrably labels the image periphery.
+        const size_t percentileIndex = static_cast<size_t>(
+            0.995 * static_cast<double>(peripheralSamples.size() - 1));
+        std::nth_element(
+            peripheralSamples.begin(),
+            peripheralSamples.begin() + percentileIndex,
+            peripheralSamples.end());
+        const double peripheralP995 = peripheralSamples[percentileIndex];
+        std::nth_element(
+            centralSamples.begin(),
+            centralSamples.begin() + centralSamples.size() / 2,
+            centralSamples.end());
+        const double centralMedian = centralSamples[centralSamples.size() / 2];
+        if (!(centralMedian > peripheralP995))
+        {
+            qWarning() << "PET support: peripheral noise and central PET"
+                       << "uptake cannot be reliably separated."
+                       << "Use CT support or inspect acquisition geometry.";
+            return nullptr;
+        }
+        threshold = std::max(
+            histogramThreshold,
+            std::nextafter(peripheralP995,
+                           std::numeric_limits<double>::infinity()));
+
+        const size_t refinedSelected = static_cast<size_t>(std::count_if(
+            composite.begin(), composite.end(),
+            [threshold](double value)
+            {
+                return std::isfinite(value) && value >= threshold;
+            }));
+        const double refinedFraction =
+            static_cast<double>(refinedSelected) /
+            static_cast<double>(numberOfVoxels);
+
+        qWarning().noquote() << QString(
+            "[SlicerDynamicPET PET support] Whole-FOV histogram failure "
+            "suspected: initial threshold=%1, annulus P99.5=%2, "
+            "corrected threshold=%3; initial foreground=%4%, "
+            "annulus foreground=%5%, corrected foreground=%6%")
+            .arg(histogramThreshold, 0, 'g', 7)
+            .arg(peripheralP995, 0, 'g', 7)
+            .arg(threshold, 0, 'g', 7)
+            .arg(100.0 * initialForegroundFraction, 0, 'f', 1)
+            .arg(100.0 * peripheralForegroundFraction, 0, 'f', 1)
+            .arg(100.0 * refinedFraction, 0, 'f', 1);
+
+        // The annulus may itself contain patient tissue in an unusually tight
+        // crop. Do not guess a valid body mask if no sensible separation is
+        // possible. Requiring a CT support is safer than fitting the FOV.
+        if (!(threshold > histogramThreshold) ||
+            refinedFraction < 0.005 || refinedFraction > 0.72)
+        {
+            qWarning() << "PET support: no reliable background/tissue"
+                       << "separation after peripheral-noise correction."
+                       << "Use CT support or inspect the PET composite.";
+            return nullptr;
+        }
+    }
+
     if (thresholdOut)
     {
         *thresholdOut =
@@ -6853,6 +7021,46 @@ CreatePETBodySupportMask(
 
     if (!finalImage)
     {
+        return nullptr;
+    }
+
+    // Fail closed if a morphology/connectivity stage unexpectedly expanded
+    // the corrected candidate back to an almost whole-FOV mask. Sample a
+    // bounded number of voxels so the QC cost stays small on Quadra volumes.
+    vtkDataArray* finalScalars = finalImage->GetPointData()
+        ? finalImage->GetPointData()->GetScalars()
+        : nullptr;
+    if (!finalScalars ||
+        static_cast<size_t>(finalScalars->GetNumberOfTuples()) != numberOfVoxels)
+    {
+        qWarning() << "PET support: final mask geometry or scalars mismatch.";
+        return nullptr;
+    }
+    const size_t qcStep = std::max<size_t>(1, numberOfVoxels / 200000);
+    size_t qcCount = 0;
+    size_t qcSelected = 0;
+    for (size_t i = 0; i < numberOfVoxels; i += qcStep)
+    {
+        ++qcCount;
+        if (finalScalars->GetComponent(static_cast<vtkIdType>(i), 0) != 0.0)
+        {
+            ++qcSelected;
+        }
+    }
+    const double finalForegroundFraction =
+        static_cast<double>(qcSelected) / static_cast<double>(qcCount);
+    qInfo().noquote() << QString(
+        "[SlicerDynamicPET PET support QC] final morphological foreground=%1%")
+        .arg(100.0 * finalForegroundFraction, 0, 'f', 1);
+    if ((finalForegroundFraction > 0.80 &&
+         (initialForegroundFraction > 0.60 ||
+          peripheralForegroundFraction > 0.25)) ||
+        (finalForegroundFraction > 0.65 &&
+         finalForegroundFraction > 2.0 * initialForegroundFraction))
+    {
+        qWarning() << "PET support: final morphological mask still covers"
+                   << (100.0 * finalForegroundFraction)
+                   << "% of the FOV; refusing an unreliable fitting mask.";
         return nullptr;
     }
 

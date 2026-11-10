@@ -106,6 +106,10 @@ namespace
 // Set to true locally when detailed performance/diagnostic tracing is needed.
 constexpr bool kEnableDeveloperConsoleMessages = false;
 
+// The preview is an internal SlicerDynamicPET node, not the user's segmentation.
+constexpr const char* kFittingSupportPreviewNodeName =
+    "SlicerDynamicPET - Fitting Support";
+
 struct ParametricDisplayPreset
 {
   bool valid{false};
@@ -1978,6 +1982,36 @@ previewParametricVoxelSelection()
 {
     Q_Q(qSlicerDynamicPETModuleWidget);
 
+    vtkMRMLScene* scene = q->mrmlScene();
+    if (!scene)
+    {
+        return;
+    }
+
+    // Reuse the existing preview when it is still valid. Hiding it must not
+    // recompute the potentially expensive body-support mask.
+    vtkMRMLSegmentationNode* preview = vtkMRMLSegmentationNode::SafeDownCast(
+        scene->GetFirstNodeByName(kFittingSupportPreviewNodeName));
+    if (preview)
+    {
+        const char* internal = preview->GetAttribute(
+            "SlicerDynamicPET.InternalNode");
+        if (internal && std::string(internal) == "1")
+        {
+            vtkMRMLDisplayNode* display = preview->GetDisplayNode();
+            if (display)
+            {
+                const bool show = !display->GetVisibility();
+                display->SetVisibility(show);
+                this->BodySupportPreviewButtonImg->setText(
+                    show ? QObject::tr("Hide fitting support")
+                         : QObject::tr("Preview fitting support"));
+                return;
+            }
+        }
+    }
+
+    // No valid preview exists: compute it only when the user requests it.
     if (!this->ensureParametricVoxelSelection())
     {
         QMessageBox::warning(
@@ -1985,15 +2019,6 @@ previewParametricVoxelSelection()
             QObject::tr("Patient support"),
             QObject::tr(
                 "Could not create the parametric fitting support mask."));
-
-        return;
-    }
-
-    vtkMRMLScene* scene =
-        q->mrmlScene();
-
-    if (!scene)
-    {
         return;
     }
 
@@ -2025,9 +2050,22 @@ previewParametricVoxelSelection()
         return;
     }
 
-    logic->CreateOrUpdateBodySupportPreview(
-        this->parametricFinalFitMaskImage,
-        petNode);
+    vtkMRMLSegmentationNode* created =
+        logic->CreateOrUpdateBodySupportPreview(
+            this->parametricFinalFitMaskImage,
+            petNode,
+            kFittingSupportPreviewNodeName);
+    if (!created)
+    {
+        QMessageBox::warning(
+            q,
+            QObject::tr("Patient support"),
+            QObject::tr("Could not display the fitting support preview."));
+        return;
+    }
+
+    this->BodySupportPreviewButtonImg->setText(
+        QObject::tr("Hide fitting support"));
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::
@@ -22832,6 +22870,27 @@ invalidateParametricVoxelSelection()
     this->TCMImgFitSignatures.clear();
 
     Q_Q(qSlicerDynamicPETModuleWidget);
+
+    // The existing overlay describes the previous selection/thresholds.
+    // Remove only our internal preview, never a user-created segmentation.
+    vtkMRMLScene* scene = q->mrmlScene();
+    if (scene)
+    {
+        vtkMRMLSegmentationNode* preview =
+            vtkMRMLSegmentationNode::SafeDownCast(
+                scene->GetFirstNodeByName(kFittingSupportPreviewNodeName));
+        if (preview)
+        {
+            const char* internal = preview->GetAttribute(
+                "SlicerDynamicPET.InternalNode");
+            if (internal && std::string(internal) == "1")
+            {
+                scene->RemoveNode(preview);
+            }
+        }
+    }
+    this->BodySupportPreviewButtonImg->setText(
+        QObject::tr("Preview fitting support"));
 
     q->MTGAImgOutcomes.clear();
     q->TCMImgOutcomes.clear();

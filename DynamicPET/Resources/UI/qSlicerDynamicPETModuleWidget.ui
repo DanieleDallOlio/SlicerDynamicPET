@@ -2423,7 +2423,7 @@
                         <string>Preview fitting support</string>
                       </property>
                       <property name="toolTip">
-                        <string>Show the voxels that will be included in voxelwise kinetic fitting as a segmentation overlay.</string>
+                        <string>Show or hide the segmentation overlay of voxels eligible for voxelwise fitting. Hiding only changes visibility; changing support settings invalidates the preview. Fitting results are not affected by hiding.</string>
                       </property>
                     </widget>
                   </item>

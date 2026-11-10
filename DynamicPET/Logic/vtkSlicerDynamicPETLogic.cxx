@@ -6579,7 +6579,8 @@ CreatePETBodySupportMask(
 
     // Single-line temporary QA: distinguish a histogram failure from a
     // later VTK morphology/connectivity failure on the actual Quadra data.
-    qInfo().noquote() << QString(
+    if (kEnableDeveloperConsoleMessages)
+      qInfo().noquote() << QString(
         "[SlicerDynamicPET PET support QC] histogram threshold=%1; "
         "candidate foreground=%2%; peripheral foreground=%3%; samples=%4")
         .arg(histogramThreshold, 0, 'g', 7)
@@ -7049,7 +7050,8 @@ CreatePETBodySupportMask(
     }
     const double finalForegroundFraction =
         static_cast<double>(qcSelected) / static_cast<double>(qcCount);
-    qInfo().noquote() << QString(
+    if (kEnableDeveloperConsoleMessages)
+      qInfo().noquote() << QString(
         "[SlicerDynamicPET PET support QC] final morphological foreground=%1%")
         .arg(100.0 * finalForegroundFraction, 0, 'f', 1);
     if ((finalForegroundFraction > 0.80 &&
@@ -9281,6 +9283,7 @@ void vtkSlicerDynamicPETLogic::callTCMImg(
               << " nonfinite_or_missing_AIC=" << nonfiniteAICCount.load();
     // Emit through Qt instead of stdout so Slicer can show it in the Python
     // console and Error Log (depending on the configured Python log level).
+    if (kEnableDeveloperConsoleMessages)
     qInfo().noquote() << QString::fromStdString(qcSummary.str());
 
     if (kEnableDeveloperConsoleMessages && guardHitCount.load() > 0)

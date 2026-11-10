@@ -19283,7 +19283,8 @@ createMTGAOptimizedScalarVolume(
 void qSlicerDynamicPETModuleWidgetPrivate::
 refreshMTGAOptimizedRGB()
 {
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] refresh START"
       << std::endl;
 
@@ -19315,7 +19316,8 @@ refreshMTGAOptimizedRGB()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Ki/DV nodes retrieved."
       << std::endl;
 
@@ -19337,7 +19339,8 @@ refreshMTGAOptimizedRGB()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Ki/DV display nodes retrieved."
       << std::endl;
 
@@ -19393,18 +19396,21 @@ refreshMTGAOptimizedRGB()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Ki display: "
       << kiLow << " -> " << kiHigh
       << std::endl;
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] DV display: "
       << dvLow << " -> " << dvHigh
       << std::endl;
 
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Allocating RGB vtkImageData..."
       << std::endl;
   vtkNew<vtkImageData> rgbImage;
@@ -19427,7 +19433,8 @@ refreshMTGAOptimizedRGB()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] RGB buffer allocated."
       << std::endl;
   auto normalize =
@@ -19463,7 +19470,8 @@ refreshMTGAOptimizedRGB()
       static_cast<unsigned char>(
           MTGAOptimizedClass::Reversible);
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Filling RGB buffer, voxels="
       << numberOfVoxels
       << std::endl;
@@ -19517,11 +19525,13 @@ refreshMTGAOptimizedRGB()
     rgb[3 * i + 2] = blue;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] RGB buffer filled."
       << std::endl;
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Looking for existing RGB node..."
       << std::endl;
 
@@ -19539,7 +19549,8 @@ refreshMTGAOptimizedRGB()
   if (!rgbNode)
   {
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA RGB] Creating vtkMRMLVectorVolumeNode "
            "through MRML factory..."
         << std::endl;
@@ -19565,7 +19576,8 @@ refreshMTGAOptimizedRGB()
             "vtkMRMLVectorVolumeNode",
             rgbName.toUtf8().constData());
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA RGB] AddNewNodeByClass returned: "
         << (createdNode
             ? createdNode->GetClassName()
@@ -19576,7 +19588,8 @@ refreshMTGAOptimizedRGB()
         vtkMRMLVolumeNode::SafeDownCast(
             createdNode);
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA RGB] vtkMRMLVolumeNode cast: "
         << (rgbNode ? "OK" : "FAILED")
         << std::endl;
@@ -19608,7 +19621,8 @@ refreshMTGAOptimizedRGB()
     rgbNode->SetOrigin(
         kiNode->GetOrigin());
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA RGB] Setting VoxelVectorTypeColorRGB..."
         << std::endl;
 
@@ -19616,7 +19630,8 @@ refreshMTGAOptimizedRGB()
         vtkMRMLVolumeNode::
             VoxelVectorTypeColorRGB);
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA RGB] Voxel vector type set."
         << std::endl;
 
@@ -19646,14 +19661,16 @@ refreshMTGAOptimizedRGB()
     }
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] Assigning RGB vtkImageData..."
       << std::endl;
 
   rgbNode->SetAndObserveImageData(
       rgbImage.GetPointer());
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] RGB vtkImageData assigned."
       << std::endl;
 
@@ -19706,7 +19723,8 @@ refreshMTGAOptimizedRGB()
   this->MTGAOptimizedProbeLabelImg->setText(
       "Hover over the displayed MTGA Selection RGB image to identify the model and value.");
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA RGB] refresh END"
       << std::endl;
 }
@@ -19714,7 +19732,8 @@ refreshMTGAOptimizedRGB()
 void qSlicerDynamicPETModuleWidgetPrivate::
 generateMTGAOptimizedResult()
 {
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] generateMTGAOptimizedResult START"
       << std::endl;
   Q_Q(qSlicerDynamicPETModuleWidget);
@@ -19830,7 +19849,8 @@ generateMTGAOptimizedResult()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] Cached models retrieved. "
       << primaryModel << " voxels=" << primary.size()
       << ", " << reversibleModel
@@ -19939,7 +19959,8 @@ generateMTGAOptimizedResult()
   // Optional Vuong test only decides whether that choice is accepted.
   // ------------------------------------------------------------------------
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] Starting voxelwise selection. "
       << "Criterion=" << criterion.toStdString()
       << ", reversible=" << reversibleModel
@@ -20165,7 +20186,8 @@ generateMTGAOptimizedResult()
     return;
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] Selection pass COMPLETE. "
       << primaryModel << "=" << primarySelectedCount
       << ", reversible=" << reversibleSelectedCount
@@ -20174,7 +20196,8 @@ generateMTGAOptimizedResult()
       << ", invalid=" << invalidCount
       << std::endl;
 
-  qDebug()
+  if (kEnableDeveloperConsoleMessages)
+    qDebug()
       << "MTGA optimized selection:"
       << "criterion =" << criterion
       << "| reversible ="
@@ -20194,13 +20217,15 @@ generateMTGAOptimizedResult()
   // Replace previous optimized visualization nodes.
   // ------------------------------------------------------------------------
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] Removing previous optimized scene nodes..."
       << std::endl;
 
   this->removeMTGAOptimizedSceneNodes();
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] Previous nodes removed."
       << std::endl;
 
@@ -20211,7 +20236,8 @@ generateMTGAOptimizedResult()
   if (this->MTGAShowInSlicerCheckBoxImg
           ->isChecked())
   {
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA OPT] Creating optimized Ki scalar volume..."
         << std::endl;
     vtkMRMLScalarVolumeNode* kiNode =
@@ -20222,7 +20248,8 @@ generateMTGAOptimizedResult()
             shNode,
             q->petID);
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA OPT] Ki node created: "
         << (kiNode ? kiNode->GetID() : "NULL")
         << std::endl;
@@ -20233,7 +20260,8 @@ generateMTGAOptimizedResult()
         kiField.toStdString(),
         true);
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA OPT] Creating optimized DV scalar volume..."
         << std::endl;
 
@@ -20245,7 +20273,8 @@ generateMTGAOptimizedResult()
             shNode,
             q->petID);
 
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA OPT] DV node created: "
         << (dvNode ? dvNode->GetID() : "NULL")
         << std::endl;
@@ -20326,13 +20355,15 @@ generateMTGAOptimizedResult()
 
     if (kiNode && dvNode)
     {
-      std::cout
+      if (kEnableDeveloperConsoleMessages)
+        std::cout
           << "[MTGA OPT] Calling refreshMTGAOptimizedRGB..."
           << std::endl;
 
       this->refreshMTGAOptimizedRGB();
 
-      std::cout
+      if (kEnableDeveloperConsoleMessages)
+        std::cout
           << "[MTGA OPT] refreshMTGAOptimizedRGB returned."
           << std::endl;
 
@@ -20468,7 +20499,8 @@ generateMTGAOptimizedResult()
 
   this->updateMTGAOptimizationUI();
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT] generateMTGAOptimizedResult END"
       << std::endl;
 }
@@ -20478,7 +20510,8 @@ removeMTGAOptimizedSceneNodes()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT CLEANUP] START"
       << std::endl;
 
@@ -20487,7 +20520,8 @@ removeMTGAOptimizedSceneNodes()
 
   if (!scene)
   {
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[MTGA OPT CLEANUP] No MRML scene."
         << std::endl;
 
@@ -20502,7 +20536,8 @@ removeMTGAOptimizedSceneNodes()
           return;
         }
 
-        std::cout
+        if (kEnableDeveloperConsoleMessages)
+          std::cout
             << "[MTGA OPT CLEANUP] Looking for node: "
             << nodeID
             << std::endl;
@@ -20513,7 +20548,8 @@ removeMTGAOptimizedSceneNodes()
 
         if (node)
         {
-          std::cout
+          if (kEnableDeveloperConsoleMessages)
+            std::cout
               << "[MTGA OPT CLEANUP] Removing node: "
               << node->GetName()
               << " ["
@@ -20525,7 +20561,8 @@ removeMTGAOptimizedSceneNodes()
         }
         else
         {
-          std::cout
+          if (kEnableDeveloperConsoleMessages)
+            std::cout
               << "[MTGA OPT CLEANUP] Node no longer exists."
               << std::endl;
         }
@@ -20547,7 +20584,8 @@ removeMTGAOptimizedSceneNodes()
   this->RefreshMTGARGBButtonImg
       ->setEnabled(false);
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[MTGA OPT CLEANUP] END"
       << std::endl;
 }
@@ -20797,7 +20835,8 @@ generateTCMOptimizedResult()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[TCM OPT] START"
       << std::endl;
 
@@ -21425,7 +21464,8 @@ generateTCMOptimizedResult()
     }
   }
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[TCM OPT] Selection COMPLETE"
       << " | criterion="
       << criterion.toStdString()
@@ -21446,7 +21486,8 @@ generateTCMOptimizedResult()
   for (const auto& item :
        selectedCounts)
   {
-    std::cout
+    if (kEnableDeveloperConsoleMessages)
+      std::cout
         << "[TCM OPT] "
         << item.first
         << " selected: "
@@ -21857,7 +21898,8 @@ generateTCMOptimizedResult()
   q->ProgressBar->setValue(0);
   q->ProgressBar->setFormat("%p%");
 
-  std::cout
+  if (kEnableDeveloperConsoleMessages)
+    std::cout
       << "[TCM OPT] END"
       << std::endl;
 }
@@ -22688,7 +22730,8 @@ exportParametricMapDICOM(
     return false;
   }
 
-  qDebug()
+  if (kEnableDeveloperConsoleMessages)
+    qDebug()
       << "DICOM PMAP exported:"
       << resultMap.value("path").toString();
 
@@ -23246,7 +23289,8 @@ ensureParametricVoxelSelection()
                 return false;
             }
 
-            qDebug()
+            if (kEnableDeveloperConsoleMessages)
+              qDebug()
                 << "PET patient support:"
                 << "threshold ="
                 << petThreshold
@@ -23480,7 +23524,8 @@ ensureParametricVoxelSelection()
     this->parametricVoxelSelectionCTID =
         q->ctID;
 
-    qDebug()
+    if (kEnableDeveloperConsoleMessages)
+      qDebug()
         << "Parametric fitting support:"
         << this->parametricFitVoxelIndices.size()
         << "/"
@@ -29675,7 +29720,8 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 
     if (alreadyValid)
     {
-      qDebug()
+      if (kEnableDeveloperConsoleMessages)
+        qDebug()
           << "Reusing existing TCM voxelwise fit:"
           << QString::fromStdString(modelID);
 
@@ -29714,7 +29760,8 @@ void qSlicerDynamicPETModuleWidget::onFITTCMImgbutton()
 
   if (modelsToFit.empty())
   {
-    qDebug()
+    if (kEnableDeveloperConsoleMessages)
+      qDebug()
         << "All requested TCM models already have valid fits.";
     return;
   }
@@ -30916,7 +30963,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 
     if (alreadyValid)
     {
-      qDebug()
+      if (kEnableDeveloperConsoleMessages)
+        qDebug()
           << "Reusing existing MTGA voxelwise fit:"
           << QString::fromStdString(modelID);
 
@@ -30955,7 +31003,8 @@ void qSlicerDynamicPETModuleWidget::onFITMTGAImgbutton()
 
   if (modelsToFit.empty())
   {
-    qDebug()
+    if (kEnableDeveloperConsoleMessages)
+      qDebug()
         << "All requested MTGA models "
            "already have valid fits.";
 

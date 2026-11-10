@@ -621,6 +621,7 @@
                         </item>
                         <item row="1" column="1">
                           <widget class="QDoubleSpinBox" name="IFLowessSpanSpinBox">
+                            <property name="toolTip"><string>Fraction of retained input-function samples used in each LOWESS regression. Larger spans smooth more strongly and can blunt a sharp bolus peak, changing input integrals and fitted kinetics. Wider spans can require more work per evaluation; runtime depends on sample count.</string></property>
                             <property name="decimals"><number>2</number></property>
                             <property name="minimum"><double>0.050000000000000</double></property>
                             <property name="maximum"><double>1.000000000000000</double></property>
@@ -636,6 +637,7 @@
                         </item>
                         <item row="1" column="3">
                           <widget class="QDoubleSpinBox" name="IFGaussianSigmaSpinBox">
+                            <property name="toolTip"><string>Gaussian smoothing width in seconds for input-function samples. Larger values reduce noise but can blur the bolus and alter kinetic estimates. Smoothing adds preprocessing work; cost grows with the number of samples.</string></property>
                             <property name="decimals"><number>1</number></property>
                             <property name="minimum"><double>0.100000000000000</double></property>
                             <property name="maximum"><double>600.000000000000000</double></property>
@@ -648,13 +650,14 @@
                         <!-- Input interpolation -->
                         <item row="2" column="0">
                           <widget class="QLabel" name="IFInterpolationLabel">
+                            <property name="toolTip"><string>Defines how the input function is evaluated between observations. This can change input-function integrals and kinetic parameter estimates. PCHIP may add interpolation work compared with linear or constant interpolation.</string></property>
                             <property name="text"><string>Input interpolation</string></property>
                           </widget>
                         </item>
                         <item row="2" column="1" colspan="3">
                           <widget class="QComboBox" name="IFInterpolationSelector">
                             <property name="toolTip">
-                              <string>Interpolation used to evaluate the input function between available samples. Linear is conservative. Piecewise constant holds frame/sample values between sampling locations. Shape-preserving cubic spline (PCHIP) gives a smooth curve through the retained observations while limiting overshoot; unlike LOWESS it does not denoise or attenuate the measured peak.</string>
+                              <string>Controls the input function between observed samples for kinetic fitting and integration. Linear connects samples; piecewise constant retains each value until the next sample and introduces discontinuities; shape-preserving cubic (PCHIP) provides smooth interpolation while limiting overshoot. PCHIP passes through retained samples but does not denoise them. Changing interpolation may change input integrals and estimated parameters. Cubic interpolation can require more computation than linear or constant sampling, especially with dense resampling; benchmark performance on your data.</string>
                             </property>
                             <item><property name="text"><string>Linear</string></property></item>
                             <item><property name="text"><string>Piecewise constant</string></property></item>
@@ -682,6 +685,7 @@
                         </item>
                         <item row="4" column="1">
                           <widget class="QLineEdit" name="timeStepEdit">
+                            <property name="toolTip"><string>Integration time step in seconds for input-function sampling and kinetic calculations. Smaller steps may improve temporal resolution but increase sample count, memory use and computation time. Check numerical stability before using a coarse step.</string></property>
                             <property name="text"><string>1.0</string></property>
                           </widget>
                         </item>
@@ -802,6 +806,7 @@
                         </item>
                         <item row="12" column="1" colspan="3">
                           <widget class="QComboBox" name="ParentFractionProcessingSelector">
+                            <property name="toolTip"><string>Controls how parent fraction varies between metabolite measurements. Linear follows the samples; Hill, Extended Hill and exponential fit smooth parametric curves and may extrapolate when needed. Parametric fitting adds computation and may change parent-plasma estimates.</string></property>
                             <item><property name="text"><string>Linear interpolation</string></property></item>
                             <item><property name="text"><string>Hill</string></property></item>
                             <item><property name="text"><string>Extended Hill</string></property></item>
@@ -1272,6 +1277,7 @@
                   </item>
                   <item row="4" column="1">
                     <widget class="QLineEdit" name="framingNormEdit">
+                      <property name="toolTip"><string>Frame-duration normalization used in graphical fitting. Changing this affects regression weighting/scaling and can alter fitted estimates; it is not an iteration or performance control.</string></property>
                       <property name="text">
                         <string>60.0</string>
                       </property>
@@ -1352,6 +1358,7 @@
                         </item>
                         <item row="0" column="1">
                           <widget class="QLineEdit" name="huberTuneEdit">
+                            <property name="toolTip"><string>Huber robust-fitting tuning constant. Smaller values reject large residuals more aggressively; larger values approach less-robust fitting. Can affect estimates and convergence, so compare results when changing it.</string></property>
                             <property name="text">
                               <string>1.345</string>
                             </property>
@@ -1366,6 +1373,7 @@
                         </item>
                         <item row="1" column="1">
                           <widget class="QLineEdit" name="tolEdit">
+                            <property name="toolTip"><string>Convergence tolerance for iterative graphical fitting. Tighter tolerance may require more iterations and computation; looser tolerance can stop earlier at reduced precision.</string></property>
                             <property name="text">
                               <string>1e-6</string>
                             </property>
@@ -1380,6 +1388,7 @@
                         </item>
                         <item row="2" column="1">
                           <widget class="QLineEdit" name="maxIterEdit">
+                            <property name="toolTip"><string>Maximum iterations for iterative graphical fitting. A higher limit can improve convergence for difficult TACs but may increase runtime; reaching the limit does not guarantee a valid fit.</string></property>
                             <property name="text">
                               <string>50</string>
                             </property>
@@ -2092,6 +2101,7 @@
                   </item>
                   <item row="12" column="1">
                     <widget class="QLineEdit" name="maxIterTCMEdit">
+                      <property name="toolTip"><string>Maximum optimizer iterations for ROI compartment-model fitting. Larger values may help difficult fits converge, but can increase processing time; inspect fitted parameters and diagnostics.</string></property>
                       <property name="text">
                         <string>100</string>
                       </property>
@@ -2448,6 +2458,7 @@
 
                         <item row="0" column="1">
                           <widget class="QComboBox" name="BodySupportSourceImg">
+                            <property name="toolTip"><string>Choose the PET/CT source of the voxel eligibility mask. Union includes voxels found by either mask, while intersection requires both. Broader support can increase voxelwise fitting time; overly restrictive support may exclude valid tissue.</string></property>
                             <property name="currentIndex">
                               <number>0</number>
                             </property>
@@ -2484,6 +2495,7 @@
 
                         <item row="1" column="1">
                           <widget class="QDoubleSpinBox" name="BodySupportCTThresholdImg">
+                            <property name="toolTip"><string>CT Hounsfield-unit threshold used to obtain the body-support mask. Changing it may include air/table or exclude low-density anatomy, altering which PET voxels are fitted. It does not directly change the kinetic fit formula.</string></property>
                             <property name="minimum">
                               <double>-1024.000000000000000</double>
                             </property>
@@ -2509,6 +2521,7 @@
 
                         <item row="2" column="1">
                           <widget class="QDoubleSpinBox" name="BodySupportMarginImg">
+                            <property name="toolTip"><string>Margin in millimeters applied to the CT-derived body-support region. A larger margin can keep boundary tissue but also includes more background voxels, potentially increasing voxelwise fitting time.</string></property>
                             <property name="minimum">
                               <double>0.000000000000000</double>
                             </property>
@@ -2537,6 +2550,7 @@
 
                         <item row="3" column="1">
                           <widget class="QComboBox" name="BodySupportPETCompositeImg">
+                            <property name="toolTip"><string>Choose whether PET frames contribute equally or are weighted by duration to the composite used for body-support detection. Changing this can alter mask coverage and the number of voxels fitted; it does not directly change the PET TAC values.</string></property>
                             <item>
                               <property name="text">
                                 <string>Unweighted frame sum</string>
@@ -2552,6 +2566,7 @@
 
                         <item row="4" column="0" colspan="2">
                           <widget class="QCheckBox" name="BodySupportFillHolesCheckBoxImg">
+                            <property name="toolTip"><string>Fill enclosed cavities in the detected patient-support mask. Can retain interior tissue in the fitting region but may include otherwise excluded voxels. Mask processing adds some computation and a larger mask increases fitting work.</string></property>
                             <property name="text">
                               <string>Fill enclosed internal cavities</string>
                             </property>
@@ -2759,6 +2774,7 @@
                           </item>
                           <item row="4" column="1">
                             <widget class="QLineEdit" name="framingNormEditImg">
+                              <property name="toolTip"><string>Frame-duration normalization for voxelwise graphical fitting. May alter estimated parameters. This choice is applied across many voxels, so validate it consistently with ROI fitting.</string></property>
                               <property name="text">
                                 <string>60.0</string>
                               </property>
@@ -2836,6 +2852,7 @@
                           </item>
                           <item row="8" column="1">
                             <widget class="QLineEdit" name="numThreadsMTGA">
+                              <property name="toolTip"><string>Maximum threads for voxelwise graphical fitting when parallel support is available. More threads can reduce elapsed time on multi-core systems, but can increase memory use and contention. Speedup is not necessarily linear.</string></property>
                               <property name="text">
                                 <string>1</string>
                               </property>
@@ -2856,6 +2873,7 @@
                                 </item>
                                 <item row="0" column="1">
                                   <widget class="QLineEdit" name="huberTuneEditImg">
+                                    <property name="toolTip"><string>Huber tuning constant for voxelwise robust graphical fits. Smaller values reduce the influence of outliers more strongly. Robust fitting can take additional iterations per voxel.</string></property>
                                     <property name="text">
                                       <string>1.345</string>
                                     </property>
@@ -2870,6 +2888,7 @@
                                 </item>
                                 <item row="1" column="1">
                                   <widget class="QLineEdit" name="tolEditImg">
+                                    <property name="toolTip"><string>Stopping tolerance for voxelwise iterative graphical fitting. Tight tolerances can increase iterations and total computation time across the image.</string></property>
                                     <property name="text">
                                       <string>1e-6</string>
                                     </property>
@@ -2884,6 +2903,7 @@
                                 </item>
                                 <item row="2" column="1">
                                   <widget class="QLineEdit" name="maxIterEditImg">
+                                    <property name="toolTip"><string>Maximum iterations per voxel for graphical fitting. Higher limits may help difficult fits but can substantially increase runtime over large images.</string></property>
                                     <property name="text">
                                       <string>50</string>
                                     </property>
@@ -3512,6 +3532,7 @@
                           </item>
                           <item row="12" column="1">
                             <widget class="QLineEdit" name="maxIterTCMEditImg">
+                              <property name="toolTip"><string>Maximum optimizer iterations per voxel in TCM fitting. Larger limits may increase convergence for difficult TACs but can substantially increase computation time. Inspect QC before raising it.</string></property>
                               <property name="text">
                                 <string>100</string>
                               </property>
@@ -3526,6 +3547,7 @@
                           </item>
                           <item row="13" column="1">
                             <widget class="QLineEdit" name="numThreadsTCM">
+                              <property name="toolTip"><string>Maximum threads for voxelwise compartment-model fitting when OpenMP is available. More threads can speed up fitting on multi-core CPUs but increase memory pressure and contention.</string></property>
                               <property name="text">
                                 <string>1</string>
                               </property>

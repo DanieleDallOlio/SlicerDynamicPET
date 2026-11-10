@@ -17798,6 +17798,27 @@ auto makeNumericItem = [](double value, int precision = 6) {
     return item;
 };
 
+// Keep ROI kinetic-summary semantics consistent with voxelwise TCM outputs.
+// A reversible model has equilibrium DV, whereas irreversible models have Ki.
+static bool isIrreversibleROIModel(const std::string& modelID)
+{
+  return modelID == "1TiCM" || modelID == "1TidCM" ||
+         modelID == "2TiCM" || modelID == "2TidCM";
+}
+
+static QTableWidgetItem* makeApplicableTCMItem(
+    double value, bool applicable, const QString& reason)
+{
+  if (applicable)
+  {
+    return makeNumericItem(value);
+  }
+  auto* item = new QTableWidgetItem(QObject::tr("N/A"));
+  item->setToolTip(reason);
+  item->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  return item;
+}
+
 void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string segmentID)
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
@@ -17844,6 +17865,13 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
   for (const auto& [label, params] : labelMap)
   {
     this->TCMResultsTable->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(label)));
+    const bool irreversible = isIrreversibleROIModel(label);
+    QTableWidgetItem* kiItem = makeApplicableTCMItem(
+        params.Ki, irreversible,
+        QObject::tr("Net influx Ki applies only to irreversible TCM models."));
+    QTableWidgetItem* dvItem = makeApplicableTCMItem(
+        params.DV, !irreversible,
+        QObject::tr("Equilibrium DV applies only to reversible TCM models."));
     this->TCMResultsTable->setItem(row, 1, makeNumericItem(params.K1));
     this->TCMResultsTable->setItem(row, 2, makeNumericItem(params.k2));
     this->TCMResultsTable->setItem(row, 3, makeNumericItem(params.k3));
@@ -17855,8 +17883,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
       this->TCMResultsTable->setItem(row, 6, makeNumericItem(params.fa));
       this->TCMResultsTable->setItem(row, 7, makeNumericItem(params.vb));
       this->TCMResultsTable->setItem(row, 8, makeNumericItem(params.td));
-      this->TCMResultsTable->setItem(row, 9, makeNumericItem(params.Ki));
-      this->TCMResultsTable->setItem(row, 10, makeNumericItem(params.DV));
+      this->TCMResultsTable->setItem(row, 9, kiItem);
+      this->TCMResultsTable->setItem(row, 10, dvItem);
       this->TCMResultsTable->setItem(row, 11, makeNumericItem(params.AIC));
       this->TCMResultsTable->setItem(row, 12, makeNumericItem(params.BIC));
       this->TCMResultsTable->setItem(row, 13, makeNumericItem(params.MASE));
@@ -17866,8 +17894,8 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
     {
       this->TCMResultsTable->setItem(row, 5, makeNumericItem(params.vb));
       this->TCMResultsTable->setItem(row, 6, makeNumericItem(params.td));
-      this->TCMResultsTable->setItem(row, 7, makeNumericItem(params.Ki));
-      this->TCMResultsTable->setItem(row, 8, makeNumericItem(params.DV));
+      this->TCMResultsTable->setItem(row, 7, kiItem);
+      this->TCMResultsTable->setItem(row, 8, dvItem);
       this->TCMResultsTable->setItem(row, 9, makeNumericItem(params.AIC));
       this->TCMResultsTable->setItem(row, 10, makeNumericItem(params.BIC));
       this->TCMResultsTable->setItem(row, 11, makeNumericItem(params.MASE));
@@ -28857,6 +28885,21 @@ void qSlicerDynamicPETModuleWidget::onFITbutton()
       {
         std::cerr << "Unknown model ID: " << modelID << std::endl;
         return;
+      }
+
+      // The optimizer computes generic algebraic Ki/DV expressions even when
+      // they are not meaningful for the selected kinetic model. Restrict the
+      // reported ROI parameters (including Excel exports) exactly as in
+      // parametric TCM imaging. This does not alter fitted microparameters,
+      // predictions, residuals or the model-selection statistics.
+      TCMParameters& fittedParameters = this->segmentTCM[segmentID][modelID];
+      if (isIrreversibleROIModel(modelID))
+      {
+        fittedParameters.DV = std::numeric_limits<double>::quiet_NaN();
+      }
+      else // Reversible 1/2 TCM variants and Liver DBIF.
+      {
+        fittedParameters.Ki = std::numeric_limits<double>::quiet_NaN();
       }
 
       // Diagnostic is reported on exactly the observations used by the optimizer.

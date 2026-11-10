@@ -2011,21 +2011,11 @@ previewParametricVoxelSelection()
         }
     }
 
-    // No valid preview exists: compute it only when the user requests it.
-    if (!this->ensureParametricVoxelSelection())
-    {
-        QMessageBox::warning(
-            q,
-            QObject::tr("Patient support"),
-            QObject::tr(
-                "Could not create the parametric fitting support mask."));
-        return;
-    }
-
+    // Resolve the actual selected nodes before doing potentially expensive
+    // PET flattening or CT-to-PET resampling. In particular, a CT-based
+    // support must not silently fall back to the PET mask.
     vtkMRMLSubjectHierarchyNode* shNode =
-        vtkMRMLSubjectHierarchyNode::
-            GetSubjectHierarchyNode(scene);
-
+        vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene);
     if (!shNode)
     {
         return;
@@ -2033,11 +2023,99 @@ previewParametricVoxelSelection()
 
     vtkMRMLScalarVolumeNode* petNode =
         vtkMRMLScalarVolumeNode::SafeDownCast(
-            shNode->GetItemDataNode(
-                q->petID));
-
+            shNode->GetItemDataNode(q->petID));
     if (!petNode)
     {
+        QMessageBox::warning(
+            q, QObject::tr("Patient support"),
+            QObject::tr("The selected dynamic PET volume is unavailable. "
+                        "Choose a valid PET dataset before previewing."));
+        return;
+    }
+
+    const bool supportEnabled =
+        this->BodySupportEnabledCheckBoxImg->isChecked();
+    const int sourceIndex = this->BodySupportSourceImg->currentIndex();
+    const bool needsCT = supportEnabled && sourceIndex >= 1 && sourceIndex <= 3;
+    vtkMRMLScalarVolumeNode* ctNode =
+        needsCT
+        ? vtkMRMLScalarVolumeNode::SafeDownCast(
+              shNode->GetItemDataNode(q->ctID))
+        : nullptr;
+    if (needsCT && !ctNode)
+    {
+        QMessageBox::warning(
+            q, QObject::tr("Patient support"),
+            QObject::tr("The selected support source requires a valid CT "
+                        "volume, but the CT selection is missing or unavailable."));
+        return;
+    }
+
+    const QString sourceName = supportEnabled
+        ? this->BodySupportSourceImg->currentText()
+        : QObject::tr("Unrestricted PET");
+
+    // Both CT resampling and PET support construction can take a long time
+    // for total-body images. Show a real stage label before entering these
+    // synchronous VTK operations. No progress percentage is invented.
+    auto showPreparation = [q](const QString& stage)
+    {
+        q->ProgressBar->setRange(0, 0);
+        q->ProgressBar->setFormat(stage);
+        q->ProgressBar->show();
+        q->setParametricProgressMessage(stage);
+        QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+    };
+    auto finishPreparation = [q]()
+    {
+        q->ProgressBar->hide();
+        q->ProgressBar->setRange(0, 100);
+        q->ProgressBar->setValue(0);
+        q->ProgressBar->setFormat("%p%");
+        q->setParametricProgressMessage(QString());
+    };
+
+    showPreparation(QObject::tr("Preparing PET data for support preview..."));
+    QString petError;
+    if (!this->ensureParametricPETData(&petError))
+    {
+        finishPreparation();
+        QMessageBox::warning(
+            q, QObject::tr("Patient support"),
+            petError.isEmpty()
+            ? QObject::tr("Could not prepare the selected PET data.")
+            : petError);
+        return;
+    }
+
+    // The PET flattener may have hidden its own progress bar. Restore the
+    // busy indicator before computing the selected anatomical support.
+    showPreparation(
+        QObject::tr("Computing %1 fitting support...").arg(sourceName));
+    const bool maskReady = this->ensureParametricVoxelSelection();
+    finishPreparation();
+    if (!maskReady)
+    {
+        const QString petName =
+            QString::fromUtf8(petNode->GetName() ? petNode->GetName() : "PET");
+        const QString ctName = needsCT
+            ? QString::fromUtf8(ctNode->GetName() ? ctNode->GetName() : "CT")
+            : QObject::tr("not used");
+        QMessageBox::warning(
+            q, QObject::tr("Patient support"),
+            QObject::tr("Could not compute %1 fitting support.\n"
+                        "Selected PET: %2\nSelected CT: %3\n\n"
+                        "Check source selection, PET/CT geometry, and thresholds.")
+                .arg(sourceName).arg(petName).arg(ctName));
+        return;
+    }
+    if (this->parametricFitVoxelIndices.empty())
+    {
+        QMessageBox::warning(
+            q, QObject::tr("Patient support"),
+            QObject::tr("The selected %1 support contains no eligible PET "
+                        "voxels. Check image alignment and support settings.")
+                .arg(sourceName));
         return;
     }
 
@@ -2062,6 +2140,22 @@ previewParametricVoxelSelection()
             QObject::tr("Patient support"),
             QObject::tr("Could not display the fitting support preview."));
         return;
+    }
+
+    // Record source provenance on the preview. CT masks are resampled into
+    // the PET grid, so the preview geometry alone cannot identify the source.
+    const char* sourceMode = !supportEnabled ? "Unrestricted"
+        : sourceIndex == 0 ? "PET"
+        : sourceIndex == 1 ? "CT"
+        : sourceIndex == 2 ? "Union" : "Intersection";
+    created->SetAttribute(
+        "SlicerDynamicPET.FittingSupport.Source", sourceMode);
+    created->SetAttribute(
+        "SlicerDynamicPET.FittingSupport.PETNodeID", petNode->GetID());
+    if (needsCT)
+    {
+        created->SetAttribute(
+            "SlicerDynamicPET.FittingSupport.CTNodeID", ctNode->GetID());
     }
 
     this->BodySupportPreviewButtonImg->setText(

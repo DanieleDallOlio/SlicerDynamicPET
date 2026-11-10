@@ -1057,7 +1057,7 @@
           <attribute name="title">
            <string>MTGA</string>
           </attribute>
-          <layout class="QVBoxLayout" name="verticalLayoutMTGA">
+          <layout class="QVBoxLayout" name="verticalLayoutMTGA" stretch="0,0,0,0,0,1">
             <item>
               <layout class="QFormLayout" name="formLayout_MTGA">
                   <item row="0" column="0">
@@ -1673,13 +1673,20 @@
                 </layout>
               </widget>
             </item>
+            <item>
+              <spacer name="MTGAROICompactBottomSpacer">
+                <property name="orientation"><enum>Qt::Vertical</enum></property>
+                <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
+                <property name="sizeHint" stdset="0"><size><width>0</width><height>0</height></size></property>
+              </spacer>
+            </item>
           </layout>
         </widget>
         <widget class="QWidget" name="TCMWidget">
           <attribute name="title">
            <string>TCM</string>
           </attribute>
-          <layout class="QVBoxLayout" name="verticalLayout2">
+          <layout class="QVBoxLayout" name="verticalLayout2" stretch="0,0,0,0,0,1">
             <item>
               <layout class="QFormLayout" name="formLayout_3">
                   <item row="0" column="0">
@@ -2397,6 +2404,13 @@
                 </layout>
               </widget>
             </item>
+            <item>
+              <spacer name="TCMROICompactBottomSpacer">
+                <property name="orientation"><enum>Qt::Vertical</enum></property>
+                <property name="sizeType"><enum>QSizePolicy::Expanding</enum></property>
+                <property name="sizeHint" stdset="0"><size><width>0</width><height>0</height></size></property>
+              </spacer>
+            </item>
           </layout>
         </widget>
         </widget></item></layout></widget><widget class="QWidget" name="ImagingWidget">
@@ -2411,7 +2425,7 @@
                   <string>Patient Support</string>
                 </property>
                 <property name="collapsed">
-                  <bool>false</bool>
+                  <bool>true</bool>
                 </property>
 
                 <layout class="QGridLayout" name="BodySupportLayoutImg">
@@ -3162,12 +3176,6 @@
                               <property name="minimumSize"><size><width>0</width><height>14</height></size></property>
                               <property name="styleSheet"><string notr="true">background: qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #000000,stop:1 #0000FF); border:1px solid #888888;</string></property>
                               <property name="toolTip"><string>Reversible DV blue intensity increases from left to right.</string></property>
-                            </widget>
-                          </item>
-                          <item row="10" column="0" colspan="2">
-                            <widget class="QLabel" name="MTGAOptimizedLegendTextImg">
-                              <property name="wordWrap"><bool>true</bool></property>
-                              <property name="text"><string>Generate an optimized RGB map to see the quantitative legend.</string></property>
                             </widget>
                           </item>
                           <item row="11" column="0" colspan="2">

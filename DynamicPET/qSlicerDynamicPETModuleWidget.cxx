@@ -106,6 +106,21 @@ namespace
 // Set to true locally when detailed performance/diagnostic tracing is needed.
 constexpr bool kEnableDeveloperConsoleMessages = false;
 
+// Shared ROI and voxelwise TCM names. "d" fits a blood-to-tissue time delay;
+// "i" denotes an irreversible tissue model (no backflux from its final pool).
+QString tcmModelTooltip(const QString& model)
+{
+  if (model == "1TCM")   return QObject::tr("One-tissue reversible compartment: K1 influx and k2 efflux, with blood fraction vb. Equilibrium DV is K1/k2.");
+  if (model == "1TdCM")  return QObject::tr("One-tissue reversible with an estimated input delay td; includes K1, k2, vb and td.");
+  if (model == "1TiCM")  return QObject::tr("One-tissue irreversible: influx K1 with no tissue efflux (k2 fixed to zero); reports net influx Ki.");
+  if (model == "1TidCM") return QObject::tr("One-tissue irreversible plus fitted input delay td; reports net influx Ki.");
+  if (model == "2TCM")   return QObject::tr("Two-tissue reversible: K1/k2 transport and k3/k4 exchange between tissue pools; equilibrium DV applies.");
+  if (model == "2TdCM")  return QObject::tr("Two-tissue reversible plus fitted input delay td; K1, k2, k3, k4 and vb are estimated.");
+  if (model == "2TiCM")  return QObject::tr("Two-tissue irreversible (k4 fixed to zero): K1/k2 transport and k3 trapping; net influx Ki applies.");
+  if (model == "2TidCM") return QObject::tr("Two-tissue irreversible plus fitted input delay td; reports net influx Ki.");
+  return QString();
+}
+
 // The preview is an internal SlicerDynamicPET node, not the user's segmentation.
 constexpr const char* kFittingSupportPreviewNodeName =
     "SlicerDynamicPET - Fitting Support";
@@ -1411,6 +1426,37 @@ void replaceFittedCurveForPlot(
 
 
 //-----------------------------------------------------------------------------
+
+// Show final optimized results only after all map creation/export work has
+// completed. Reuses the standard Slicer four-up slice layout and background
+// volume selection; does not modify the stored quantitative map values.
+static void showOptimizedMapInSliceViews(
+    vtkMRMLScene* scene, const std::string& volumeNodeID)
+{
+  if (!scene || volumeNodeID.empty()) return;
+  vtkMRMLVolumeNode* volume = vtkMRMLVolumeNode::SafeDownCast(
+      scene->GetNodeByID(volumeNodeID.c_str()));
+  if (!volume || !volume->GetID()) return;
+
+  vtkMRMLLayoutNode* layout = vtkMRMLLayoutNode::SafeDownCast(
+      scene->GetFirstNodeByClass("vtkMRMLLayoutNode"));
+  if (layout)
+    layout->SetViewArrangement(vtkMRMLLayoutNode::SlicerLayoutFourUpView);
+
+  auto* application = qSlicerApplication::application();
+  vtkSlicerApplicationLogic* appLogic = application
+      ? application->applicationLogic() : nullptr;
+  if (!appLogic || appLogic->GetMRMLScene() != scene) return;
+  for (int i = 0;
+       i < scene->GetNumberOfNodesByClass("vtkMRMLSliceCompositeNode"); ++i)
+  {
+    auto* composite = vtkMRMLSliceCompositeNode::SafeDownCast(
+        scene->GetNthNodeByClass(i, "vtkMRMLSliceCompositeNode"));
+    if (composite)
+      composite->SetBackgroundVolumeID(volume->GetID());
+  }
+}
+
 class qSlicerDynamicPETModuleWidgetPrivate: public Ui_qSlicerDynamicPETModuleWidget
 {
   Q_DECLARE_PUBLIC(qSlicerDynamicPETModuleWidget);
@@ -6611,12 +6657,12 @@ updateTableWeightingAvailability()
         this->weightedFitCheckBox->setEnabled(mtgaWeightedAvailable);
         this->weightFitCheckBox->setToolTip(
             tcmWeightedAvailable
-            ? QObject::tr("Weighted least squares using normalized inverse-variance proxy weights from spatial dispersion: SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.")
-            : QObject::tr("WLS is not enabled for Max because no measurement-uncertainty estimate is derived from a single maximum voxel value."));
+            ? QObject::tr("ROI TCM WLS uses normalized inverse-variance proxy weights: spatial SD for Mean, IQR/1.349 for Median, and local peak-region SD for Peak. Dispersion is not the standard error of the ROI estimator.")
+            : QObject::tr("ROI TCM WLS requires Mean, Median or Peak with an image-derived dispersion proxy. Max has no automatically estimated uncertainty, so WLS is disabled."));
         this->weightedFitCheckBox->setToolTip(
             mtgaWeightedAvailable
-            ? QObject::tr("Weighted least squares using inverse-variance proxy weights: ROI SD for Mean, IQR/1.349 for Median, and local SUVpeak-region SD for Peak.")
-            : QObject::tr("WLS is not enabled for Max because no measurement-uncertainty estimate is derived from a single maximum voxel value."));
+            ? QObject::tr("ROI MTGA WLS uses inverse-variance proxy weights: spatial SD for Mean, IQR/1.349 for Median, and local peak-region SD for Peak. Dispersion is not the standard error of the ROI estimator.")
+            : QObject::tr("ROI MTGA WLS requires Mean, Median or Peak with an image-derived dispersion proxy. Max has no automatically estimated uncertainty, so WLS is disabled."));
         return;
     }
 
@@ -6826,11 +6872,49 @@ rebuildTACStatisticUI()
             cb->setToolTip(QObject::tr(
                 "Image mode only. Plot the voxel-value histogram for one ROI at the frame/observation selected by the Distribution slider. In Multi, the selected observation is resolved through acquisition provenance and remains in its native PET geometry. Selecting Distribution unchecks all other plot metrics and keeps only one ROI."));
         }
+        // The same canonical statistic IDs are used by Single, Multi and
+        // normalized Table workbooks. Explain dispersion without treating it
+        // as the standard error of the ROI estimator.
+        if (option.id == "Mean")
+          cb->setToolTip(QObject::tr("Arithmetic average within the ROI per observation. Dispersion bars show spatial SD in image modes, or imported one-sigma uncertainty in Table mode; SD is not automatically the uncertainty of the mean."));
+        else if (option.id == "Median")
+          cb->setToolTip(QObject::tr("Median ROI value per observation. Dispersion uses spatial IQR / 1.349 as a robust sigma proxy in image modes, or the imported Table-mode uncertainty when supplied."));
+        else if (option.id == "Peak")
+          cb->setToolTip(QObject::tr("Peak activity from the local high-uptake SUVpeak region, not the single maximum voxel. Image-mode dispersion is the local SUVpeak-region SD; Table mode uses imported Peak uncertainty when available."));
+        else if (option.id == "Min")
+          cb->setToolTip(QObject::tr("Minimum ROI voxel value per observation. No automatic dispersion is derived for the minimum; it can be sensitive to noise and segmentation boundaries."));
+        else if (option.id == "Max")
+          cb->setToolTip(QObject::tr("Highest individual ROI voxel value per observation, sensitive to noise. Image-derived Max has no automatic dispersion or WLS uncertainty. Table mode can use an imported MaxSigma or explicit generic Sigma value."));
+        else if (option.id == "VolumePET")
+          cb->setToolTip(QObject::tr("Physical ROI volume (cm3) after rasterizing segmentation on the PET grid. Uses volume units, so selecting it excludes other plot statistics and disables dispersion. In Multi, this is acquisition-specific PET-grid volume; in Table mode it is an imported value."));
 
         QObject::connect(
             cb, &QCheckBox::toggled, q,
             [this, cb, option](bool checked)
             {
+                if (option.id == "VolumePET")
+                {
+                    if (checked)
+                    {
+                        // Volume has different units from activity metrics.
+                        for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+                        {
+                            auto* other = qobject_cast<QCheckBox*>(
+                                this->PlotStatsCheckLayout->itemAt(i)->widget());
+                            if (other && other != cb)
+                            {
+                                QSignalBlocker blocker(other);
+                                other->setChecked(false);
+                            }
+                        }
+                    }
+                    if (this->distributionFrameLabel)
+                      this->distributionFrameLabel->setVisible(false);
+                    if (this->distributionFrameWidget)
+                      this->distributionFrameWidget->setVisible(false);
+                    this->updatePlotDispersionAvailability();
+                    return;
+                }
                 if (option.id == "Distribution")
                 {
                     if (this->distributionFrameLabel)
@@ -6874,7 +6958,8 @@ rebuildTACStatisticUI()
                     QCheckBox* other = qobject_cast<QCheckBox*>(
                         this->PlotStatsCheckLayout->itemAt(i)->widget());
                     if (other && other != cb &&
-                        other->property("StatID").toString() == "Distribution")
+                        (other->property("StatID").toString() == "Distribution" ||
+                         other->property("StatID").toString() == "VolumePET"))
                     {
                         QSignalBlocker blocker(other);
                         other->setChecked(false);
@@ -6950,20 +7035,64 @@ void
 qSlicerDynamicPETModuleWidgetPrivate::
 updatePlotDispersionAvailability()
 {
-    const bool incompatible =
-        this->plotStatisticSelected(QStringLiteral("VolumePET")) ||
-        this->plotStatisticSelected(QStringLiteral("Distribution"));
+    const bool volume = this->plotStatisticSelected(QStringLiteral("VolumePET"));
+    const bool distribution = this->plotStatisticSelected(QStringLiteral("Distribution"));
+    bool selected = false;
+    bool dispersionAvailable = false;
 
-    if (incompatible && this->PlotErrorCheckbox->isChecked())
+    // A mixed plot (e.g. Mean + Max) may show error bars for Mean only.
+    // Image-derived Min/Max do not have a valid sigma. Table mode may
+    // explicitly provide MaxSigma; never synthesize one from SUVmax.
+    for (int i = 0; i < this->PlotStatsCheckLayout->count(); ++i)
+    {
+        const auto* cb = qobject_cast<QCheckBox*>(
+            this->PlotStatsCheckLayout->itemAt(i)->widget());
+        if (!cb || !cb->isChecked()) continue;
+        const QString stat = cb->property("StatID").toString();
+        selected = true;
+        if (this->tableBasedMode)
+        {
+            if (stat != "Mean" && stat != "Median" &&
+                stat != "Peak" && stat != "Max") continue;
+            for (const auto& roi : this->tableSigma)
+            {
+                const auto found = roi.second.find(stat.toStdString());
+                if (found != roi.second.end() &&
+                    std::any_of(found->second.begin(), found->second.end(),
+                        [](double sigma) { return std::isfinite(sigma) && sigma > 0.0; }))
+                {
+                    dispersionAvailable = true;
+                    break;
+                }
+            }
+        }
+        else if (stat == "Mean" || stat == "Median" || stat == "Peak")
+        {
+            dispersionAvailable = true;
+        }
+        if (dispersionAvailable) break;
+    }
+    const bool available = !volume && !distribution && dispersionAvailable;
+    if (!available && this->PlotErrorCheckbox->isChecked())
     {
         QSignalBlocker blocker(this->PlotErrorCheckbox);
         this->PlotErrorCheckbox->setChecked(false);
     }
-    this->PlotErrorCheckbox->setEnabled(!incompatible);
-    this->PlotErrorCheckbox->setToolTip(
-        incompatible
-            ? QObject::tr("Dispersion is not defined for PET volume or voxel-distribution plots.")
-            : QObject::tr("Show vertical ROI-dispersion bars when available."));
+    this->PlotErrorCheckbox->setEnabled(available);
+    if (volume || distribution)
+      this->PlotErrorCheckbox->setToolTip(QObject::tr(
+          "Dispersion is not defined for ROI volume or voxel-distribution plots."));
+    else if (!selected)
+      this->PlotErrorCheckbox->setToolTip(QObject::tr(
+          "Select a plotted statistic with a dispersion estimate first."));
+    else if (!available)
+      this->PlotErrorCheckbox->setToolTip(this->tableBasedMode
+          ? QObject::tr("None of the selected statistics has usable positive imported uncertainty. Max requires an imported MaxSigma or generic Sigma; Min has no supported uncertainty column.")
+          : QObject::tr("Only Mean (spatial SD), Median (IQR/1.349), and Peak (local peak-region SD) have automatic image-derived dispersion. Min and Max do not."));
+    else
+      this->PlotErrorCheckbox->setToolTip(this->tableBasedMode
+          ? QObject::tr("Show available imported one-sigma uncertainty bars only for selected metrics that provide it (including Max when an appropriate imported sigma is supplied).")
+          : QObject::tr("Show spatial ROI dispersion: SD for Mean, IQR/1.349 for Median, local peak-region SD for Peak. Min/Max have no bars. These are not automatically standard errors of the ROI statistic."));
 }
 
 //-----------------------------------------------------------------------------
@@ -8001,13 +8130,15 @@ setTableBasedMode(bool enabled)
         if (sourceModel->item(1)) sourceModel->item(1)->setEnabled(true);
     }
 
-    // Image-only controls are hidden, not merely disabled, in table mode.
+    // Image-only controls are hidden in Table and Multi modes. The Save TAC
+    // action is common to all three modes: in Table it exports the normalized
+    // (not necessarily byte-identical) workbook representation.
     this->SegmentationAdvancedCollapsibleButton->setVisible(
         !this->tableBasedMode && !this->multiTimepointMode);
-    this->Plottacsave->setVisible(!this->tableBasedMode);
-    this->direxcel->setVisible(!this->tableBasedMode);
-    this->fileexcel->setVisible(!this->tableBasedMode);
-    this->saveExcelButton->setVisible(!this->tableBasedMode);
+    this->Plottacsave->setVisible(true);
+    this->direxcel->setVisible(true);
+    this->fileexcel->setVisible(true);
+    this->saveExcelButton->setVisible(true);
 
     const int imagingIndex = this->PlotsTabWidget->indexOf(this->ImagingWidget);
     if (imagingIndex >= 0)
@@ -8215,6 +8346,135 @@ void qSlicerDynamicPETModuleWidgetPrivate::init()
       });
 
   this->PlotErrorCheckbox->setText(QObject::tr("Dispersion"));
+
+  // Shared, source-aware help for ROI, Table, Multi-timepoint and voxelwise
+  // workflows. Setting tooltips here also covers controls built by older .ui
+  // compilers without adding new Ui_* members.
+  auto help = [q](const QStringList& names, const QString& message)
+  {
+    for (const QString& name : names)
+    {
+      if (QWidget* widget = q->findChild<QWidget*>(name))
+        widget->setToolTip(message);
+    }
+  };
+  help({"timeOffsetLabel", "timeOffsetSlider",
+        "timeOffsetLabelImg", "timeOffsetSliderImg"},
+       QObject::tr("First complete PET frame included in MTGA regression. The displayed frame time is its end; graphical X/Y observations use frame midpoints. A later start removes early samples and may change Ki or DV."));
+  help({"timeEndLabel", "timeEndSlider",
+        "timeEndLabelImg", "timeEndSliderImg"},
+       QObject::tr("Last complete PET frame included in MTGA regression (inclusive). The reported frame end and the midpoint used for regression are different; shortening the range changes the data and fit."));
+  help({"framingNormLabel", "framingNormEdit",
+        "framingNormLabelImg", "framingNormEditImg"},
+       QObject::tr("Time normalization in seconds for the graphical-model slope: 60 expresses a rate per minute and 1 per second. Changing it changes reported Ki/Ki' units; it is not a smoothing or iteration setting. Use the same convention in ROI and voxelwise fitting."));
+  help({"standardizationCheckBox", "standardizationCheckBoxImg"},
+       QObject::tr("Standardize MTGA regression X and Y across the retained fit frames to improve numerical conditioning; transform fitted slope/intercept back to physical units. Residual-based criteria and exploratory model comparisons may change; refit after changing this option."));
+  help({"huberTuneEdit", "huberTuneEditImg"},
+       QObject::tr("Huber robust-regression tuning constant: lower values downweight large residuals more strongly, higher values approach ordinary least squares. May change estimates and convergence. Relevant only for robust (RLS) fitting."));
+  help({"tolEdit", "tolEditImg"},
+       QObject::tr("Stopping tolerance for iterative robust MTGA fitting. A stricter tolerance can increase iterations and CPU time; looser tolerance may stop before adequate convergence. Relevant to RLS rather than ordinary OLS."));
+  help({"maxIterEdit", "maxIterEditImg"},
+       QObject::tr("Upper limit on robust MTGA regression iterations per fit. Higher values can help convergence but increase runtime, especially voxelwise; hitting the cap is not evidence of convergence."));
+  help({"weightedFitCheckBoxImg"},
+       QObject::tr("Experimental voxelwise MTGA WLS uses common frame weights from selected segment-derived IDIF dispersion, not per-voxel PET noise estimates. Unavailable for CSV, PBIF or parent-fraction-corrected input, and when the IDIF has no usable dispersion."));
+  help({"weightFitCheckBoxImg"},
+       QObject::tr("Experimental voxelwise TCM WLS uses common frame weights from selected segment-derived IDIF dispersion, not per-voxel PET noise estimates. Unavailable for CSV, PBIF or parent-fraction-corrected input, and when the IDIF has no usable dispersion."));
+  help({"decayConstLabel", "decayConstEdit",
+        "decayConstLabelImg", "decayConstEditImg"},
+       QObject::tr("Radioactive decay constant dk (min^-1), forwarded to the KMAP-CPP/ShareKMAP kinetic forward-model solver for frame-integrated tissue predictions. Zero requests no explicit decay term. Match the isotope and whether input/tissue data have already been decay-corrected; avoid applying decay twice. This is not a fitted kinetic rate."));
+  help({"maxIterTCMLabel", "maxIterTCMEdit",
+        "maxIterTCMLabelImg", "maxIterTCMEditImg"},
+       QObject::tr("Maximum nonlinear optimizer iterations for each compartment-model fit. Raising the cap may help hard fits but costs CPU time (especially in voxelwise imaging); inspect boundary hits and fit QC rather than assuming convergence."));
+  help({"TCMEndLabel", "TCMEndSlider", "TCMEndInfoEdit",
+        "TCMEndLabelImg", "TCMEndSliderImg", "TCMEndInfoEditImg"},
+       QObject::tr("Last complete PET frame included in TCM fitting, inclusive. Later observations are omitted from the objective and fitted diagnostics. For Table and Multi-timepoint, actual observation start/end times and acquisition gaps are respected."));
+  help({"initLabel", "initLabelImg"},
+       QObject::tr("Initial: starting guess for nonlinear TCM optimization. A poor guess may slow convergence or lead to a different local solution."));
+  help({"lowerLabel", "lowerLabelImg"},
+       QObject::tr("Lower Bound: smallest permitted fitted value. A solution at this boundary can signal an overly restrictive constraint or non-identifiability."));
+  help({"upperLabel", "upperLabelImg"},
+       QObject::tr("Upper Bound: largest permitted fitted value. Check bounds flags when an estimate reaches this constraint."));
+
+  struct KineticHelp { const char* name; const char* text; };
+  const KineticHelp kineticHelp[] = {
+    {"k1", "K1: delivery/influx rate from parent plasma to tissue (mL/cm3/min); includes delivery and extraction effects."},
+    {"k2", "k2: efflux from the first tissue compartment to plasma (min^-1); absent/fixed in one-tissue irreversible models."},
+    {"k3", "k3: transition from the first to the second tissue compartment (min^-1), often interpreted as trapping or binding depending on tracer."},
+    {"k4", "k4: return from the second to the first tissue compartment (min^-1); zero in irreversible two-tissue models."},
+    {"vb", "vb: vascular whole-blood fraction contributing directly to the measured PET tissue signal (unitless, typically between 0 and 1)."},
+    {"td", "td: time shift of the input relative to tissue in seconds, fitted only by delayed TCM variants (names containing d)."},
+    {"liverKa", "ka: portal-vein dispersion rate for the ROI-only dual-blood-input liver model (min^-1)."},
+    {"liverFa", "fA: hepatic arterial fraction in the ROI-only liver dual-blood-input model (0 to 1)."}
+  };
+  for (const KineticHelp& item : kineticHelp)
+  {
+    const QString stem = QString::fromLatin1(item.name);
+    const QString description = QObject::tr(item.text);
+    for (const QString& suffix : {QString(), QStringLiteral("Img")})
+    {
+      help({stem + "Label" + suffix}, description);
+      help({stem + "Initial" + suffix},
+           QObject::tr("Initial guess for %1. %2").arg(stem, description));
+      help({stem + "Lower" + suffix},
+           QObject::tr("Lower permitted value for %1. %2").arg(stem, description));
+      help({stem + "Upper" + suffix},
+           QObject::tr("Upper permitted value for %1. %2").arg(stem, description));
+    }
+  }
+
+  help({"BodySupportCollapsibleButtonImg"},
+       QObject::tr("Optional patient-body eligibility mask for voxelwise PET fitting. Excluding clear background can save considerable fitting time; inspect the support preview for accidentally omitted anatomy."));
+  help({"BodySupportEnabledCheckBoxImg"},
+       QObject::tr("Limit voxelwise fitting to the detected patient-body region. When disabled, more background voxels can be fitted, increasing compute time and noisy results. Applies to parametric imaging, not ROI fitting."));
+  help({"BodySupportSourceImg", "BodySupportSourceLabelImg"},
+       QObject::tr("Choose PET mask, CT mask, union (either mask) or intersection (both masks). Union is inclusive and can increase fitting cost; intersection is restrictive and may omit anatomy when PET/CT supports differ."));
+  help({"BodySupportCTThresholdImg", "BodySupportCTThresholdLabelImg"},
+       QObject::tr("CT intensity threshold in HU for body-support detection. Lower thresholds generally include more low-density tissue and background; higher thresholds may exclude anatomy. Check the overlay preview."));
+  help({"BodySupportMarginImg", "BodySupportMarginLabelImg"},
+       QObject::tr("Additional CT-mask margin in millimetres. Larger margins protect boundary voxels against misregistration but may include background and increase voxelwise fitting time."));
+  help({"BodySupportPETCompositeImg", "BodySupportPETCompositeLabelImg"},
+       QObject::tr("How dynamic PET frames are combined for the PET-based support mask. Unweighted sum treats frames equally; duration-weighted integral gives longer frames more influence. Changes voxel eligibility, not fitted TAC values."));
+  help({"BodySupportFillHolesCheckBoxImg"},
+       QObject::tr("Fill enclosed holes in the detected body-support region so interior tissue is not accidentally excluded. Can also include undesired empty cavities; inspect the mask preview. Mask preprocessing adds some cost."));
+  if (auto* source = this->BodySupportSourceImg)
+  {
+    const QStringList details = {
+      QObject::tr("PET only: use the PET activity composite to identify likely body voxels."),
+      QObject::tr("CT only: threshold CT density and apply the configured margin."),
+      QObject::tr("Union: fit voxels admitted by PET or CT; more inclusive and potentially slower."),
+      QObject::tr("Intersection: fit voxels admitted by both masks; more restrictive.")};
+    for (int i = 0; i < source->count() && i < details.size(); ++i)
+      source->setItemData(i, details[i], Qt::ToolTipRole);
+  }
+  if (auto* composite = this->BodySupportPETCompositeImg)
+  {
+    composite->setItemData(0, QObject::tr("Sum sampled frame intensities; shorter and longer frames count equally."), Qt::ToolTipRole);
+    composite->setItemData(1, QObject::tr("Sum intensity multiplied by duration; longer acquisitions contribute more to the support mask."), Qt::ToolTipRole);
+  }
+  help({"TableWorkbookPathEdit", "TableStatusLabel"},
+       QObject::tr("Table mode imports per-ROI observation times and metrics. Dispersions and WLS weights come from supplied uncertainty columns; there is no PET voxel geometry for Distribution plots."));
+  help({"MultiTimepointAnalysisCheckBox"},
+       QObject::tr("Combine temporally distinct acquisitions with their actual observation time boundaries; no synthetic PET volume is created across acquisition gaps. Statistical dispersion and ROI volume remain acquisition-specific."));
+  help({"saveExcelButton"},
+       QObject::tr("Save the currently available TAC observations to an Excel workbook. If no folder is selected, opens a Save File dialog. In Table mode this is a normalized export, not a byte-for-byte copy of the imported workbook."));
+  help({"saveTCMExcelButton"}, QObject::tr(
+       "Export ROI TCM parameter tables. Available after a TCM fit; choose a filename in a Save dialog if no output folder was selected."));
+  help({"saveMTGAExcelButton"}, QObject::tr(
+       "Export ROI MTGA parameter tables. Available after an MTGA fit; choose a filename in a Save dialog if no output folder was selected."));
+  help({"saveTCMfittedExcelButton"}, QObject::tr(
+       "Export fitted TCM time-activity curves from ROI models. A Save dialog opens when no folder is selected."));
+  help({"saveMTGAfittedExcelButton"}, QObject::tr(
+       "Export fitted MTGA regression curves from ROI models. A Save dialog opens when no folder is selected."));
+  help({"direxcel", "direxceltcm", "direxcelmtga",
+        "direxceltcmfitted", "direxcelmtgafitted"}, QObject::tr(
+       "Optional Excel output folder, shared with other DynamicPET save controls. Leave empty to choose a destination and filename from a Save File dialog when exporting."));
+  help({"fileexcel", "fileexceltcm", "fileexcelmtga",
+        "fileexceltcmfitted", "fileexcelmtgafitted"}, QObject::tr(
+       "Proposed Excel workbook filename. When a folder is selected, Save uses this name there; otherwise a Save File dialog lets you choose the path and name. The .xlsx extension is added if needed."));
+  help({"StatSelector"}, QObject::tr(
+       "Tissue statistic for ROI TCM fitting. Image-based Mean, Median and Peak have spatial-dispersion proxies for WLS; image-derived Max has no automatic uncertainty so WLS is disabled. Table mode can use an imported MaxSigma or generic Sigma."));
+  help({"StatSelectorMTGA"}, QObject::tr(
+       "Tissue statistic for ROI MTGA fitting. WLS needs a usable uncertainty: image-derived Mean, Median or Peak; or an explicitly imported Table-mode sigma (including MaxSigma or generic Sigma). Image-derived Max disables WLS."));
 
   // Keep the segmentation tools adjacent to the image/TAC visualization they
   // operate on. Move Advanced [Segmentation] directly below Plot without
@@ -11113,10 +11373,12 @@ def DPE_open_segment_editor(segmentation_node_id, source_volume_node_id=''):
   for (const QString& name : q->ModelsNamesTCM)
   {
     QCheckBox* cb = new QCheckBox(name, this->ModelsCheckContents);
+    cb->setToolTip(tcmModelTooltip(name));
     this->ModelsCheckLayout->addWidget(cb);
     QObject::connect(cb, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsChanged()));
     QCheckBox* cb2 = new QCheckBox(name, this->ModelsCheckContents);
+    cb2->setToolTip(tcmModelTooltip(name));
     this->ModelsCheckLayoutTCMImg->addWidget(cb2);
     QObject::connect(cb2, SIGNAL(stateChanged(int)),
                 q, SLOT(onModelsTCMImgChanged()));
@@ -12095,10 +12357,12 @@ void qSlicerDynamicPETModuleWidgetPrivate::populatePlotSegmentCheckboxes()
 
   if (q->segmentTACsnames.empty() || q->segmentTACs.empty()) {
     this->TACCollapsibleButton->setEnabled(false);
+    this->saveExcelButton->setEnabled(false);
     this->SegmentCheckContents->blockSignals(false);
     return;
   }
   this->TACCollapsibleButton->setEnabled(true);
+  this->saveExcelButton->setEnabled(true);
 
   for (const std::string& segmentID : this->segmentDisplayOrder)
   {
@@ -13045,11 +13309,29 @@ updateInputFunctionUI()
         }
     }
 
-    // External CSV and processed IF stages do not yet carry
-    // propagated uncertainty for voxelwise WLS.
-    if (csvSource ||
-        pbifEnabled ||
-        parentCorrectionEnabled)
+    // Voxelwise WLS needs an actual IDIF spatial-dispersion estimate. An
+    // external CSV or processed PBIF/parent-fraction curve has no propagated
+    // uncertainty. No positive retained IDIF sigma also means no WLS.
+    bool usableIdifSigma = false;
+    if (!csvSource && !pbifEnabled && !parentCorrectionEnabled &&
+        !q->IFID.empty())
+    {
+        const auto it = q->segmentTACs.find(q->IFID);
+        if (it != q->segmentTACs.end())
+        {
+            const std::string stat = this->selectedIFStatistic();
+            for (const VoxelStatistics& observation : it->second)
+            {
+                const double sigma = statisticDispersionSigma(observation, stat);
+                if (observation.keep && std::isfinite(sigma) && sigma > 1e-12)
+                {
+                    usableIdifSigma = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (!usableIdifSigma)
     {
         if (this->weightedFitCheckBoxImg->isChecked())
         {
@@ -17582,6 +17864,24 @@ buildCurrentInputFunctionWeights(
             sigmas.push_back(statisticDispersionSigma(vs, statistic));
         }
         fallbackSigma = medianValidSigma(sigmas);
+        bool hasRetainedDispersion = false;
+        for (size_t i = 0; i < sigmas.size(); ++i)
+        {
+            if (it->second[i].keep && std::isfinite(sigmas[i]) &&
+                sigmas[i] > 1e-12)
+            {
+                hasRetainedDispersion = true;
+                break;
+            }
+        }
+        if (!hasRetainedDispersion)
+        {
+            if (errorMessage)
+              *errorMessage = QObject::tr(
+                  "Voxelwise WLS requires at least one positive, retained "
+                  "dispersion estimate from the selected segment-derived IDIF.");
+            return false;
+        }
     }
 
     for (size_t i = 0; i < it->second.size(); ++i)
@@ -17777,6 +18077,11 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOI()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
 
+  // ROI exports become available with results, not with a chosen directory.
+  this->saveTCMExcelButton->setEnabled(!q->segmentTCM.empty());
+  this->saveTCMfittedExcelButton->setEnabled(
+      !q->segmentTCM.empty() && !q->segmentTCMfits.empty());
+
   std :: string currentSelectedID = "";
   int currentIndex = this->VOISelector->currentIndex();
   if (currentIndex >= 0)
@@ -17831,6 +18136,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOI()
 void qSlicerDynamicPETModuleWidgetPrivate::populateResultsVOIMTGA()
 {
   Q_Q(qSlicerDynamicPETModuleWidget);
+
+  this->saveMTGAExcelButton->setEnabled(!q->segmentMTGA.empty());
+  this->saveMTGAfittedExcelButton->setEnabled(!q->segmentMTGA.empty());
 
   std :: string currentSelectedID = "";
   int currentIndex = this->VOISelectorMTGA->currentIndex();
@@ -17951,6 +18259,31 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsTable(std :: string se
 
   this->TCMResultsTable->setColumnCount(headers.size());
   this->TCMResultsTable->setHorizontalHeaderLabels(headers);
+
+  // Interpretability help also applies to Table and Multi-timepoint ROI fits.
+  for (int column = 0; column < headers.size(); ++column)
+  {
+    const QString& key = headers[column];
+    QString tip;
+    if (key == "K1") tip = QObject::tr("Plasma-to-tissue transport rate, mL/cm3/min.");
+    else if (key == "k2") tip = QObject::tr("Tissue-to-plasma efflux rate, min^-1; not active in all TCM models.");
+    else if (key == "k3") tip = QObject::tr("Forward second-compartment exchange/trapping rate, min^-1.");
+    else if (key == "k4") tip = QObject::tr("Second-compartment return rate, min^-1; zero in irreversible two-tissue models.");
+    else if (key == "ka") tip = QObject::tr("Portal-vein dispersion rate for Liver DBIF, min^-1.");
+    else if (key == "fA") tip = QObject::tr("Hepatic arterial fraction for Liver DBIF (unitless).");
+    else if (key == "vb") tip = QObject::tr("Vascular whole-blood fraction contributing to measured tissue PET activity.");
+    else if (key == "td") tip = QObject::tr("Estimated input arrival time shift, seconds, for delayed models.");
+    else if (key == "Ki") tip = QObject::tr("Net influx constant; applicable only to irreversible TCM models. N/A is not zero.");
+    else if (key == "DV") tip = QObject::tr("Equilibrium distribution volume; applicable only to reversible TCM models. N/A is not zero.");
+    else if (key == "AIC") tip = QObject::tr("Akaike information criterion: lower is preferred among models fitted to the same observations, with a complexity penalty.");
+    else if (key == "BIC") tip = QObject::tr("Bayesian information criterion: lower is preferred; stronger complexity penalty than AIC for typical sample sizes.");
+    else if (key == "MASE") tip = QObject::tr("Mean absolute scaled error: lower means smaller normalized residual error. Exploratory fit metric, not a p-value.");
+    else if (key == "chi^2_nu") tip = QObject::tr("Weighted squared residual error divided by residual degrees of freedom. Not a calibrated chi-square test without valid noise weights.");
+    else if (key == "Bounds") tip = QObject::tr("Flags fitted parameters at or near user-defined optimizer bounds; review constraints and identifiability.");
+    else tip = QObject::tr("Fitted kinetic model identifier.");
+    if (QTableWidgetItem* item = this->TCMResultsTable->horizontalHeaderItem(column))
+      item->setToolTip(tip);
+  }
   int row = 0;
   this->TCMResultsTable->setRowCount(labelMap.size());
 
@@ -18071,6 +18404,18 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateResultsMTGATable(std :: strin
   this->MTGAResultsTable->setColumnCount(headers.size());
   this->MTGAResultsTable->setHorizontalHeaderLabels(headers);
 
+  const QStringList metricTips = {
+    QObject::tr("Graphical model identifier."),
+    QObject::tr("Patlak slope: Ki for full-input acquisitions or relative Ki' when an integral restarts at late t*. Units follow Framing Norm; not all models provide this quantity."),
+    QObject::tr("Logan/RE graphical distribution volume: DV for full-input analysis or relative DV' for late-start analysis. Not necessarily comparable between transformed models."),
+    QObject::tr("Fitted graphical regression intercept, model-dependent; use together with slope and diagnostics."),
+    QObject::tr("Coefficient of determination on each model's transformed regression response. Larger is usually better, but R2 values on different transformed response scales are not directly comparable."),
+    QObject::tr("Akaike information criterion; lower within a comparable response/likelihood. Across different graphical transformations this comparison is exploratory."),
+    QObject::tr("Mean absolute scaled error; lower within a comparable transformed response. Comparing different transforms is exploratory.")};
+  for (int i = 0; i < metricTips.size(); ++i)
+    if (QTableWidgetItem* item = this->MTGAResultsTable->horizontalHeaderItem(i))
+      item->setToolTip(metricTips[i]);
+
   // Get the parameter map for the selected segment
   const auto& labelMap = q->segmentMTGA[segmentID];
   int row = 0;
@@ -18163,6 +18508,9 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateModelsTCM(std :: string segme
   const auto& labelMap = q->segmentTCM[segmentID];
   for (const auto& [label, params] : labelMap) {
     QCheckBox* cb = new QCheckBox(QString::fromStdString(label));
+    cb->setToolTip(label == "Liver DBIF"
+        ? QObject::tr("ROI-only dual-blood-input liver model; fitted arterial fraction and portal-vein dispersion.")
+        : tcmModelTooltip(QString::fromStdString(label)));
     bool wasSelected = previouslySelectedIDs.contains(QString::fromStdString(label));
     cb->setChecked(wasSelected);
     this->ModelsTCMCheckLayout->addWidget(cb);
@@ -20497,6 +20845,8 @@ generateMTGAOptimizedResult()
   }
 
 
+  // RGB is a display result, not a quantitative DICOM PM export.
+  showOptimizedMapInSliceViews(scene, this->MTGAOptimizedRGBNodeID);
   this->updateMTGAOptimizationUI();
 
   if (kEnableDeveloperConsoleMessages)
@@ -20647,6 +20997,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateTCMOptimizationModels()
         new QCheckBox(
             modelName,
             this->TCMOptimizationModelsCheckContentsImg);
+    cb->setToolTip(tcmModelTooltip(modelName));
 
     // Previously existing model -> restore state.
     // Newly fitted model -> selected by default.
@@ -21896,6 +22247,8 @@ generateTCMOptimizedResult()
   q->ProgressBar->setMinimum(0);
   q->ProgressBar->setMaximum(100);
   q->ProgressBar->setValue(0);
+  // Display the discrete categorical selection map after all TCM outputs.
+  showOptimizedMapInSliceViews(scene, this->TCMOptimizedModelSelectionNodeID);
   q->ProgressBar->setFormat("%p%");
 
   if (kEnableDeveloperConsoleMessages)
@@ -26161,32 +26514,40 @@ void qSlicerDynamicPETModuleWidget::onSelectAllbutton()
 
 void qSlicerDynamicPETModuleWidget::onExcelPathChanged(const QString& path)
 {
+  Q_UNUSED(path);
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->saveExcelButton->setEnabled(!path.trimmed().isEmpty());
+  // A directory is optional: Save TAC opens a file picker when absent.
+  d->saveExcelButton->setEnabled(
+      !this->segmentTACs.empty() && !this->segmentTACsnames.empty());
 }
 
 void qSlicerDynamicPETModuleWidget::onExcelTCMPathChanged(const QString& path)
 {
+  Q_UNUSED(path);
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->saveTCMExcelButton->setEnabled(!path.trimmed().isEmpty());
+  d->saveTCMExcelButton->setEnabled(!this->segmentTCM.empty());
 }
 
 void qSlicerDynamicPETModuleWidget::onExcelMTGAPathChanged(const QString& path)
 {
+  Q_UNUSED(path);
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->saveMTGAExcelButton->setEnabled(!path.trimmed().isEmpty());
+  d->saveMTGAExcelButton->setEnabled(!this->segmentMTGA.empty());
 }
 
 void qSlicerDynamicPETModuleWidget::onExcelTCMfittedPathChanged(const QString& path)
 {
+  Q_UNUSED(path);
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->saveTCMfittedExcelButton->setEnabled(!path.trimmed().isEmpty());
+  d->saveTCMfittedExcelButton->setEnabled(
+      !this->segmentTCM.empty() && !this->segmentTCMfits.empty());
 }
 
 void qSlicerDynamicPETModuleWidget::onExcelMTGAfittedPathChanged(const QString& path)
 {
+  Q_UNUSED(path);
   Q_D(qSlicerDynamicPETModuleWidget);
-  d->saveMTGAfittedExcelButton->setEnabled(!path.trimmed().isEmpty());
+  d->saveMTGAfittedExcelButton->setEnabled(!this->segmentMTGA.empty());
 }
 
 QVariantMap qSlicerDynamicPETModuleWidget::TACtoPythonDict()
@@ -26451,9 +26812,41 @@ QVariantMap qSlicerDynamicPETModuleWidget::fittedMTGAtoPythonDict()
 void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  QString path = d->direxcel->currentPath();
-  QString filename = d->fileexcel->text();
-  QString fullPath = QDir(path).filePath(filename);
+  if (this->segmentTACs.empty() || this->segmentTACsnames.empty())
+  {
+    QMessageBox::information(this, tr("Save TAC"),
+        tr("No TAC observations are available to export."));
+    return;
+  }
+
+  QString path = d->direxcel->currentPath().trimmed();
+  QString filename = d->fileexcel->text().trimmed();
+  if (filename.isEmpty()) filename = QStringLiteral("TAC.xlsx");
+  if (!filename.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive))
+    filename += QStringLiteral(".xlsx");
+
+  if (path.isEmpty())
+  {
+    // Never silently save into the current working directory.
+    const QString selected = QFileDialog::getSaveFileName(
+        this, tr("Save TAC workbook"),
+        QDir::home().filePath(filename), tr("Excel workbook (*.xlsx)"));
+    if (selected.isEmpty()) return;
+    QFileInfo selectedFile(selected);
+    path = selectedFile.absolutePath();
+    filename = selectedFile.fileName();
+    if (!filename.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive))
+      filename += QStringLiteral(".xlsx");
+    d->direxcel->setCurrentPath(path);
+    d->fileexcel->setText(filename);
+  }
+  if (!QDir(path).exists())
+  {
+    QMessageBox::warning(this, tr("Save TAC"),
+        tr("The selected output directory does not exist:\n%1").arg(path));
+    return;
+  }
+  const QString fullPath = QDir(path).filePath(filename);
 
   QVariantMap segmentDict = this->TACtoPythonDict();
 
@@ -26564,12 +26957,52 @@ void qSlicerDynamicPETModuleWidget::onSaveExcelbutton()
   }
 }
 
+// Resolve an ROI Excel export without silently writing into Slicer's working
+// directory. Used by ROI parameter and fitted-curve exports alike.
+static QString resolveROIExcelFile(
+    QWidget* parent, ctkPathLineEdit* directoryField, QLineEdit* nameField,
+    const QString& title, const QString& defaultName)
+{
+  QString name = nameField->text().trimmed();
+  if (name.isEmpty()) name = defaultName;
+  if (!name.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive))
+    name += QStringLiteral(".xlsx");
+  const QString directory = directoryField->currentPath().trimmed();
+  QString fullPath;
+  if (directory.isEmpty())
+  {
+    fullPath = QFileDialog::getSaveFileName(
+        parent, title, QDir::home().filePath(name),
+        QObject::tr("Excel workbook (*.xlsx)"));
+    if (fullPath.isEmpty()) return QString();  // User cancelled.
+    if (!fullPath.endsWith(QStringLiteral(".xlsx"), Qt::CaseInsensitive))
+      fullPath += QStringLiteral(".xlsx");
+  }
+  else
+  {
+    if (!QDir(directory).exists())
+    {
+      QMessageBox::warning(parent, title,
+          QObject::tr("The selected output folder does not exist:\n%1")
+              .arg(directory));
+      return QString();
+    }
+    fullPath = QDir(directory).filePath(name);
+  }
+  const QFileInfo info(fullPath);
+  directoryField->setCurrentPath(info.absolutePath());
+  nameField->setText(info.fileName());
+  return fullPath;
+}
+
 void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  QString path = d->direxceltcm->currentPath();
-  QString filename = d->fileexceltcm->text();
-  QString fullPath = QDir(path).filePath(filename);
+  if (this->segmentTCM.empty()) return;
+  const QString fullPath = resolveROIExcelFile(
+      this, d->direxceltcm, d->fileexceltcm,
+      tr("Save ROI TCM parameters"), QStringLiteral("TCM.xlsx"));
+  if (fullPath.isEmpty()) return;
 
   QVariantMap segmentDict = this->TCMParamsToPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
@@ -26589,9 +27022,11 @@ void qSlicerDynamicPETModuleWidget::onSaveTCMExcelbutton()
 void qSlicerDynamicPETModuleWidget::onSaveMTGAExcelbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  QString path = d->direxcelmtga->currentPath();
-  QString filename = d->fileexcelmtga->text();
-  QString fullPath = QDir(path).filePath(filename);
+  if (this->segmentMTGA.empty()) return;
+  const QString fullPath = resolveROIExcelFile(
+      this, d->direxcelmtga, d->fileexcelmtga,
+      tr("Save ROI MTGA parameters"), QStringLiteral("MTGA.xlsx"));
+  if (fullPath.isEmpty()) return;
 
   QVariantMap segmentDict = this->MTGAParamsToPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
@@ -26611,9 +27046,11 @@ void qSlicerDynamicPETModuleWidget::onSaveMTGAExcelbutton()
 void qSlicerDynamicPETModuleWidget::onSaveTCMfittedExcelbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  QString path = d->direxceltcmfitted->currentPath();
-  QString filename = d->fileexceltcmfitted->text();
-  QString fullPath = QDir(path).filePath(filename);
+  if (this->segmentTCM.empty() || this->segmentTCMfits.empty()) return;
+  const QString fullPath = resolveROIExcelFile(
+      this, d->direxceltcmfitted, d->fileexceltcmfitted,
+      tr("Save ROI TCM fitted curves"), QStringLiteral("TCM_fitted.xlsx"));
+  if (fullPath.isEmpty()) return;
 
   QVariantMap segmentDict = this->fittedTCMtoPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();
@@ -26633,9 +27070,11 @@ void qSlicerDynamicPETModuleWidget::onSaveTCMfittedExcelbutton()
 void qSlicerDynamicPETModuleWidget::onSaveMTGAfittedExcelbutton()
 {
   Q_D(qSlicerDynamicPETModuleWidget);
-  QString path = d->direxcelmtgafitted->currentPath();
-  QString filename = d->fileexcelmtgafitted->text();
-  QString fullPath = QDir(path).filePath(filename);
+  if (this->segmentMTGA.empty()) return;
+  const QString fullPath = resolveROIExcelFile(
+      this, d->direxcelmtgafitted, d->fileexcelmtgafitted,
+      tr("Save ROI MTGA fitted curves"), QStringLiteral("MTGA_fitted.xlsx"));
+  if (fullPath.isEmpty()) return;
 
   QVariantMap segmentDict = this->fittedMTGAtoPythonDict();
   PythonQtObjectPtr mainContext = PythonQt::self()->getMainModule();

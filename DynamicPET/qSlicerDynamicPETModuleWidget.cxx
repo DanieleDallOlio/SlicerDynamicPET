@@ -32307,15 +32307,21 @@ void qSlicerDynamicPETModuleWidget::onPlotMTGAbutton() {
   }
 
   chartNode->SetTitle((modelName + " - " + this->segmentTACsnames[selectedVOI]).c_str());
-  if (modelName == "Patlak" || modelName == "Relative Patlak") {
-    chartNode->SetXAxisTitle("intCp/Cp");
-    chartNode->SetYAxisTitle("Ct/Cp");
+  if (modelName == "Patlak") {
+    chartNode->SetXAxisTitle("Int[0,t] Cp(tau) dtau / Cp(t)");
+    chartNode->SetYAxisTitle("Ct(t) / Cp(t)");
+  } else if (modelName == "Relative Patlak") {
+    chartNode->SetXAxisTitle("Int[t*,t] Cp(tau) dtau / Cp(t)");
+    chartNode->SetYAxisTitle("Ct(t) / Cp(t)");
   } else if (modelName == "Logan") {
-    chartNode->SetXAxisTitle("intCp/Ct");
-    chartNode->SetYAxisTitle("intCt/Ct");
-  } else if (modelName == "RE" || modelName == "Relative RE") {
-    chartNode->SetXAxisTitle("intCp/Cp");
-    chartNode->SetYAxisTitle("intCt/Cp");
+    chartNode->SetXAxisTitle("Int[0,t] Cp(tau) dtau / Ct(t)");
+    chartNode->SetYAxisTitle("Int[0,t] Ct(tau) dtau / Ct(t)");
+  } else if (modelName == "RE") {
+    chartNode->SetXAxisTitle("Int[0,t] Cp(tau) dtau / Cp(t)");
+    chartNode->SetYAxisTitle("Int[0,t] Ct(tau) dtau / Cp(t)");
+  } else if (modelName == "Relative RE") {
+    chartNode->SetXAxisTitle("Int[t*,t] Cp(tau) dtau / Cp(t)");
+    chartNode->SetYAxisTitle("Int[t*,t] Ct(tau) dtau / Cp(t)");
   } else {
     std::cerr << "Unknown model: " << modelName << std::endl;
   }

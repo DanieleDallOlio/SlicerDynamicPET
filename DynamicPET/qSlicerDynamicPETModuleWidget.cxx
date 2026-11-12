@@ -10563,22 +10563,20 @@ def DPE_export_parametric_map(
         # ------------------------------------------------------------
         # 3. Normalize persisted source provenance.
         #
-        # Two source layouts are supported without reopening DICOM files:
-        #
-        #   CLASSIC_SOP_PER_K
-        #       One SOP instance per Slicer K slice.  dPETImporter has
-        #       verified the exact spatial mapping, so per-PM-frame source
-        #       references can be retained exactly.
-        #
-        #   SINGLE_SOP_VOLUME
-        #       One multiframe/3D SOP instance owns the whole spatial volume
-        #       for each temporal frame.  The importer retains the exact SOP
-        #       identity, but not a SOP-frame-number <-> Slicer-K mapping.
-        #       This is sufficient for honest instance-level provenance; the
-        #       PM geometry itself comes from the loaded MRML volume.
+        # Supported source representations:
+        #   CLASSIC_SOP_PER_K: one verified source SOP per K slice.
+        #   SINGLE_SOP_VOLUME: one SOP per temporal volume; internal spatial
+        #       frame numbers are not known (instance-level references only).
+        #   SINGLE_SOP_ENHANCED_FRAMES: one Enhanced PET SOP for the entire
+        #       4D acquisition. dPETImporter persisted its actual 1-based
+        #       DICOM frame number for every (temporal frame, Slicer K) pair.
+        #       dPETImporter verified source geometry when creating this map.
         # ------------------------------------------------------------
         source_mode = None
         source_frames = []
+        enhanced_source_frame_numbers = []
+        enhanced_seen_frame_numbers = set()
+        enhanced_sop_identity = None
 
         for temporal_index, frame_record in enumerate(provenance_frames):
             if not isinstance(frame_record, dict):
@@ -10718,6 +10716,56 @@ def DPE_export_parametric_map(
                             "Missing SOP identity for single-SOP temporal frame "
                             f"{temporal_index + 1}."
                     }
+                normalized_instances = [instance]
+
+            elif mapping_name == "SINGLE_SOP_ENHANCED_FRAMES":
+                frame_mode = "enhanced_frames"
+                if len(instances) != 1 or not isinstance(instances[0], dict):
+                    return {
+                        "ok": False,
+                        "error": "Enhanced PET temporal frame "
+                                 f"{temporal_index + 1} must have exactly "
+                                 "one source SOP instance."
+                    }
+                instance = instances[0]
+                sop_uid = str(instance.get("sopInstanceUID") or "").strip()
+                sop_class_uid = str(instance.get("sopClassUID") or "").strip()
+                if (not sop_uid or sop_class_uid != "1.2.840.10008.5.1.4.1.1.130"):
+                    return {
+                        "ok": False,
+                        "error": "Enhanced PET temporal frame "
+                                 f"{temporal_index + 1} lacks a valid "
+                                 "Enhanced PET SOP Class/Instance UID."
+                    }
+                identity = (sop_uid, sop_class_uid)
+                if enhanced_sop_identity is None:
+                    enhanced_sop_identity = identity
+                elif identity != enhanced_sop_identity:
+                    return {
+                        "ok": False,
+                        "error": "Enhanced PET temporal frames must all "
+                                 "reference the same source SOP instance."
+                    }
+
+                # JSON integers are exact source DICOM frame numbers. Do not
+                # coerce floats, infer K+1, or confuse these with time indices.
+                frame_numbers = frame_record.get("sourceFrameNumbers")
+                if (not isinstance(frame_numbers, list)
+                    or len(frame_numbers) != number_of_slices
+                    or any(type(number) is not int or number < 1
+                           for number in frame_numbers)
+                    or len(set(frame_numbers)) != number_of_slices
+                    or any(number in enhanced_seen_frame_numbers
+                           for number in frame_numbers)):
+                    return {
+                        "ok": False,
+                        "error": "Enhanced PET temporal frame "
+                                 f"{temporal_index + 1} has an invalid, "
+                                 "duplicate, or incomplete sourceFrameNumbers "
+                                 "mapping for the current PET K dimension."
+                    }
+                enhanced_seen_frame_numbers.update(frame_numbers)
+                enhanced_source_frame_numbers.append(frame_numbers)
                 normalized_instances = [instance]
 
             else:
@@ -10988,14 +11036,12 @@ def DPE_export_parametric_map(
         # ------------------------------------------------------------
         # 7. Finalize source provenance.
         #
-        # Classic PET: preserve exact per-plane derivation references using
-        # the importer-verified SOP[k] mapping across all temporal frames.
-        #
-        # Single-SOP volume PET: exact ReferencedFrameNumber mapping was not
-        # persisted, so do not invent it.  DICOM permits the Type-2 Derivation
-        # Image Sequence to contain zero items.  Overall provenance is retained
-        # below by referencing every contributing temporal SOP instance in its
-        # entirety (without ReferencedFrameNumber).
+        # Classic PET: verified per-K source SOP references for each time.
+        # Enhanced 4D PET: verified sourceFrameNumbers[time][K] references
+        # within the one real Enhanced PET SOP. Their DICOM frame numbers are
+        # independent of temporal index and may be reordered by the importer.
+        # Single-SOP volume without a frame map: keep the empty Type-2
+        # Derivation Image Sequence, never manufacture frame numbers.
         # ------------------------------------------------------------
         per_frame_groups = list(
             getattr(pm, "PerFrameFunctionalGroupsSequence", []) or [])
@@ -11007,7 +11053,7 @@ def DPE_export_parametric_map(
                     f"K dimension: {len(per_frame_groups)} vs {number_of_slices}."
             }
 
-        if source_mode == "classic":
+        if source_mode in ("classic", "enhanced_frames"):
             matched_k_indices = set()
             for output_frame_index, functional_group in enumerate(
                     per_frame_groups):
@@ -11053,6 +11099,49 @@ def DPE_export_parametric_map(
                     }
                 matched_k_indices.add(k)
 
+                if source_mode == "enhanced_frames":
+                    # highdicom may leave DerivationImageSequence empty when
+                    # synthetic construction-only images are used. The actual
+                    # Enhanced PET frame references come from dPETImporter,
+                    # not from highdicom's automatic spatial-source matching.
+                    #
+                    # highdicom 0.27 stores each source frame number in an
+                    # SQLite INTEGER column and cannot index a DICOM MultiValue.
+                    # Encode the same exact DICOM frame references as separate
+                    # SourceImageSequence items with scalar frame numbers.
+                    # This preserves all contributing time points and allows
+                    # the PM to be read back by highdicom and dPETImporter.
+                    instance = source_frames[0][0]
+                    purpose = Dataset()
+                    purpose.CodeValue = "121322"
+                    purpose.CodingSchemeDesignator = "DCM"
+                    purpose.CodeMeaning = (
+                        "Source Image for Image Processing Operation")
+                    source_references = []
+                    for frame_numbers in enhanced_source_frame_numbers:
+                        reference = Dataset()
+                        reference.ReferencedSOPClassUID = str(
+                            instance["sopClassUID"])
+                        reference.ReferencedSOPInstanceUID = str(
+                            instance["sopInstanceUID"])
+                        reference.ReferencedFrameNumber = int(frame_numbers[k])
+                        reference.PurposeOfReferenceCodeSequence = Sequence(
+                            [copy.deepcopy(purpose)])
+                        source_references.append(reference)
+
+                    derivation_code = Dataset()
+                    derivation_code.CodeValue = "PET_KINETIC_FIT"
+                    derivation_code.CodingSchemeDesignator = "99SDPET"
+                    derivation_code.CodeMeaning = "PET kinetic model fitting"
+                    derivation = Dataset()
+                    derivation.DerivationCodeSequence = Sequence(
+                        [derivation_code])
+                    derivation.SourceImageSequence = Sequence(source_references)
+                    functional_group.DerivationImageSequence = Sequence(
+                        [derivation])
+                    continue
+
+                # Classic PET retains the highdicom-verified source geometry.
                 derivation_sequence = getattr(
                     functional_group, "DerivationImageSequence", None)
                 if (

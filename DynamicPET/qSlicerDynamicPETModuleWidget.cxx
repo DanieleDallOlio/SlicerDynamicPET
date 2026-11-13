@@ -26110,7 +26110,29 @@ void qSlicerDynamicPETModuleWidget::onSaveDynamicRTStruct()
   vtkMRMLSubjectHierarchyNode* shNode =
       scene ? vtkMRMLSubjectHierarchyNode::GetSubjectHierarchyNode(scene) : nullptr;
   vtkMRMLScalarVolumeNode* referenceVolume = nullptr;
-  if (shNode && this->ctID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
+
+  // An Enhanced PET temporal sequence has a single source SOP with a verified
+  // frame-to-PET-slice mapping. Use its PET proxy as the DICOM geometry
+  // reference even if a CT is selected: CT and PET may have different DICOM
+  // Frame of Reference UIDs. The dRTExporter still checks the chosen reference
+  // against PET and resamples any segmentation mask onto PET slice planes.
+  const char* petFrameType = this->sequencePETNode->GetAttribute("dPET.FrameType");
+  const bool enhancedSingleInstancePET = petFrameType &&
+      QString::fromUtf8(petFrameType) == QStringLiteral("Enhanced-single-instance");
+  if (enhancedSingleInstancePET)
+  {
+    referenceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
+        this->sequenceBrowserPETNode->GetProxyNode(this->sequencePETNode));
+    if (!referenceVolume)
+    {
+      QMessageBox::warning(
+          this,
+          tr("Save Dynamic RTSTRUCT"),
+          tr("Enhanced PET export requires the active PET sequence volume proxy."));
+      return;
+    }
+  }
+  if (!referenceVolume && shNode && this->ctID != vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID)
   {
     referenceVolume = vtkMRMLScalarVolumeNode::SafeDownCast(
         shNode->GetItemDataNode(this->ctID));

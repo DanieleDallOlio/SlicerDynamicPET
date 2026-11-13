@@ -4216,9 +4216,29 @@ setMultiTimepointMode(bool enabled)
     // hierarchy callbacks cannot execute the opposite mode's refresh logic on
     // half-reset state.
     this->multiTimepointModeTransitionRunning = true;
+
+    // DynamicPET UI v4: synchronous stage updates; avoid nested event loops
+    // while MRML observers may see partially reset mode state.
+    auto showModeStage = [q](int percentage, const QString& description)
+    {
+        if (!q->ProgressBar)
+        {
+            return;
+        }
+        q->ProgressBar->setRange(0, 100);
+        q->ProgressBar->setValue(percentage);
+        q->ProgressBar->setFormat(description + QStringLiteral(" (%p%)"));
+        q->ProgressBar->show();
+        q->ProgressBar->raise();
+        q->ProgressBar->repaint();
+    };
+    showModeStage(5, enabled
+        ? QObject::tr("Switching to Multi-timepoint mode")
+        : QObject::tr("Returning to Single-acquisition mode"));
     this->multiTimepointMode = enabled;
     this->multiTimepointCommonSegmentNames.clear();
     this->invalidateMultiTimepointDerivedState();
+    showModeStage(30, QObject::tr("Clearing prior acquisition results"));
 
     // The single-acquisition PET/segmentation state must never leak into a
     // multi-timepoint analysis. Keep the selected patient, but clear all
@@ -4249,6 +4269,7 @@ setMultiTimepointMode(bool enabled)
     q->dPETvalueType.clear();
     this->suvbwFactorValidated = false;
     this->resetAcquisitionTimingDisplay();
+    showModeStage(55, QObject::tr("Resetting segmentation and timing state"));
 
     // Single and Multi are distinct temporal display contexts. Do not carry
     // the Plot/Distribution or Advanced Segmentation observation selection
@@ -4335,6 +4356,7 @@ setMultiTimepointMode(bool enabled)
     }
 
     this->setImageSetupVisible(!this->tableBasedMode);
+    showModeStage(80, QObject::tr("Rebuilding mode-specific controls"));
 
     // Segmentation editing and voxelwise imaging are intentionally unavailable
     // for multi-timepoint ROI analysis.
@@ -4361,6 +4383,9 @@ setMultiTimepointMode(bool enabled)
     this->updateParametricImagingAvailability();
     q->enableTACbutton();
     this->multiTimepointModeTransitionRunning = false;
+    showModeStage(100, QObject::tr("Mode switch complete"));
+    q->ProgressBar->hide();
+    q->ProgressBar->setFormat(QStringLiteral("%p%"));
 
     if (!enabled)
     {
@@ -6847,6 +6872,38 @@ rebuildTACStatisticUI()
     rebuildCombo(this->StatSelector, fitOptions);
     rebuildCombo(this->StatSelectorMTGA, fitOptions);
 
+    // DynamicPET UI v4: table IDIF choices reflect available workbook values.
+    // A generic Value column is stored internally as Mean, but shown as Value.
+    const QString previousIFStat = this->IFStatSelector->currentData().toString();
+    {
+        QSignalBlocker blocker(this->IFStatSelector);
+        this->IFStatSelector->clear();
+        if (this->tableBasedMode)
+        {
+            for (const TACStatisticOption& option : this->tableFitStatistics)
+            {
+                // The IF builder supports Mean/Median/Peak observations.
+                if (option.id == "Mean" || option.id == "Median" ||
+                    option.id == "Peak")
+                {
+                    this->IFStatSelector->addItem(
+                        option.label, QString::fromStdString(option.id));
+                }
+            }
+        }
+        else
+        {
+            for (const QString& statistic : q->StatsNames)
+            {
+                this->IFStatSelector->addItem(statistic, statistic);
+            }
+        }
+        const int previousIndex = this->IFStatSelector->findData(previousIFStat);
+        this->IFStatSelector->setCurrentIndex(
+            previousIndex >= 0 ? previousIndex :
+            (this->IFStatSelector->count() > 0 ? 0 : -1));
+    }
+
     while (QLayoutItem* item = this->PlotStatsCheckLayout->takeAt(0))
     {
         delete item->widget();
@@ -8001,9 +8058,30 @@ setTableBasedMode(bool enabled)
         return;
     }
 
+
+    // DynamicPET UI v4: synchronous stage updates; avoid nested event loops
+    // while MRML observers may see partially reset mode state.
+    auto showModeStage = [q](int percentage, const QString& description)
+    {
+        if (!q->ProgressBar)
+        {
+            return;
+        }
+        q->ProgressBar->setRange(0, 100);
+        q->ProgressBar->setValue(percentage);
+        q->ProgressBar->setFormat(description + QStringLiteral(" (%p%)"));
+        q->ProgressBar->show();
+        q->ProgressBar->raise();
+        q->ProgressBar->repaint();
+    };
+    showModeStage(5, enabled
+        ? QObject::tr("Switching to Table mode")
+        : QObject::tr("Returning to Image mode"));
+
     q->RemoveExistingPlotChartAndTable();
     q->clearFITdata();
     q->clearFITMTGAdata();
+    showModeStage(40, QObject::tr("Clearing previous plots and fits"));
 
     if (enabled)
     {
@@ -8155,6 +8233,7 @@ setTableBasedMode(bool enabled)
     }
 
     this->externalIFPreviewSelectedIndex = -1;
+    showModeStage(80, QObject::tr("Restoring input and mode controls"));
     this->updateAcquisitionTimingContext(true);
     this->invalidateInputFunctionResults();
     this->updateTableUnitUI();
@@ -8171,6 +8250,9 @@ setTableBasedMode(bool enabled)
     // vertical space without adding another nested/scrolling UI hierarchy.
     this->verticalLayout->invalidate();
     this->TACwidget->adjustSize();
+    showModeStage(100, QObject::tr("Mode switch complete"));
+    q->ProgressBar->hide();
+    q->ProgressBar->setFormat(QStringLiteral("%p%"));
 }
 
 //-----------------------------------------------------------------------------
@@ -14249,13 +14331,49 @@ updateSegmentationAdvancedUI()
         && this->multiTimepointMode
         && this->multiTimepointPreparationValid
         && !this->preparedMultiTimepointAcquisitions.empty();
+    // DynamicPET UI v4: check defined ROIs across the time sequence. A single
+    // empty temporal frame must not conceal ROIs in later frames. This checks
+    // metadata (segment counts), not every voxel in a large PET labelmap.
+    bool singleHasDefinedROIs = false;
+    if (singleHasSegmentation && segmentationNode->GetSegmentation())
+    {
+        singleHasDefinedROIs =
+            segmentationNode->GetSegmentation()->GetNumberOfSegments() > 0;
+    }
+    if (!singleHasDefinedROIs && hasDynamicSegmentation)
+    {
+        for (int frame = 0; frame < q->segSequenceNode->GetNumberOfDataNodes(); ++frame)
+        {
+            vtkMRMLSegmentationNode* frameSegmentation =
+                vtkMRMLSegmentationNode::SafeDownCast(
+                    q->segSequenceNode->GetNthDataNode(frame));
+            if (frameSegmentation && frameSegmentation->GetSegmentation() &&
+                frameSegmentation->GetSegmentation()->GetNumberOfSegments() > 0)
+            {
+                singleHasDefinedROIs = true;
+                break;
+            }
+        }
+    }
     const bool hasRTStructExport =
-        hasDynamicSegmentation || hasPreparedMultiExport;
+        (hasDynamicSegmentation && singleHasDefinedROIs) || hasPreparedMultiExport;
+    const bool showAdvancedSegmentation =
+        imageMode && (singleHasSegmentation || multiHasPreparedSegmentation ||
+                      hasPreparedMultiExport);
+    this->SegmentationAdvancedCollapsibleButton->setVisible(
+        showAdvancedSegmentation);
+    if (!showAdvancedSegmentation)
+    {
+        this->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
+    }
 
-    this->SegmentationAdvancedCollapsibleButton->setVisible(imageMode);
+    // An empty selected segmentation must still allow opening Segment Editor
+    // to create the first ROI. Live tracking/export need existing ROI entries.
     const bool editableSegmentationAvailable =
         singleHasSegmentation || multiHasPreparedSegmentation;
-    this->PlotLiveSegEdit->setEnabled(editableSegmentationAvailable);
+    this->PlotLiveSegEdit->setEnabled(
+        (hasDynamicSegmentation && singleHasDefinedROIs) ||
+        multiHasPreparedSegmentation);
     this->OpenSegmentEditorButton->setEnabled(editableSegmentationAvailable);
     this->DynamicRTStructDirectory->setEnabled(hasRTStructExport);
     this->DynamicRTStructFilename->setEnabled(hasRTStructExport);
@@ -14275,13 +14393,17 @@ updateSegmentationAdvancedUI()
     this->SaveDynamicRTStructButton->setEnabled(
         hasRTStructExport && hasOutputPath);
 
+    // Keep frame navigation only where there is a corresponding
+    // dynamic segmentation, including temporarily empty frames.
+    const bool showSegmentationFrames =
+        imageMode && (hasDynamicSegmentation || multiHasPreparedSegmentation);
     if (this->segmentationFrameLabel)
     {
-        this->segmentationFrameLabel->setVisible(imageMode);
+        this->segmentationFrameLabel->setVisible(showSegmentationFrames);
     }
     if (this->segmentationFrameWidget)
     {
-        this->segmentationFrameWidget->setVisible(imageMode);
+        this->segmentationFrameWidget->setVisible(showSegmentationFrames);
     }
     this->updateSegmentationFrameUI(false);
 }
@@ -24928,6 +25050,8 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
       d->populateSegmentCheckboxes(this->segID);
       d->updateInputFunctionStatus();
       this->enableTACbutton();
+      // DynamicPET UI v4: update export/live controls after ROI edits.
+      d->updateSegmentationAdvancedUI();
     });
   };
   this->SegWatcher->OnSegmentTACChanged = [this, d](const std::string& segmentID)
@@ -25395,6 +25519,10 @@ void qSlicerDynamicPETModuleWidget::onPETChanged (int index) {
           }
       }
   }
+  // DynamicPET UI v4: PET + a valid IF enables voxelwise imaging.
+  // A segmentation or ROI TAC is not required for an external IF.
+  d->updateInputFunctionStatus();
+  d->updateSegmentationAdvancedUI();
 }
 
 void qSlicerDynamicPETModuleWidget::onSegChanged (int index)
@@ -26255,6 +26383,9 @@ void qSlicerDynamicPETModuleWidget::clearTACdata()
 
   d->direxcel->setCurrentPath(QString());
   d->saveExcelButton->setEnabled(false);
+  // DynamicPET UI v4: clearing tissue TACs does not invalidate
+  // an independently selected external CSV input function.
+  d->updateParametricImagingAvailability();
 }
 
 void qSlicerDynamicPETModuleWidget::enableTACbutton() {

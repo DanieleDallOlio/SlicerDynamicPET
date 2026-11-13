@@ -829,6 +829,9 @@
                 <property name="collapsed">
                   <bool>true</bool>
                 </property>
+                <property name="visible">
+                  <bool>false</bool>
+                </property>
                 <layout class="QFormLayout" name="SegmentationAdvancedLayout">
                   <item row="0" column="0" colspan="2">
                     <layout class="QHBoxLayout" name="SegmentationEditingLayout">

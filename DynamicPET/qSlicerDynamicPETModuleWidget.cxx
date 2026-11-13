@@ -4358,10 +4358,8 @@ setMultiTimepointMode(bool enabled)
     this->setImageSetupVisible(!this->tableBasedMode);
     showModeStage(80, QObject::tr("Rebuilding mode-specific controls"));
 
-    // Segmentation editing and voxelwise imaging are intentionally unavailable
-    // for multi-timepoint ROI analysis.
-    this->SegmentationAdvancedCollapsibleButton->setVisible(
-        !this->tableBasedMode && !this->multiTimepointMode);
+    // Advanced [Segmentation] visibility is managed by
+    // updateSegmentationAdvancedUI() after the mode state is rebuilt.
 
     const int imagingIndex = this->PlotsTabWidget->indexOf(this->ImagingWidget);
     if (imagingIndex >= 0)
@@ -8208,11 +8206,10 @@ setTableBasedMode(bool enabled)
         if (sourceModel->item(1)) sourceModel->item(1)->setEnabled(true);
     }
 
-    // Image-only controls are hidden in Table and Multi modes. The Save TAC
-    // action is common to all three modes: in Table it exports the normalized
-    // (not necessarily byte-identical) workbook representation.
-    this->SegmentationAdvancedCollapsibleButton->setVisible(
-        !this->tableBasedMode && !this->multiTimepointMode);
+    // Voxelwise imaging is unavailable in Table and Multi modes. Advanced
+    // [Segmentation] visibility follows the selected/prepared segmentation
+    // via updateSegmentationAdvancedUI() below. The Save TAC action is common
+    // to all modes, including Table workbook export.
     this->Plottacsave->setVisible(true);
     this->direxcel->setVisible(true);
     this->fileexcel->setVisible(true);
@@ -11916,6 +11913,7 @@ def DPE_open_segment_editor(segmentation_node_id, source_volume_node_id=''):
   this->rebuildTACStatisticUI();
 
   this->updateInputFunctionUI();
+  this->updateSegmentationAdvancedUI();
 }
 
 void qSlicerDynamicPETModuleWidgetPrivate::populatePatientComboBox() {
@@ -12163,6 +12161,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
     if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
       q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       this->populateSegmentCheckboxes(q->segID);
+      this->updateSegmentationAdvancedUI();
     } else {
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
@@ -12181,6 +12180,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
     if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
       q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       this->populateSegmentCheckboxes(q->segID);
+      this->updateSegmentationAdvancedUI();
     } else {
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
@@ -12199,6 +12199,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
     if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
       q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       this->populateSegmentCheckboxes(q->segID);
+      this->updateSegmentationAdvancedUI();
     } else {
       if (requiredModality=="CT")
         q->ctID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
@@ -12215,6 +12216,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
       comboBox->blockSignals(false);
       q->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
       this->populateSegmentCheckboxes(q->segID);
+      this->updateSegmentationAdvancedUI();
       return;
     }
   }
@@ -12361,6 +12363,7 @@ void qSlicerDynamicPETModuleWidgetPrivate::populateNodeComboBox(
   if (std::string(requiredNodeType)=="vtkMRMLSegmentationNode") {
     q->segID = passonID;
     this->populateSegmentCheckboxes(q->segID);
+    this->updateSegmentationAdvancedUI();
   } else {
     if (requiredModality=="CT")
       q->ctID = passonID;
@@ -24942,6 +24945,8 @@ void qSlicerDynamicPETModuleWidget::setMRMLScene(vtkMRMLScene* scene) {
   this->SelectedSegmentationNode = nullptr;
   this->segSequenceNode = nullptr;
   this->segID = vtkMRMLSubjectHierarchyNode::INVALID_ITEM_ID;
+  d->SegmentationAdvancedCollapsibleButton->setCollapsed(true);
+  d->SegmentationAdvancedCollapsibleButton->setVisible(false);
   this->qvtkDisconnectAll();
 
   // Crosshair cursor movement is independent of the Data Probe widget.

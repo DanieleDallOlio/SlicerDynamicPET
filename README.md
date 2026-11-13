@@ -1,359 +1,212 @@
 # SlicerDynamicPET
 
 <p align="center">
-  <img src="SlicerDynamicPET.png" alt="SlicerDynamicPET" width="240">
+  <img src="SlicerDynamicPET.png" alt="SlicerDynamicPET logo" width="240">
 </p>
 
-**SlicerDynamicPET** is an open-source 3D Slicer extension for importing,
-visualizing, and quantitatively analyzing **dynamic positron emission tomography
-(PET)** data.
+**SlicerDynamicPET** is an open-source extension for [3D Slicer](https://www.slicer.org/) dedicated to importing, visualizing, and quantitatively analyzing **dynamic positron emission tomography (PET)** data. It brings PET DICOM import, regional time-activity curves (TACs), kinetic modeling, voxel-wise parametric imaging, and temporal RT Structure Set workflows into a common Slicer environment.
 
-It combines dedicated dynamic PET DICOM import, regional and voxel-wise kinetic
-modeling, parametric imaging, and dynamic RT Structure Set support in a single
-Slicer-based workflow.
+> **Status: Beta / research software.** SlicerDynamicPET is under active development. It is **not a medical device** and must be independently validated for each scanner, tracer, acquisition protocol, reconstruction, kinetic model, and intended use. Some advanced DICOM features implement specialized conventions and may require additional interoperability testing.
 
-> **Status:** Beta / research software.  
-> SlicerDynamicPET is under active development and should be independently
-> validated for the datasets, scanners, tracers, reconstruction protocols, and
-> quantitative workflows in which it is used.
+## Components
 
----
+The extension contains a main C++ module and three separately maintained Git submodules:
 
-## Included components
+| Component | Responsibility |
+| --- | --- |
+| **DynamicPET** | Interactive setup; ROI TAC extraction; input-function handling; ROI and voxel-wise kinetic modeling; parametric images; visualization and export. |
+| [**dPETImporter**](https://github.com/DanieleDallOlio/dPETImporter) | PET DICOM import, Volume Sequences, static PET metadata, quantitative calibration, source-image provenance, and DICOM Parametric Map import. |
+| [**dRTImporter**](https://github.com/DanieleDallOlio/dRTImporter) | Import of supported temporal RTSTRUCTs as segmentation sequences; static and dynamic RTSTRUCT export helpers. |
+| [**KMAP-CPP**](https://github.com/DanieleDallOlio/KMAP-CPP) | Standalone C++ tracer kinetic-modeling backend derived from the open-source KMAP-C Toolkit. |
 
-### DynamicPET
+KMAP-CPP derives from the [Open KMAP-C Toolkit](https://github.com/ShareKM/KMAP-C) and retains its upstream attribution and licensing.
 
-**DynamicPET** is the main analysis module of SlicerDynamicPET.
+## Main capabilities
 
-It provides tools for:
+### PET import and quantitative metadata
 
-- working with dynamic PET Volume Sequences and tabulated time-activity curves;
-- extracting regional time-activity curves from segmentations;
-- graphical kinetic analysis;
-- compartment-model fitting;
-- relative and reference-region modeling where supported;
-- voxel-wise kinetic modeling;
-- generation and visualization of parametric images;
-- analysis of dynamic acquisitions combined with delayed or static PET data.
+- Import conventional dynamic PET organized as one 3D image per frame or as 2D slice stacks per frame.
+- Import supported **Enhanced PET** multiframe acquisitions, including single-SOP temporal datasets, as Volume Sequences.
+- Preserve frame/acquisition timing, image units, decay-correction information, and DICOM source-image references where available.
+- Optionally convert supported PET activity concentrations to **SUVbw** when the necessary DICOM information and decay conventions are valid.
+- Optionally load **static/whole-body PET** with kinetic metadata retained for subsequent analysis.
+- Import supported **DICOM Parametric Map (PM)** objects as Slicer volumes.
 
-DynamicPET uses
-[KMAP-CPP](https://github.com/DanieleDallOlio/KMAP-CPP)
-as its C++ kinetic-modeling backend.
+Import support is deliberately conservative: unsupported Enhanced PET organization, inconsistent timing, incomplete DICOM provenance, or unrecognized quantitative mappings can prevent particular workflows from proceeding.
 
-KMAP-CPP is derived from the open-source
-[KMAP-C Toolkit](https://github.com/ShareKM/KMAP-C).
+### Analysis modes
 
-### dPETImporter
+**Single-image mode** analyzes one dynamic PET Volume Sequence with its assigned segmentation(s), or an appropriate existing image-based dataset.
 
-**dPETImporter** provides the PET DICOM import layer.
+**Multi-timepoint mode** combines observations from two or more PET acquisitions, such as an early 4D dynamic PET scan followed by a late static acquisition. Each dynamic PET frame contributes an observation; each supported static PET acquisition contributes one. Actual acquisition intervals and gaps are retained. **No artificial PET frames or synthetic cross-acquisition volume sequence are generated.**
 
-It recognizes dynamic PET acquisitions and reconstructs them as time-resolved
-**Slicer Volume Sequences** while preserving acquisition and quantitative
-metadata required by downstream kinetic analysis.
+Multi-timepoint validation checks, among other things:
 
-Current functionality includes:
+- an earliest **dynamic** acquisition and at least two selected acquisitions;
+- PET studies associated with the selected patient and loaded through dPETImporter;
+- compatible radiotracer administration, tracer identity, acquisition timing, decay correction, and quantitative normalization;
+- an assigned segmentation for every acquisition, with at least one **exact, uniquely named common segment**;
+- compatible spatial and temporal information for extracting ROI statistics.
 
-- 3D-per-frame dynamic PET datasets;
-- 2D slice stacks grouped into temporal frames;
-- frame timing extraction and preservation;
-- optional SUVbw conversion when the required DICOM metadata are available;
-- optional metadata-preserving loading of static / whole-body PET acquisitions;
-- preservation of PET DICOM provenance used by downstream workflows;
-- import of SlicerDynamicPET DICOM Parametric Map objects;
-- integration with Slicer's DICOM and Sequences infrastructure.
+Supported quantitative inputs include Bq/mL and SUVbw when normalization is valid. Multi-timepoint mode currently accepts `START` or `ADMIN` decay correction and rejects unsupported static acquisitions with **spatially varying bed/slice timing**, rather than inventing a single time for the entire volume. Overlapping prepared observations are rejected during TAC extraction. Refer to status messages in the acquisition-selection dialog for the exact reason a dataset fails validation.
 
-dPETImporter is maintained independently at:
+**Table-based mode** imports existing ROI TAC observations from a supported workbook without requiring PET image voxels. It supports downstream analysis of the supplied observations; image-only functions such as voxel-distribution plots and parametric volume generation are not available from a table alone.
 
-[dPETImporter](https://github.com/DanieleDallOlio/dPETImporter)
+### Regional TACs, input functions, and models
 
-### dRTImporter
+- Extract ROI statistics from segmentations, with temporal frame timing preserved.
+- Inspect TACs and selected statistical or ROI-volume measures.
+- Use a segmentation-derived **image-derived input function (IDIF)**, an external input-function dataset, or a calibrated **population-based input function (PBIF)** where supported.
+- Handle parent-fraction information and plasma/whole-blood input domains when required by the model.
+- Perform graphical kinetic analysis (including supported Patlak, Logan, and reversible-equilibrium approaches), relative variants for suitable partial/delayed acquisitions, and compartment-model fitting.
+- Export available TACs, model results, and fitted curves to Excel workbooks.
 
-**dRTImporter** provides dynamic RT Structure Set support for temporal
-segmentation workflows.
+**Input-function coverage matters.** A combined TAC can extend beyond the measured input function, but fitting is limited to the time support and model assumptions actually available. Some workflows offer explicitly selected modeling/extrapolation options; these must not be confused with additional measured data. Model availability is evaluated from the chosen input and acquisition timing.
 
-It can recognize supported temporal RTSTRUCT objects and reconstruct their ROI
-states as **Slicer Segmentation Sequences**. It also provides the RTSTRUCT
-export functionality used by SlicerDynamicPET for supported static and dynamic
-PET workflows.
+### Voxel-wise modeling and parametric imaging
 
-Dynamic RTSTRUCT handling uses a temporal reference convention in which DICOM
-image references are associated with PET temporal frames. Because this is a
-specialized dynamic workflow, interoperability with external systems should be
-verified on the intended dataset and software environment.
+- Run supported graphical and compartmental models voxel by voxel.
+- Generate quantitative parameter volumes and visualize them in Slicer.
+- Use supported optimized/model-selection views, including RGB summaries when available.
+- Export supported quantitative parametric maps in **DICOM PM** format using PET-source provenance retained during import.
 
-dRTImporter relies on **SlicerRT** for Slicer RT segmentation infrastructure.
+RGB model-selection displays are for visualization; they are **not** exported as quantitative DICOM Parametric Maps. Voxel-wise analysis can be computationally expensive and memory-intensive, particularly for large total-body 4D acquisitions. No fixed memory requirement is implied for all datasets.
 
-### KMAP-CPP
+### Segmentation and RTSTRUCT workflows
 
-**KMAP-CPP** is the standalone C++ kinetic-modeling backend used by DynamicPET.
+- Use an ordinary segmentation for all frames of a dynamic PET, or use a synchronized **segmentation sequence** with frame-specific ROI geometry.
+- Import supported dynamic RTSTRUCTs through dRTImporter; ordinary static RTSTRUCT import is handled by **SlicerRT**.
+- Export a dynamic PET segmentation sequence as a **temporal RTSTRUCT** using supported DICOM temporal-reference conventions.
+- In Multi-timepoint mode, export **one RTSTRUCT per prepared acquisition**: temporal RTSTRUCTs for dynamic acquisitions and conventional RTSTRUCTs for static acquisitions.
 
-It is maintained separately from the Slicer user interface and can also be
-built independently.
+Temporal RTSTRUCT representation is **not a standardized DICOM model for time-varying contours**. Conventional temporal-reference variants and the Enhanced PET private temporal mapping supported by dRTImporter should be tested for round-trip consistency and interoperability with intended third-party software. Static RTSTRUCT export requires access to the corresponding source DICOM instances in Slicer's DICOM database; dynamic RTSTRUCT export requires suitable frame-level PET provenance.
 
-Repository:
+## Typical workflows
 
-[KMAP-CPP](https://github.com/DanieleDallOlio/KMAP-CPP)
+### Dynamic PET
 
----
+1. Import a PET study into the **DICOM** module using the appropriate dPETImporter loadable.
+2. Load the dynamic PET as a **Volume Sequence** and verify its frame count, timing, units, and decay correction.
+3. Select a segmentation, or create/import ROIs using Slicer's segmentation tools.
+4. Compute and review regional TACs.
+5. Choose the input function and the applicable graphical or compartment model.
+6. Perform ROI modeling and, where appropriate, voxel-wise parametric imaging.
+7. Review the plots, fitted parameters, and volumes; export the relevant results.
 
-## Main features
+### Dynamic acquisition plus a late static scan
 
-- Dynamic PET DICOM import
-- Reconstruction of time-resolved Slicer Volume Sequences
-- Frame timing and PET quantitative metadata preservation
-- Optional SUVbw conversion during import
-- Static / whole-body PET metadata support
-- Regional time-activity curve extraction
-- Graphical kinetic modeling
-- Compartment-model fitting
-- Relative/reference-region modeling where supported
-- Voxel-wise parametric imaging
-- DICOM Parametric Map import
-- Dynamic segmentation / RTSTRUCT workflows
-- Integration with Slicer segmentation, subject hierarchy, plotting, DICOM,
-  Sequences, and visualization infrastructure
-- Optional OpenMP acceleration when available
+1. Import both acquisitions, explicitly choosing dPETImporter's optional kinetic-metadata loadable for the static acquisition.
+2. Enable **Multi-timepoint** and select both acquisitions for the same patient.
+3. Assign a segmentation to each acquisition, using **identical ROI names** for the regions to be compared.
+4. Check the acquisition validation message and prepare the selected acquisitions.
+5. Extract the merged ROI TAC, noting the real temporal gap.
+6. Supply an input function covering the required modeling interval before fitting.
+7. If needed, use **Save Multi RTSTRUCTs** to export acquisition-specific segmentation files.
 
----
+### Existing TAC table
 
-## Typical workflow
-
-1. Import a PET study using the **DICOM** module.
-2. Load the dynamic PET acquisition using **dPETImporter** as a Volume Sequence.
-3. Define, import, or load regions of interest.
-4. Extract regional time-activity curves.
-5. Select the desired kinetic-modeling approach and input function.
-6. Perform ROI-level graphical, compartmental, or relative modeling.
-7. Generate voxel-wise parametric images when required.
-8. Review fitted curves, kinetic parameters, and parametric volumes in Slicer.
-9. When applicable, import or export temporal segmentation information using
-   the dynamic RTSTRUCT workflow.
-
----
-
-## Compatibility and validation
-
-SlicerDynamicPET has been developed and **most extensively tested with
-Total-Body dynamic PET data acquired on United Imaging systems**.
-
-Dynamic PET DICOM organization and metadata may differ between scanner
-manufacturers, scanner models, software versions, reconstruction protocols, and
-export configurations. Although dPETImporter is designed to interpret standard
-PET DICOM metadata conservatively, datasets from other systems may expose
-unsupported metadata combinations or assumptions that require adaptation.
-
-Particular care should be taken when interpreting:
-
-- temporal frame identification and ordering;
-- acquisition start times and frame durations;
-- radiopharmaceutical administration time;
-- decay-correction convention;
-- image units and SUV type;
-- injected activity and radionuclide half-life;
-- patient weight;
-- 3D-per-frame versus 2D-slices-per-frame organization;
-- static / whole-body acquisition timing;
-- spatial geometry and DICOM frame-of-reference information.
-
-**Before quantitative analysis, users should verify that the reconstructed frame
-order, frame timing, image units, decay correction, and SUV-related metadata
-match the original acquisition.**
-
-Support for additional vendors and DICOM organizations is very welcome. If a
-dataset is not recognized correctly, produces unexpected timing or quantitative
-metadata, or cannot be loaded, please report it so that the importer can be
-improved.
-
----
-
-## Reporting problems
-
-Please open a GitHub issue if something does not behave as expected.
-
-A useful report should include, when available:
-
-- Slicer version;
-- SlicerDynamicPET version or commit;
-- operating system;
-- scanner manufacturer and model;
-- scanner / reconstruction software version;
-- tracer;
-- whether the acquisition is 3D-per-frame or 2D-slices-per-frame;
-- expected and detected number of temporal frames;
-- image units and decay-correction value;
-- relevant anonymized DICOM metadata;
-- steps required to reproduce the problem;
-- Slicer error log or Python traceback.
-
-### Patient privacy
-
-**Do not upload identifiable clinical DICOM data or protected health
-information to public GitHub issues.**
-
-If a DICOM-reading problem requires an example dataset, use properly anonymized
-data and verify the anonymization before sharing it.
-
----
-
-## Contributing
-
-Contributions, testing, and bug reports are welcome.
-
-In particular, feedback from users working with PET systems, DICOM
-organizations, tracers, and acquisition protocols that have not yet been tested
-with SlicerDynamicPET is valuable.
-
-Contributions may include:
-
-- reports of unsupported DICOM organization or metadata;
-- anonymized test datasets that can legally be shared;
-- fixes for vendor-specific DICOM handling;
-- validation of kinetic-modeling workflows;
-- documentation improvements;
-- bug fixes and new features.
-
----
+1. Select the table-based workflow and load a supported workbook.
+2. Verify observation timing, quantitative units, and supplied statistics/uncertainties.
+3. Configure an appropriate input function and perform supported ROI modeling.
+4. Export the derived tables and fitted curves.
 
 ## Installation
 
 ### Slicer Extensions Manager
 
-SlicerDynamicPET is intended to be distributed through the
-**3D Slicer Extensions Manager**.
+SlicerDynamicPET is intended for distribution through the **3D Slicer Extensions Manager**. Until a compatible public package is available, use a development build.
 
-Once the first public package is available, installation through the Extensions
-Manager will be the recommended method.
+### Source checkout and development build
 
-### Development build
+SlicerDynamicPET includes a compiled C++ loadable module and must be built against a compatible **3D Slicer development/build environment**. The source checkout requires submodules:
 
-SlicerDynamicPET contains a C++ loadable module and therefore must be built
-against a compatible 3D Slicer build.
+```bash
+git clone --recurse-submodules https://github.com/DanieleDallOlio/SlicerDynamicPET.git
+cd SlicerDynamicPET
+```
 
-The source tree contains the main module and bundled components:
+If the repository has already been cloned:
+
+```bash
+git submodule update --init --recursive
+```
+
+Configure with the appropriate Slicer build directory and build using the generator/toolchain compatible with your Slicer installation. For example:
+
+```bash
+cmake -S . -B build -DSlicer_DIR=/path/to/Slicer-build
+cmake --build build --config Release --parallel
+```
+
+The actual `Slicer_DIR`, build generator, compiler, and extension-loading procedure depend on the local Slicer installation and platform. This project is not a standalone Python-only extension: cloning the source code does not itself install the C++ module into an existing Slicer application.
+
+Repository layout:
 
 ```text
 SlicerDynamicPET/
-├── DynamicPET/
-├── KMAP-CPP/
-├── dPETImporter/
-└── dRTImporter/
+|-- DynamicPET/        # Main C++ Slicer module
+|-- KMAP-CPP/          # Kinetic modeling backend (submodule)
+|-- dPETImporter/      # PET DICOM importer (submodule)
+`-- dRTImporter/       # Temporal RTSTRUCT support (submodule)
 ```
 
-KMAP-CPP, dPETImporter, and dRTImporter are maintained as separable components
-and integrated into SlicerDynamicPET for packaging and distribution.
+### Dependencies and optional acceleration
 
----
+- **3D Slicer** and its DICOM, Sequences, Segmentations, plotting, and MRML infrastructure.
+- **SlicerRT** for RT Structure Set/segmentation integration; declared as an extension dependency.
+- **KMAP-CPP**, **dPETImporter**, and **dRTImporter** from the pinned submodules.
+- **OpenMP**, optional for acceleration. The project is designed to build without OpenMP if it cannot be found.
+- The DICOM PM import/export paths use Python **highdicom**; the relevant code can install it on demand when absent. Network access or an already-installed compatible environment may be needed.
 
-## Dependencies
+## Compatibility and validation
 
-- **3D Slicer**
-- **SlicerRT** for dRTImporter / RT Structure Set functionality
-- **OpenMP** is optional and used for acceleration when available
+SlicerDynamicPET has been developed and most extensively exercised with **total-body dynamic PET acquired on United Imaging systems**. DICOM handling may differ between vendors, scanner models, reconstruction packages, and software versions.
 
-DICOM Parametric Map import additionally uses the Python **highdicom** package.
-If it is not already available in the Slicer Python environment, the current
-Parametric Map importer installs its supported highdicom dependency on demand.
+Before quantitative interpretation, independently check:
 
----
+- temporal frame identification, order, start/end times, and frame durations;
+- injected tracer, radionuclide half-life, and administration timestamp;
+- decay-correction convention, PET units, SUV type, weight, and injected dose;
+- voxel geometry, DICOM frame of reference, and segmentation alignment;
+- input-function type, units, parent fraction, and support over the tissue sampling interval;
+- applicability and identifiable parameters of the selected kinetic model;
+- accuracy of exported DICOM objects, ideally by reimporting them.
 
-## OpenMP acceleration
+For whole-body/static PET, individual beds or slices may have different acquisition times. Such acquisitions must not be treated as if every voxel were sampled at one global instant.
 
-SlicerDynamicPET can use **OpenMP** to accelerate computationally intensive
-operations when OpenMP support is available.
+## Reporting problems and contributing
 
-OpenMP is optional. The extension is intended to remain functional without it
-by falling back to serial implementations.
+Issues, documentation improvements, validation datasets that can legally be shared, and contributions for additional DICOM organizations are welcome.
 
----
+When reporting a problem, please include the Slicer and extension versions/commit, operating system, relevant importer and submodule revisions, PET scanner and reconstruction software, tracer, dynamic-frame organization, expected versus detected timing, units, decay-correction convention, reproducible steps, and anonymized logs or DICOM metadata where possible.
+
+**Patient privacy:** Do **not** upload identifiable clinical DICOM files, personal health information, or unverified anonymized clinical data to public GitHub issues.
 
 ## Screenshots
 
 <p align="center">
-  <img src="Screenshots/DynamicPET-main.png" alt="DynamicPET module" width="850">
+  <img src="Screenshots/DynamicPET-main.png" alt="DynamicPET module interface" width="850">
 </p>
 
-Useful additional screenshots for the project documentation may show:
-
-- dynamic PET import through the Slicer DICOM browser;
-- time-activity curves and kinetic fitting;
-- voxel-wise parametric imaging;
-- dynamic segmentation / RTSTRUCT workflows.
-
----
+Additional screenshots of import, TAC analysis, kinetic fitting, parametric imaging, and temporal segmentation workflows are welcome.
 
 ## Architecture
 
 ```text
 SlicerDynamicPET
-├── dPETImporter
-│   └── PET DICOM import, timing/quantitative metadata, Volume Sequences
-│
-├── dRTImporter
-│   └── dynamic RTSTRUCT / temporal segmentation support
-│
-├── DynamicPET
-│   └── user interface, TAC handling, kinetic analysis, parametric imaging
-│
-└── KMAP-CPP
-    └── standalone C++ kinetic-modeling backend
+|-- dPETImporter  : DICOM PET/PM import, metadata, and Volume Sequences
+|-- dRTImporter  : temporal RTSTRUCT import and static/dynamic export helpers
+|-- DynamicPET   : workflow UI, TACs, kinetic analysis, parametric maps
+`-- KMAP-CPP     : reusable standalone C++ kinetic-modeling backend
 ```
 
-The separation between import, analysis, RT structure handling, and kinetic
-modeling allows the individual components to be maintained independently while
-SlicerDynamicPET provides the integrated end-user workflow.
+## Research use, citation, and licensing
 
----
+SlicerDynamicPET is research software and **is not a medical device**. Its results should not replace independently validated clinical software.
 
-## KMAP-CPP and upstream KMAP-C
+A publication specifically describing SlicerDynamicPET will be listed here when available. When using it in scientific work, please also cite **3D Slicer**, the original **KMAP/KMAP-C** work where appropriate, and the publications defining the kinetic models used.
 
-The kinetic-modeling backend used by DynamicPET is
-[KMAP-CPP](https://github.com/DanieleDallOlio/KMAP-CPP).
-
-KMAP-CPP is a maintained C++ derivative of the
-[Open KMAP-C Toolkit](https://github.com/ShareKM/KMAP-C).
-
-The original KMAP-C copyright, authorship, attribution, and MIT licensing are
-preserved in KMAP-CPP.
-
----
-
-## Research use
-
-SlicerDynamicPET is research software under active development.
-
-It is **not a medical device** and is not intended to replace validated
-clinical software. Quantitative results should be independently verified for
-the datasets, tracers, kinetic models, and workflows in which the extension is
-used.
-
----
-
-## Citation
-
-A publication specifically describing SlicerDynamicPET will be added here when
-available.
-
-When using SlicerDynamicPET in scientific work, please also cite **3D Slicer**
-and, where appropriate, the original KMAP work and the methodological
-publications corresponding to the kinetic models used in the analysis.
-
----
-
-## License
-
-Original code developed for SlicerDynamicPET is distributed under the
-**MIT License**.
-
-Third-party and derived components retain their respective copyright and
-license notices. In particular:
-
-- **KMAP-CPP** retains the upstream KMAP-C MIT license and attribution;
-- **3D Slicer** retains its own software license;
-- **SlicerRT** retains its own software license.
-
-See [LICENSE.txt](LICENSE.txt) and the license files of bundled components for details.
-
----
+Original SlicerDynamicPET code is distributed under the **MIT License**; see [LICENSE.txt](LICENSE.txt). Bundled/derived software retains its own license and attribution, including the KMAP-C notices in KMAP-CPP. 3D Slicer and SlicerRT retain their own software licenses.
 
 ## Author
 
@@ -363,20 +216,10 @@ University of Bologna
 - [GitHub](https://github.com/DanieleDallOlio)
 - [University profile](https://www.unibo.it/sitoweb/daniele.dallolio)
 
----
-
 ## Acknowledgments
 
-SlicerDynamicPET is built on the 3D Slicer platform and its MRML, DICOM,
-Sequences, segmentation, plotting, and visualization infrastructure.
+SlicerDynamicPET builds on the 3D Slicer ecosystem and the work of its MRML, DICOM, Sequences, Segmentations, plotting, and SlicerRT contributors.
 
-Thanks to the **Nuclear Medicine team at the Sant'Orsola Hospital in Bologna** for their support, feedback,
-and testing throughout the development of SlicerDynamicPET, and especially to
-**Irene Brusa**.
+Thanks to the **Nuclear Medicine team at the Sant'Orsola Hospital in Bologna** for their support, feedback, and testing, especially **Irene Brusa**.
 
-Dynamic RT Structure Set functionality integrates with the SlicerRT
-infrastructure.
-
-The kinetic-modeling backend builds upon the Open KMAP-C Toolkit. Original
-KMAP-C contributors and the Open Kinetic Modeling Initiative are acknowledged
-for the underlying kinetic-modeling framework.
+The modeling backend derives from the Open KMAP-C Toolkit. The original KMAP-C contributors and the Open Kinetic Modeling Initiative are acknowledged for their work.
